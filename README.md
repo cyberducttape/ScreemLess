@@ -44,7 +44,7 @@ Tells you whether the system is safe to shut down, with evidence.
 
 Collects observations every 1 minute for 24 hours.
 
-## What it collects (Phase 1)
+## What it collects
 
 - **Listening services**: processes listening on ports
 - **Network connections**: established TCP connections to remote services
@@ -52,13 +52,21 @@ Collects observations every 1 minute for 24 hours.
 - **Cron jobs**: scheduled jobs in `/etc/cron.*`
 - **Systemd timers**: systemd timer units
 
+## What it analyzes (Phase 2 — Now included)
+
+- **Dependency inference**: Aggregates observations to identify outbound dependencies with confidence scoring
+- **Temporal pattern detection**: Flags processes seen only once in the observation window
+- **Risk assessment**: Identifies blocking issues, warnings, and informational items
+- **Decommission confidence**: Scores readiness on a 0-100 scale with evidence
+- **7-day observation window**: Captures weekly patterns (cron jobs, backups, etc.)
+
 ## Project Status
 
-**Phase 1**: Basic observability infrastructure. Single snapshots and reports.
+**Phase 1**: ✅ Basic observability infrastructure. Single snapshots and reports.
 
-**Phase 2** (planned): Decommission mode with confidence scoring.
+**Phase 2**: ✅ Dependency inference, confidence scoring, temporal analysis, 7-day observation.
 
-**Phase 3** (planned): Interactive graph visualization with evidence.
+**Phase 3** (planned): Interactive graph visualization with clickable evidence trails.
 
 ## Design principles
 

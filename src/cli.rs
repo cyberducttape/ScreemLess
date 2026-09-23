@@ -23,7 +23,7 @@ pub struct Args {
 pub enum Command {
     /// Start observing a server
     Observe {
-        /// Observation duration (e.g. "1h", "30m", "24h")
+        /// Observation duration (e.g. "1h", "30m", "24h", "7d"). Default: 7d
         #[arg(short, long)]
         duration: Option<String>,
 
@@ -97,7 +97,7 @@ async fn observe(
     duration: Option<String>,
     interval: Option<String>,
 ) -> Result<()> {
-    let duration = parse_duration(&duration.unwrap_or_else(|| "24h".to_string()))?;
+    let duration = parse_duration(&duration.unwrap_or_else(|| "7d".to_string()))?;
     let interval = parse_duration(&interval.unwrap_or_else(|| "1m".to_string()))?;
 
     println!(

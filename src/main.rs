@@ -3,6 +3,7 @@ mod db;
 mod collector;
 mod models;
 mod report;
+mod analysis;
 
 use anyhow::Result;
 use clap::Parser;
