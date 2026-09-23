@@ -70,13 +70,27 @@ Collects observations every 1 minute for 24 hours.
 
 ## Project Status
 
-**Phase 1**: ✅ Basic observability infrastructure. Single snapshots and reports.
+**Phase 1**: ✅ Basic observability infrastructure
+- Single snapshots and reports with process/service/cron/timer collection
 
-**Phase 2**: ✅ Dependency inference, confidence scoring, temporal analysis, 7-day observation.
+**Phase 2**: ✅ Dependency inference and confidence scoring  
+- Network observation aggregation, temporal pattern detection, 7-day window, risk assessment
 
-**Phase 3**: ✅ Configuration scanning, DNS resolution, ASCII graph visualization.
+**Phase 3**: ✅ Configuration scanning and visualization
+- Nginx/PHP-FPM/app config parsing, DNS resolution, ASCII graphs with evidence
 
-**Phase 4** (planned): Interactive HTML dashboard with clickable dependency edges, timeline view of connection patterns.
+**Phase 3 Enhancements**: ✅ Improved config discovery
+- Extended patterns for Django, Node.js, Ruby, etc.
+- Actual config lines captured as evidence
+- Better hostname/URL extraction
+
+**Phase 4**: ✅ Interactive HTML dashboard
+- Beautiful, self-contained HTML reports
+- D3.js force-directed dependency graphs
+- Color-coded readiness assessment
+- No server or deployment needed
+
+**Phase 5** (future): Reverse dependency inference, timeline view, Kubernetes support
 
 ## Design principles
 
@@ -90,9 +104,26 @@ Collects observations every 1 minute for 24 hours.
 ```
 screamless snapshot              Take a single snapshot now
 screamless report [--hostname X] Generate a report from observations
+screamless report --format json  Output JSON for automation
 screamless decommission-check    Check if safe to decommission
-screamless observe --duration X  Observe for X time (e.g. 24h, 1d)
+screamless dashboard             Generate interactive HTML dashboard
+screamless observe --duration 7d Observe for 7 days (default)
 ```
+
+## Dashboard
+
+Generate an interactive HTML report:
+```bash
+screamless dashboard --output report.html
+```
+
+Features:
+- **Real-time readiness score**: Green (ready) / Orange (caution) / Red (not ready)
+- **Interactive dependency graph**: D3.js visualization with drag & zoom
+- **Dependency list**: Each with confidence score and source processes
+- **Risk panel**: Identified issues and warnings
+- **Statistics**: Total dependencies, high-confidence count
+- **Self-contained**: Single HTML file, works offline, can be emailed
 
 ## Database
 
