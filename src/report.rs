@@ -41,7 +41,8 @@ impl<'a> Reporter<'a> {
         println!("{}", GraphRenderer::render_ascii(&analysis, &hostname));
         println!();
 
-        self.print_dependencies(&analysis)?;
+        self.print_outbound_dependencies(&analysis)?;
+        self.print_inbound_dependencies(&analysis)?;
         self.print_risks(&analysis)?;
         self.print_summary(&analysis)?;
 
@@ -121,7 +122,7 @@ impl<'a> Reporter<'a> {
         Ok(())
     }
 
-    fn print_dependencies(&self, analysis: &AnalysisResult) -> Result<()> {
+    fn print_outbound_dependencies(&self, analysis: &AnalysisResult) -> Result<()> {
         if analysis.dependencies.is_empty() {
             println!("OUTBOUND DEPENDENCIES: None detected\n");
             return Ok(());
@@ -176,6 +177,54 @@ impl<'a> Reporter<'a> {
 
         if analysis.dependencies.len() > 15 {
             println!("\n  ... and {} more dependencies", analysis.dependencies.len() - 15);
+        }
+
+        println!();
+        Ok(())
+    }
+
+    fn print_inbound_dependencies(&self, analysis: &AnalysisResult) -> Result<()> {
+        if analysis.inbound_dependencies.is_empty() {
+            println!("INBOUND DEPENDENCIES: None detected\n");
+            return Ok(());
+        }
+
+        println!("INBOUND DEPENDENCIES (What depends on this server? - {} found)", analysis.inbound_dependencies.len());
+
+        for inbound in analysis.inbound_dependencies.iter().take(15) {
+            let severity = match inbound.impact_level {
+                crate::models::ImpactLevel::Critical => "CRITICAL",
+                crate::models::ImpactLevel::High => "HIGH",
+                crate::models::ImpactLevel::Medium => "MEDIUM",
+                crate::models::ImpactLevel::Low => "LOW",
+            };
+
+            println!(
+                "\n  {} ({}:{})",
+                inbound.source_hostname.as_ref().unwrap_or(&inbound.source_ip),
+                inbound.source_ip,
+                severity
+            );
+            println!("  Confidence: {}%", inbound.confidence);
+            println!("  Detection: {}", inbound.detection_methods.join(", "));
+
+            if !inbound.evidence.is_empty() {
+                println!("  Evidence:");
+                for ev in &inbound.evidence {
+                    println!(
+                        "    [{}] {}",
+                        format!("{:?}", ev.level).to_uppercase(),
+                        ev.description
+                    );
+                }
+            }
+        }
+
+        if analysis.inbound_dependencies.len() > 15 {
+            println!(
+                "\n  ... and {} more servers depend on this one",
+                analysis.inbound_dependencies.len() - 15
+            );
         }
 
         println!();

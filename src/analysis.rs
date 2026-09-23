@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use crate::db::Database;
 use crate::models::*;
 use crate::config_scanner::ConfigScanner;
+use crate::reverse_inference::ReverseInference;
 
 pub struct Analyzer<'a> {
     db: &'a Database,
@@ -27,6 +28,7 @@ impl<'a> Analyzer<'a> {
                 total_snapshots: 0,
                 observation_span: (now, now),
                 dependencies: Vec::new(),
+                inbound_dependencies: Vec::new(),
                 observed_processes: HashMap::new(),
                 risks: Vec::new(),
                 decommission_confidence: 0,
@@ -38,6 +40,13 @@ impl<'a> Analyzer<'a> {
 
         let dependencies = self.infer_dependencies(&snapshots)?;
         let observed_processes = self.analyze_process_activity(&snapshots)?;
+
+        // Detect inbound dependencies
+        let inbound_dependencies = ReverseInference::infer_inbound_dependencies(
+            hostname,
+            &vec!["127.0.0.1".to_string()],
+        ).unwrap_or_default();
+
         let risks = self.assess_risks(&snapshots, &dependencies, &observed_processes)?;
         let decommission_confidence = self.calculate_decommission_confidence(
             &snapshots,
@@ -50,6 +59,7 @@ impl<'a> Analyzer<'a> {
             total_snapshots: snapshots.len(),
             observation_span: (first_snap.timestamp, last_snap.timestamp),
             dependencies,
+            inbound_dependencies,
             observed_processes,
             risks,
             decommission_confidence,

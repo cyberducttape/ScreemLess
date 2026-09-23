@@ -62,6 +62,17 @@ pub enum Command {
         output: Option<std::path::PathBuf>,
     },
 
+    /// Map infrastructure dependencies across multiple servers
+    Infrastructure {
+        /// Comma-separated list of servers to analyze
+        #[arg(short, long)]
+        servers: String,
+
+        /// Output format (text, json)
+        #[arg(short, long, default_value = "text")]
+        format: String,
+    },
+
     /// Take a single snapshot
     Snapshot,
 }
@@ -79,6 +90,9 @@ pub async fn run(args: Args) -> Result<()> {
         }
         Command::Dashboard { hostname, output } => {
             dashboard(&args.db, hostname, output)
+        }
+        Command::Infrastructure { servers, format } => {
+            infrastructure(&args.db, servers, format)
         }
         Command::Snapshot => {
             snapshot(&args.db).await
@@ -214,6 +228,69 @@ fn dashboard(db_path: &std::path::Path, hostname: Option<String>, output: Option
 
     println!("Dashboard generated: {}", output_path.display());
     println!("Open in browser to view interactive dependency analysis.");
+
+    Ok(())
+}
+
+fn infrastructure(db_path: &std::path::Path, servers: String, format: String) -> Result<()> {
+    use crate::analysis::Analyzer;
+    use crate::infrastructure::InfrastructureMapper;
+    use std::collections::HashMap;
+
+    let db = Database::new(db_path)?;
+    let analyzer = Analyzer::new(&db);
+
+    let server_list: Vec<&str> = servers.split(',').map(|s| s.trim()).collect();
+    let mut server_analyses = HashMap::new();
+
+    println!("\nAnalyzing {} servers...\n", server_list.len());
+
+    for server in server_list {
+        match analyzer.analyze(server, 168) {
+            Ok(analysis) => {
+                println!("  ✓ {}", server);
+                server_analyses.insert(server.to_string(), (analysis, vec![]));
+            }
+            Err(e) => {
+                eprintln!("  ✗ {}: {}", server, e);
+            }
+        }
+    }
+
+    let chains = InfrastructureMapper::build_full_dependency_graph(&server_analyses);
+    let single_points = InfrastructureMapper::find_single_points_of_failure(&chains);
+    let clusters = InfrastructureMapper::find_dependency_clusters(&chains);
+
+    println!("\n╭──────────────────────────────────────────╮");
+    println!("│   INFRASTRUCTURE DEPENDENCY MAP          │");
+    println!("╰──────────────────────────────────────────╯\n");
+
+    println!("Servers analyzed: {}\n", server_analyses.len());
+
+    if !single_points.is_empty() {
+        println!("⚠️  SINGLE POINTS OF FAILURE:");
+        for server in single_points {
+            println!("  ✗ {} (shutdown would impact multiple services)", server);
+        }
+        println!();
+    }
+
+    if !clusters.is_empty() {
+        println!("DEPENDENCY CLUSTERS:");
+        for (i, cluster) in clusters.iter().enumerate() {
+            println!("  Cluster {}: {} servers", i + 1, cluster.len());
+            for server in cluster.iter().take(5) {
+                println!("    - {}", server);
+            }
+            if cluster.len() > 5 {
+                println!("    - ... and {} more", cluster.len() - 5);
+            }
+        }
+    }
+
+    if format == "json" {
+        println!("\n{}", serde_json::to_string_pretty(&server_analyses)?);
+    }
 
     Ok(())
 }

@@ -47,6 +47,37 @@ pub struct ServiceInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InboundDependency {
+    pub source_ip: String,
+    pub source_hostname: Option<String>,
+    pub confidence: u8,
+    pub evidence: Vec<Evidence>,
+    pub detection_methods: Vec<String>,
+    pub impact_level: ImpactLevel,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ImpactLevel {
+    #[serde(rename = "CRITICAL")]
+    Critical,
+    #[serde(rename = "HIGH")]
+    High,
+    #[serde(rename = "MEDIUM")]
+    Medium,
+    #[serde(rename = "LOW")]
+    Low,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServerDependencyChain {
+    pub server_name: String,
+    pub outbound_deps: Vec<Dependency>,
+    pub inbound_deps: Vec<InboundDependency>,
+    pub total_impact: u8,
+    pub is_single_point_of_failure: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Dependency {
     pub remote_addr: String,
     pub remote_port: u16,
@@ -85,6 +116,7 @@ pub struct AnalysisResult {
     pub total_snapshots: usize,
     pub observation_span: (DateTime<Utc>, DateTime<Utc>),
     pub dependencies: Vec<Dependency>,
+    pub inbound_dependencies: Vec<InboundDependency>,
     pub observed_processes: HashMap<String, ProcessActivity>,
     pub risks: Vec<RiskAssessment>,
     pub decommission_confidence: u8,

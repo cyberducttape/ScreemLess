@@ -7,6 +7,8 @@ mod analysis;
 mod config_scanner;
 mod graph;
 mod dashboard;
+mod reverse_inference;
+mod infrastructure;
 
 use anyhow::Result;
 use clap::Parser;
