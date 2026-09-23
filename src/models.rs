@@ -34,6 +34,16 @@ pub struct ConfigReference {
     pub hostname: String,
     pub port: Option<u16>,
     pub context: String,
+    pub config_line: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceInfo {
+    pub name: String,
+    pub app_type: String,
+    pub version: Option<String>,
+    pub listening_ports: Vec<u16>,
+    pub config_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

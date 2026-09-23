@@ -6,6 +6,7 @@ use tokio::time::{self, Duration};
 use crate::collector::Collector;
 use crate::db::Database;
 use crate::report::Reporter;
+use crate::analysis::Analyzer;
 
 #[derive(Parser)]
 #[command(name = "screamless")]
@@ -50,6 +51,17 @@ pub enum Command {
         hostname: Option<String>,
     },
 
+    /// Generate interactive HTML dashboard
+    Dashboard {
+        /// Hostname to analyze
+        #[arg(long)]
+        hostname: Option<String>,
+
+        /// Output file path (default: ./screamless-dashboard.html)
+        #[arg(short, long)]
+        output: Option<std::path::PathBuf>,
+    },
+
     /// Take a single snapshot
     Snapshot,
 }
@@ -64,6 +76,9 @@ pub async fn run(args: Args) -> Result<()> {
         }
         Command::DecommissionCheck { hostname } => {
             decommission_check(&args.db, hostname)
+        }
+        Command::Dashboard { hostname, output } => {
+            dashboard(&args.db, hostname, output)
         }
         Command::Snapshot => {
             snapshot(&args.db).await
@@ -173,6 +188,34 @@ fn parse_duration(s: &str) -> Result<Duration> {
     };
 
     Ok(duration)
+}
+
+fn dashboard(db_path: &std::path::Path, hostname: Option<String>, output: Option<std::path::PathBuf>) -> Result<()> {
+    use crate::analysis::Analyzer;
+    use crate::graph::GraphRenderer;
+
+    let db = Database::new(db_path)?;
+    let analyzer = Analyzer::new(&db);
+
+    let hostname = if let Some(h) = hostname {
+        h
+    } else {
+        std::fs::read_to_string("/etc/hostname")
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|_| "localhost".to_string())
+    };
+
+    let analysis = analyzer.analyze(&hostname, 168)?;
+
+    let output_path = output.unwrap_or_else(|| std::path::PathBuf::from("screamless-dashboard.html"));
+
+    let html = crate::dashboard::render_dashboard(&hostname, &analysis)?;
+    std::fs::write(&output_path, html)?;
+
+    println!("Dashboard generated: {}", output_path.display());
+    println!("Open in browser to view interactive dependency analysis.");
+
+    Ok(())
 }
 
 fn format_duration(d: Duration) -> String {

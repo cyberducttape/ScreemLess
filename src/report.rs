@@ -151,7 +151,12 @@ impl<'a> Reporter<'a> {
             if !dep.config_references.is_empty() {
                 println!("  Found in configuration:");
                 for cfg in dep.config_references.iter().take(3) {
-                    println!("    - {} ({})", cfg.file_path, cfg.context);
+                    if let Some(ref line) = cfg.config_line {
+                        println!("    - {} [{}]", cfg.file_path, cfg.context);
+                        println!("      Value: {}", line);
+                    } else {
+                        println!("    - {} ({})", cfg.file_path, cfg.context);
+                    }
                 }
                 if dep.config_references.len() > 3 {
                     println!("    - ... and {} more", dep.config_references.len() - 3);

@@ -6,6 +6,7 @@ mod report;
 mod analysis;
 mod config_scanner;
 mod graph;
+mod dashboard;
 
 use anyhow::Result;
 use clap::Parser;

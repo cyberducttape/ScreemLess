@@ -69,6 +69,7 @@ impl ConfigScanner {
                                 hostname,
                                 port,
                                 context: "nginx upstream".to_string(),
+                        config_line: None,
                             });
                         }
                     }
@@ -87,6 +88,7 @@ impl ConfigScanner {
                         hostname,
                         port,
                         context: "proxy_pass".to_string(),
+                        config_line: None,
                     });
                 }
             }
@@ -138,6 +140,7 @@ impl ConfigScanner {
                                 hostname,
                                 port,
                                 context: "PHP-FPM listen".to_string(),
+                        config_line: None,
                             });
                         }
                     }
@@ -158,6 +161,11 @@ impl ConfigScanner {
             "/opt/*/config.yaml",
             "/opt/*/config.json",
             "/etc/app/config.ini",
+            "/app/.env",
+            "/app/config/*.yaml",
+            "/app/config/*.yml",
+            "/srv/*/config.yaml",
+            "/home/*/app/.env",
         ];
 
         for pattern in config_patterns {
@@ -177,57 +185,61 @@ impl ConfigScanner {
         let mut refs = Vec::new();
 
         let db_host_re = Regex::new(
-            "(?mi)(?:DB_HOST|db_host|database\\.host|mysql\\.host|postgres\\.host)\\s*=\\s*[\"']?([^\\s;]+)"
+            "(?mi)(?:DB_HOST|db_host|database\\.host|mysql\\.host|postgres\\.host|DATABASES.*host)\\s*[=:]\\s*[\"']?([^\\s;,\"'\\n}]+)"
         )?;
         let redis_re = Regex::new(
-            "(?mi)(?:REDIS_HOST|redis\\.host|cache\\.redis)\\s*=\\s*[\"']?([^\\s;]+)"
+            "(?mi)(?:REDIS_HOST|CACHE_URL|redis\\.host|cache\\.redis)\\s*[=:]\\s*[\"']?([^\\s;,\"'\\n}]+)"
         )?;
         let api_re = Regex::new(
-            "(?mi)(?:API_URL|api_url|api\\.base|api\\.endpoint)\\s*=\\s*[\"']?([^\\s;]+)",
+            "(?mi)(?:API_URL|api_url|api\\.base|api\\.endpoint|SERVICE_URL)\\s*[=:]\\s*[\"']?([^\\s;,\"'\\n}]+)",
+        )?;
+        let es_re = Regex::new(
+            "(?mi)(?:ELASTICSEARCH|ELASTIC_URL|SEARCH_HOST)\\s*[=:]\\s*[\"']?([^\\s;,\"'\\n}]+)"
         )?;
 
-        for caps in db_host_re.captures_iter(content) {
-            if let Some(host) = caps.get(1) {
-                let hostname = host.as_str().to_string();
-                if Self::is_valid_hostname(&hostname) {
-                    refs.push(ConfigReference {
-                        file_path: path.display().to_string(),
-                        hostname,
-                        port: Some(3306),
-                        context: "Database host".to_string(),
-                    });
-                }
-            }
-        }
+        let patterns = vec![
+            (db_host_re, "Database host", Some(3306)),
+            (redis_re, "Cache/Redis host", Some(6379)),
+            (api_re, "API endpoint", None),
+            (es_re, "Elasticsearch host", Some(9200)),
+        ];
 
-        for caps in redis_re.captures_iter(content) {
-            if let Some(host) = caps.get(1) {
-                let hostname = host.as_str().to_string();
-                if Self::is_valid_hostname(&hostname) {
-                    refs.push(ConfigReference {
-                        file_path: path.display().to_string(),
-                        hostname,
-                        port: Some(6379),
-                        context: "Redis host".to_string(),
-                    });
-                }
-            }
-        }
+        for (re, context, default_port) in patterns {
+            for caps in re.captures_iter(content) {
+                if let Some(host_match) = caps.get(1) {
+                    let host_str = host_match.as_str().trim_matches(|c: char| c == '"' || c == '\'' || c == ' ');
 
-        for caps in api_re.captures_iter(content) {
-            if let Some(url_str) = caps.get(1) {
-                if let Ok(parsed) = url::Url::parse(url_str.as_str()) {
-                    if let Some(host) = parsed.host_str() {
-                        let hostname = host.to_string();
-                        let port = parsed.port();
-                        if Self::is_valid_hostname(&hostname) {
-                            refs.push(ConfigReference {
-                                file_path: path.display().to_string(),
-                                hostname,
-                                port,
-                                context: "API endpoint".to_string(),
-                            });
+                    if host_str.starts_with("http://") || host_str.starts_with("https://") {
+                        if let Ok(parsed) = url::Url::parse(host_str) {
+                            if let Some(host) = parsed.host_str() {
+                                let hostname = host.to_string();
+                                let port = parsed.port().or(default_port);
+                                if Self::is_valid_hostname(&hostname) {
+                                    refs.push(ConfigReference {
+                                        file_path: path.display().to_string(),
+                                        hostname,
+                                        port,
+                                        context: context.to_string(),
+                                        config_line: Some(host_str.to_string()),
+                                    });
+                                }
+                            }
                         }
+                    } else if Self::is_valid_hostname(host_str) {
+                        let port = if host_str.contains(':') {
+                            host_str.split(':').last().and_then(|p| p.parse().ok())
+                        } else {
+                            default_port
+                        };
+
+                        let hostname = host_str.split(':').next().unwrap_or(host_str).to_string();
+                        refs.push(ConfigReference {
+                            file_path: path.display().to_string(),
+                            hostname,
+                            port,
+                            context: context.to_string(),
+                            config_line: Some(host_str.to_string()),
+                        });
                     }
                 }
             }
@@ -277,6 +289,7 @@ impl ConfigScanner {
                         hostname: val_str.to_string(),
                         port: None,
                         context: format!("Environment: {}", key_str),
+                        config_line: None,
                     });
                 }
             }
@@ -317,6 +330,7 @@ impl ConfigScanner {
                         hostname: addr_str.to_string(),
                         port: Some(3306),
                         context: "Database bind address".to_string(),
+                        config_line: None,
                     });
                 }
             }
