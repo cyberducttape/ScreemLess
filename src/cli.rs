@@ -73,6 +73,17 @@ pub enum Command {
         format: String,
     },
 
+    /// Pre-flight safety check before deployment
+    Preflight {
+        /// Hostname to check
+        #[arg(short, long)]
+        server: String,
+
+        /// Operation to validate (restart, update, shutdown)
+        #[arg(short, long)]
+        operation: String,
+    },
+
     /// Take a single snapshot
     Snapshot,
 }
@@ -93,6 +104,9 @@ pub async fn run(args: Args) -> Result<()> {
         }
         Command::Infrastructure { servers, format } => {
             infrastructure(&args.db, servers, format)
+        }
+        Command::Preflight { server, operation } => {
+            preflight(&args.db, server, operation)
         }
         Command::Snapshot => {
             snapshot(&args.db).await
@@ -290,6 +304,90 @@ fn infrastructure(db_path: &std::path::Path, servers: String, format: String) ->
 
     if format == "json" {
         println!("\n{}", serde_json::to_string_pretty(&server_analyses)?);
+    }
+
+    Ok(())
+}
+
+fn preflight(db_path: &std::path::Path, server: String, operation: String) -> Result<()> {
+    use crate::analysis::Analyzer;
+
+    let db = Database::new(db_path)?;
+    let analyzer = Analyzer::new(&db);
+    let analysis = analyzer.analyze(&server, 168)?;
+
+    println!("\n╭──────────────────────────────────────────╮");
+    println!("│   PREFLIGHT SAFETY CHECK                 │");
+    println!("╰──────────────────────────────────────────╯\n");
+
+    println!("Server: {}", server);
+    println!("Operation: {}\n", operation);
+
+    let mut safe = true;
+    let mut warnings = Vec::new();
+
+    match operation.as_str() {
+        "restart" | "reboot" => {
+            if !analysis.inbound_dependencies.is_empty() {
+                warnings.push(format!(
+                    "{} servers depend on this one (will lose connectivity during restart)",
+                    analysis.inbound_dependencies.len()
+                ));
+                safe = false;
+            }
+            if analysis.decommission_confidence < 70 {
+                warnings.push("Active dependencies detected, restart may cause issues".to_string());
+                safe = false;
+            }
+        }
+        "update" => {
+            if !analysis.dependencies.is_empty() {
+                let high_conf = analysis.dependencies.iter().filter(|d| d.confidence >= 70).count();
+                if high_conf > 0 {
+                    warnings.push(format!(
+                        "{} high-confidence external dependencies",
+                        high_conf
+                    ));
+                }
+            }
+        }
+        "shutdown" => {
+            if !analysis.inbound_dependencies.is_empty() {
+                warnings.push(format!(
+                    "CRITICAL: {} servers depend on this one",
+                    analysis.inbound_dependencies.len()
+                ));
+                safe = false;
+            }
+            if !analysis.dependencies.is_empty() {
+                warnings.push(format!(
+                    "This server depends on {} external services",
+                    analysis.dependencies.len()
+                ));
+            }
+        }
+        _ => {
+            println!("Unknown operation: {}", operation);
+        }
+    }
+
+    if safe {
+        println!("✅ SAFE TO PROCEED\n");
+        println!("No blocking issues detected for this operation.");
+    } else {
+        println!("⚠️  PROCEED WITH CAUTION\n");
+        println!("Issues identified:");
+        for warning in &warnings {
+            println!("  - {}", warning);
+        }
+        println!();
+    }
+
+    if !warnings.is_empty() && !safe {
+        println!("Recommendations:");
+        println!("  1. Notify dependent systems");
+        println!("  2. Plan maintenance window");
+        println!("  3. Have rollback plan");
     }
 
     Ok(())
