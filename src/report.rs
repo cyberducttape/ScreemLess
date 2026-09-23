@@ -3,6 +3,7 @@ use serde_json::json;
 use crate::db::Database;
 use crate::models::*;
 use crate::analysis::Analyzer;
+use crate::graph::GraphRenderer;
 
 pub struct Reporter<'a> {
     db: &'a Database,
@@ -35,6 +36,10 @@ impl<'a> Reporter<'a> {
             analysis.observation_span.1.format("%Y-%m-%d %H:%M:%S UTC")
         );
         println!("SNAPSHOTS: {}\n", analysis.total_snapshots);
+
+        println!("DEPENDENCY GRAPH");
+        println!("{}", GraphRenderer::render_ascii(&analysis, &hostname));
+        println!();
 
         self.print_dependencies(&analysis)?;
         self.print_risks(&analysis)?;
@@ -125,7 +130,13 @@ impl<'a> Reporter<'a> {
         println!("OUTBOUND DEPENDENCIES ({} found)", analysis.dependencies.len());
 
         for dep in analysis.dependencies.iter().take(15) {
-            println!("\n  {}:{}", dep.remote_addr, dep.remote_port);
+            let display_name = if let Some(ref hostname) = dep.hostname {
+                format!("{} ({})", hostname, dep.remote_addr)
+            } else {
+                dep.remote_addr.clone()
+            };
+
+            println!("\n  {}:{}", display_name, dep.remote_port);
             println!("  Confidence: {}%", dep.confidence);
             println!("  Connections: {} (first: {}, last: {})",
                 dep.connection_count,
@@ -135,6 +146,16 @@ impl<'a> Reporter<'a> {
 
             if !dep.processes.is_empty() {
                 println!("  Processes: {}", dep.processes.join(", "));
+            }
+
+            if !dep.config_references.is_empty() {
+                println!("  Found in configuration:");
+                for cfg in dep.config_references.iter().take(3) {
+                    println!("    - {} ({})", cfg.file_path, cfg.context);
+                }
+                if dep.config_references.len() > 3 {
+                    println!("    - ... and {} more", dep.config_references.len() - 3);
+                }
             }
 
             if !dep.evidence.is_empty() {

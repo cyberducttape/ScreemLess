@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::db::Database;
 use crate::models::*;
+use crate::config_scanner::ConfigScanner;
 
 pub struct Analyzer<'a> {
     db: &'a Database,
@@ -72,6 +73,9 @@ impl<'a> Analyzer<'a> {
             }
         }
 
+        let config_refs = ConfigScanner::scan().unwrap_or_default();
+        let ip_to_hostname = self.build_ip_to_hostname_map(snapshots);
+
         let mut dependencies = Vec::new();
 
         for ((remote_addr, remote_port), observations) in remote_hosts {
@@ -114,6 +118,30 @@ impl<'a> Analyzer<'a> {
                 });
             }
 
+            let config_references = config_refs
+                .iter()
+                .filter(|cr| {
+                    (cr.hostname == remote_addr || cr.port == Some(remote_port))
+                        || cr.hostname.split('.').last() == remote_addr.split('.').last()
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+
+            if !config_references.is_empty() {
+                evidence.push(Evidence {
+                    level: EvidenceLevel::Med,
+                    description: format!("Found in {} config files", config_references.len()),
+                });
+            }
+
+            let hostname = ip_to_hostname.get(&remote_addr).cloned();
+            if hostname.is_some() {
+                evidence.push(Evidence {
+                    level: EvidenceLevel::Med,
+                    description: "Resolved hostname from DNS".to_string(),
+                });
+            }
+
             let confidence = Self::calculate_confidence(&evidence);
 
             dependencies.push(Dependency {
@@ -126,6 +154,8 @@ impl<'a> Analyzer<'a> {
                 processes: all_processes.into_iter().collect(),
                 confidence,
                 evidence,
+                config_references,
+                hostname,
             });
         }
 
@@ -245,6 +275,20 @@ impl<'a> Analyzer<'a> {
         let max_score = (evidence.len() as u8) * 3;
 
         ((total_score as u16 * 100) / max_score as u16) as u8
+    }
+
+    fn build_ip_to_hostname_map(&self, snapshots: &[ObservationSnapshot]) -> HashMap<String, String> {
+        let mut map = HashMap::new();
+
+        for snapshot in snapshots {
+            for dns in &snapshot.dns_names {
+                for ip in &dns.ip_addresses {
+                    map.insert(ip.clone(), dns.hostname.clone());
+                }
+            }
+        }
+
+        map
     }
 
     fn calculate_decommission_confidence(

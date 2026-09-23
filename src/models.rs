@@ -29,6 +29,14 @@ impl EvidenceLevel {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigReference {
+    pub file_path: String,
+    pub hostname: String,
+    pub port: Option<u16>,
+    pub context: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Dependency {
     pub remote_addr: String,
     pub remote_port: u16,
@@ -39,6 +47,8 @@ pub struct Dependency {
     pub processes: Vec<String>,
     pub confidence: u8,
     pub evidence: Vec<Evidence>,
+    pub config_references: Vec<ConfigReference>,
+    pub hostname: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

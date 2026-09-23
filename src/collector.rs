@@ -3,8 +3,10 @@ use chrono::Utc;
 use std::fs;
 use std::process::Command;
 use std::collections::HashMap;
+use std::net::IpAddr;
 
 use crate::models::*;
+use crate::config_scanner::ConfigScanner;
 
 pub struct Collector;
 
@@ -21,7 +23,7 @@ impl Collector {
             processes: Self::collect_processes()?,
             cron_jobs: Self::collect_cron_jobs()?,
             systemd_timers: Self::collect_systemd_timers()?,
-            dns_names: Vec::new(),
+            dns_names: Self::collect_dns_names()?,
         })
     }
 
@@ -261,5 +263,37 @@ impl Collector {
         }
 
         Ok(map)
+    }
+
+    fn collect_dns_names() -> Result<Vec<DnsName>> {
+        let mut names = Vec::new();
+
+        let config_refs = ConfigScanner::scan().unwrap_or_default();
+        let timestamp = Utc::now();
+
+        let mut seen = std::collections::HashSet::new();
+
+        for config_ref in config_refs {
+            if seen.insert(config_ref.hostname.clone()) {
+                use std::net::ToSocketAddrs;
+
+                let ip_addresses = match format!("{}:80", config_ref.hostname)
+                    .to_socket_addrs()
+                {
+                    Ok(addrs) => addrs
+                        .map(|addr| addr.ip().to_string())
+                        .collect(),
+                    Err(_) => vec![],
+                };
+
+                names.push(DnsName {
+                    hostname: config_ref.hostname,
+                    ip_addresses,
+                    timestamp,
+                });
+            }
+        }
+
+        Ok(names)
     }
 }

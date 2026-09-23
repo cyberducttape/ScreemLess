@@ -4,6 +4,8 @@ mod collector;
 mod models;
 mod report;
 mod analysis;
+mod config_scanner;
+mod graph;
 
 use anyhow::Result;
 use clap::Parser;
