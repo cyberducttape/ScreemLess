@@ -52,13 +52,21 @@ Collects observations every 1 minute for 24 hours.
 - **Cron jobs**: scheduled jobs in `/etc/cron.*`
 - **Systemd timers**: systemd timer units
 
-## What it analyzes (Phase 2 — Now included)
+## What it analyzes
 
+**Phase 2**: Dependency inference & confidence scoring
 - **Dependency inference**: Aggregates observations to identify outbound dependencies with confidence scoring
 - **Temporal pattern detection**: Flags processes seen only once in the observation window
 - **Risk assessment**: Identifies blocking issues, warnings, and informational items
 - **Decommission confidence**: Scores readiness on a 0-100 scale with evidence
 - **7-day observation window**: Captures weekly patterns (cron jobs, backups, etc.)
+
+**Phase 3**: Configuration scanning & visualization
+- **Config file parsing**: Scans nginx configs, PHP-FPM, WordPress, app configs for hardcoded hostnames
+- **Evidence trails**: Shows which config files mention a dependency
+- **DNS resolution**: Resolves hostnames found in configs to IPs
+- **ASCII graph visualization**: Dependency tree showing local server → remote services
+- **Confidence scoring**: Network observations + config references = trustworthy decisions
 
 ## Project Status
 
@@ -66,7 +74,9 @@ Collects observations every 1 minute for 24 hours.
 
 **Phase 2**: ✅ Dependency inference, confidence scoring, temporal analysis, 7-day observation.
 
-**Phase 3** (planned): Interactive graph visualization with clickable evidence trails.
+**Phase 3**: ✅ Configuration scanning, DNS resolution, ASCII graph visualization.
+
+**Phase 4** (planned): Interactive HTML dashboard with clickable dependency edges, timeline view of connection patterns.
 
 ## Design principles
 
