@@ -38,7 +38,7 @@ Gives a readiness score (0-100%).
 ### "Can we shut down web-old-03?"
 ```bash
 screamless decommission-check --hostname web-old-03
-# Output: 92% ready, no dependencies detected
+# Output: a readiness assessment; an empty result is not proof of no dependencies
 ```
 
 ### "Is it safe to restart db01 right now?"
@@ -47,10 +47,10 @@ screamless preflight --server db01 --operation restart
 # Output: ⚠️ 15 servers depend on this, plan maintenance window
 ```
 
-### "Map our entire infrastructure"
+### "Review observed infrastructure relationships"
 ```bash
 screamless infrastructure --servers web01,web02,db01,cache01,backup01
-# Output: Shows single points of failure, clusters, dependencies
+# Output: Shows observed relationships and potential single points of failure
 ```
 
 ### "Generate a shareable report"
@@ -61,9 +61,11 @@ screamless dashboard --output infrastructure-report.html
 
 ## Multi-Server Observation
 
-For best results (catches all dependencies):
+For best results, run the collector on each relevant host. This command
+observes only the local host; there is no built-in remote collection or
+multi-host ingest:
 ```bash
-# Observe for 7 days (default)
+# Observe for up to 7 days (default)
 screamless observe
 # Let it run, or run in background:
 screamless observe &
@@ -72,15 +74,21 @@ screamless observe &
 ## Understanding Output
 
 ### Confidence Scores
-- **95-100%**: Very high confidence (many observations or config reference)
-- **80-94%**: High confidence (consistent observations)
-- **60-79%**: Medium confidence (some evidence)
-- **Below 60%**: Low confidence (needs more observation)
+- Scores summarize the evidence collected; they are not probabilities.
+- An **OBSERVED** relationship is based on a socket seen by the local
+  collector.
+- A **DECLARED** relationship is supporting configuration evidence and does
+  not prove that traffic occurred.
+- **UNKNOWN** means a required probe was unavailable, permission restricted,
+  or the observation window was inadequate.
+- A low or empty result is not proof that no dependency exists.
 
 ### Readiness Score
-- **80-100%**: READY for decommission/change
-- **50-79%**: CAUTION - has outstanding items
-- **Below 50%**: NOT READY - blocking issues exist
+- **80-100%**: no current blocker was found in the available evidence
+- **50-79%**: caution; outstanding items require review
+- **Below 50%**: blocking issues were found
+- Any incomplete required probe produces an insufficient-evidence result and
+  should be reviewed before treating a change as safe.
 
 ### Impact Levels
 - **CRITICAL**: Will break immediately if this server goes down
@@ -135,10 +143,10 @@ screamless preflight --server app01 --operation update --json
 
 ## Next Steps
 
-1. **Read the full README** for comprehensive feature list
-2. **Try the dashboard** for interactive visualization
-3. **Share reports** with your infrastructure team
-4. **Integrate with CI/CD** for automated safety gates
+1. **Read the full README** for scope and limitations
+2. **Try the dashboard** for local interactive visualization
+3. **Share reports** with their probe status and observation window
+4. **Integrate with CI/CD** only after defining how insufficient evidence is handled
 
 ## Support
 

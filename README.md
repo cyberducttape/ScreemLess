@@ -20,13 +20,13 @@ Most servers have **no documentation**. You inherit them. Nobody knows why they 
 
 ## The Solution: Screamless
 
-**Automatic dependency archaeology.** In 7 days of passive observation, Screamless tells you:
+**Experimental dependency archaeology.** During a passive observation window, Screamless can show:
 
 1. **What this server connects to** (outbound dependencies)
 2. **What connects to this server** (inbound dependencies) 
-3. **Confidence scores for each** (with evidence)
+3. **Evidence and confidence for each** (with data-quality warnings)
 4. **Impact if you shut it down** (cascade analysis)
-5. **Single points of failure** (across your infrastructure)
+5. **Potential single points of failure** (among observed hosts)
 
 ## Quick Start
 
@@ -57,14 +57,14 @@ cargo build --release
 Web server connects to:
   db01:3306           94% confidence (42 connections, nginx process, wp-config.php reference)
   redis01:6379        87% confidence (15 connections, php-fpm process)
-  api.vendor.com:443  61% confidence (2 connections, config reference only)
+  api.vendor.com:443  61% confidence (2 observed connections; config evidence is supporting context)
 ```
 
 ### Inbound Dependencies  
 ```
 These servers depend on THIS one:
   web01        95% confidence (observed outbound connections to this server)
-  monitor01    92% confidence (observed outbound connections to this server)
+  monitor01    92% confidence (observed outbound connections to this server in the shared database)
 ```
 
 Process activity counts snapshots in which a process was observed; it does not claim to count process executions. Cron discovery parses schedules from system and user crontabs, while command bodies are redacted and job activity is not inferred.
@@ -94,9 +94,9 @@ Cascade risk: MEDIUM (2 systems lose access, 1 degrades)
 | Configuration scanning | ✅ Phase 3 |
 | DNS resolution | ✅ Phase 3 |
 | ASCII dependency graphs | ✅ Phase 3 |
-| Interactive HTML dashboard | ✅ Phase 4 |
+| Interactive HTML dashboard | ✅ Phase 4 (local data only) |
 | **Reverse dependency detection** | ✅ Phase 5 |
-| **Infrastructure-wide mapping** | ✅ Phase 5 |
+| **Snapshot-database mapping** | ✅ Phase 5 (requires local data from each host) |
 | Pre-flight safety checks | ✅ Phase 7 |
 | Cascade failure analysis | ✅ Phase 5 |
 
@@ -124,13 +124,13 @@ screamless infrastructure --servers db01,web01,cache01    # Map all dependencies
 ```bash
 screamless observe --duration 7d
 screamless decommission-check
-# Output: "READY (85%). Observed no external dependencies."
+# Output: a readiness assessment, or UNKNOWN when required evidence is incomplete
 ```
 
 ### 2. **Before a Deployment**
 ```bash
 screamless preflight --server nginx01 --operation update
-# Output: "✅ SAFE. No dependent servers detected."
+# Output: a safety result; incomplete evidence is non-zero and must be reviewed
 ```
 
 ### 3. **Incident Response**
@@ -143,7 +143,7 @@ screamless infrastructure --servers prod-db01
 ### 4. **Infrastructure Planning**
 ```bash
 screamless infrastructure --servers web01,web02,web03,db01,cache01
-# Shows: single points of failure, consolidation opportunities
+# Shows: observed relationships and potential single points of failure
 ```
 
 ### 5. **Compliance/Audit**
@@ -165,28 +165,35 @@ Polling is a fallback observation method and can miss very short-lived connectio
 ### Inbound Detection
 Screamless derives inbound dependencies by reversing observed outbound edges from the other hosts in the database. If `web01` is observed connecting to `db01:3306`, the topology records `web01` as a dependent of `db01`. Local DNS records, access-log IPs, Git remotes, SSH configuration, and mount configuration are not treated as server-to-server inbound dependencies.
 
-Each detection method provides evidence. More evidence = higher confidence.
+Each relationship should be read by evidence class:
+
+- **OBSERVED**: a socket observation from a collector. This is the strongest current evidence, but polling can miss short-lived traffic.
+- **DECLARED**: a configuration reference that matches a host or address and compatible port. It is supporting evidence, not proof of traffic.
+- **INFERRED**: a heuristic hint such as log, DNS, or access information. Current inbound topology is deliberately based on reversed observed edges instead.
+- **UNKNOWN**: a probe failed, permissions were insufficient, or the observation window was inadequate. Unknown is not equivalent to no dependency.
+
+Confidence is a summary of available evidence and data quality; it is not a probability that a dependency exists.
 
 ### Impact Analysis
 - **Cascade detection**: "If I shut down, these servers lose access, those degrade"
-- **Single point of failure**: "13 systems have no alternative if I'm gone"
+- **Single point of failure**: highlights observed inbound edges without claiming complete topology
 - **Cluster mapping**: "These 8 services always work together"
 
-## The Legendary Advantage
+## What This Prototype Does Well
 
-Screamless is **legendary** because:
+Screamless is useful when treated as an evidence collector:
 
 ✅ **Solves the real problem**: Not "detect services," but "what breaks if I change this?"
 
 ✅ **Evidence-based**: Every claim shows WHY we think it's true
 
-✅ **Fast**: 7-day observation, not months of documentation
+✅ **Fast**: a lightweight polling collector, not a complete network tap
 
 ✅ **Safe**: Color-coded confidence, clear risk levels
 
-✅ **Shareable**: Single HTML file, works offline
+✅ **Shareable**: Single HTML file with no CDN runtime dependency
 
-✅ **Truthful**: Finds actual dependencies, not guesses
+✅ **Conservative**: separates observed network evidence from supporting hints
 
 ## Installation
 
@@ -198,7 +205,7 @@ cd screamless
 # Build
 cargo build --release
 
-# Deploy (literally one binary)
+# Deploy the binary to the host being observed
 scp target/release/screamless root@server:/usr/local/bin/
 ssh root@server screamless observe --duration 7d
 ssh root@server screamless report
@@ -206,21 +213,21 @@ ssh root@server screamless report
 
 ## Why It Matters
 
-In 2026, most infrastructure is undocumented. Screamless fixes that by being **observational, not declarative**.
+In 2026, most infrastructure is undocumented. Screamless provides local observational evidence, but it does not replace an event-driven network sensor or a central multi-host ingest service.
 
 - No config files to maintain
-- Collectors inspect the local host; multi-server graphs require snapshots from each host to be present in the analyzed database
-- No learning curve
+- Collectors inspect only the local host; the infrastructure command cannot collect remote hosts and requires their snapshots to already be in the same database
+- Polling can miss short-lived TCP/UDP activity
 - Configuration evidence is matched by hostname/IP and compatible port, not by port alone
 
-A single command gives you the truth about your servers.
+A report is a starting point for validation, not proof that no dependency exists.
 
 ## Project Status
 
-**Production-ready.** All 5 phases complete.
+**Prototype / experimental.** The collection and analysis paths are useful for investigation, but this is not a production safety oracle.
 
 - Phase 1-4: Foundational observability and dashboards
-- Phase 5: Reverse dependency inference (the legendary feature)
+- Phase 5: Reverse observed outbound edges for inbound reporting
 - Phases 6-7: Infrastructure mapping and automation
 
 ## Example Output
@@ -234,22 +241,26 @@ Server: legacy-web-03
 Observation: 7 days (168 snapshots)
 Readiness: 92%
 
-✓ READY FOR DECOMMISSION
+  ? INSUFFICIENT EVIDENCE
 
 OUTBOUND DEPENDENCIES:
   None detected
 
 INBOUND DEPENDENCIES:
-  None detected (no other servers depend on this)
+  None observed (this does not prove that no other servers depend on this)
 
 RISKS:
   ⚠️ 47 scheduled jobs configured
   ℹ️ Old PHP 5.6 observed during the window
 
 RECOMMENDATION:
-  Safe to decommission. Notify DNS team to remove DNS entries.
-  Keep backup of config for 30 days.
+  Validate with service owners and independent telemetry before decommissioning.
+  Keep a backup of configuration and evidence.
 ```
+
+## Security and Contributing
+
+See [SECURITY.md](SECURITY.md) for operational limitations and [CONTRIBUTING.md](CONTRIBUTING.md) for development guidance.
 
 ## License
 
