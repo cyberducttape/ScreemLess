@@ -259,17 +259,15 @@ impl Collector {
             };
 
             if let (Ok(stat), Ok(status)) = (process.stat(), process.status()) {
-                let cmdline = process.cmdline()
-                    .unwrap_or_default()
-                    .join(" ");
-
                 let user = status.ruid.to_string();
 
                 processes.push(Process {
                     pid: process.pid() as u32,
                     name: stat.comm.clone(),
                     user,
-                    cmdline,
+                    // Command lines frequently contain credentials. The executable name
+                    // above is sufficient for dependency attribution.
+                    cmdline: String::new(),
                 });
             }
         }
@@ -304,7 +302,9 @@ impl Collector {
                                     if !trimmed.is_empty() && !trimmed.starts_with('#') {
                                         cron_jobs.push(CronJob {
                                             schedule: "system".to_string(),
-                                            command: trimmed.to_string(),
+                                            // Cron commands can contain passwords, tokens, and
+                                            // connection strings; retain only their existence.
+                                            command: "[redacted]".to_string(),
                                             source: path.display().to_string(),
                                         });
                                     }

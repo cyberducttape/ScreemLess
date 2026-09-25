@@ -206,8 +206,8 @@ impl ConfigScanner {
 
         for (re, context, default_port) in patterns {
             for caps in re.captures_iter(content) {
-                if let Some(host_match) = caps.get(1) {
-                    let host_str = host_match.as_str().trim_matches(|c: char| c == '"' || c == '\'' || c == ' ');
+                    if let Some(host_match) = caps.get(1) {
+                        let host_str = host_match.as_str().trim_matches(|c: char| c == '"' || c == '\'' || c == ' ');
 
                     if host_str.starts_with("http://") || host_str.starts_with("https://") {
                         if let Ok(parsed) = url::Url::parse(host_str) {
@@ -217,10 +217,16 @@ impl ConfigScanner {
                                 if Self::is_valid_hostname(&hostname) {
                                     refs.push(ConfigReference {
                                         file_path: path.display().to_string(),
-                                        hostname,
+                                        hostname: hostname.clone(),
                                         port,
                                         context: context.to_string(),
-                                        config_line: Some(host_str.to_string()),
+                                        config_line: Some(format!(
+                                            "setting={} scheme={} host={} port={:?}",
+                                            context,
+                                            parsed.scheme(),
+                                            hostname,
+                                            port
+                                        )),
                                     });
                                 }
                             }
@@ -235,10 +241,13 @@ impl ConfigScanner {
                         let hostname = host_str.split(':').next().unwrap_or(host_str).to_string();
                         refs.push(ConfigReference {
                             file_path: path.display().to_string(),
-                            hostname,
+                            hostname: hostname.clone(),
                             port,
                             context: context.to_string(),
-                            config_line: Some(host_str.to_string()),
+                            config_line: Some(format!(
+                                "setting={} host={} port={:?}",
+                                context, hostname, port
+                            )),
                         });
                     }
                 }
@@ -282,20 +291,92 @@ impl ConfigScanner {
                 let key_str = key.as_str();
                 let val_str = value.as_str().trim_matches(|c| c == '"' || c == '\'');
 
-                if (key_str.contains("HOST") || key_str.contains("SERVER") || key_str.contains("DB")) &&
-                   Self::is_valid_hostname(val_str) {
-                    refs.push(ConfigReference {
-                        file_path: path.display().to_string(),
-                        hostname: val_str.to_string(),
-                        port: None,
-                        context: format!("Environment: {}", key_str),
-                        config_line: None,
-                    });
+                if Self::is_host_env_key(key_str) {
+                    if let Some((hostname, port)) = Self::parse_host_value(val_str, None) {
+                        refs.push(ConfigReference {
+                            file_path: path.display().to_string(),
+                            hostname: hostname.clone(),
+                            port,
+                            context: format!("Environment: {}", key_str),
+                            config_line: Some(format!(
+                                "setting={} host={} port={:?}",
+                                key_str, hostname, port
+                            )),
+                        });
+                    }
+                } else if Self::is_url_env_key(key_str) {
+                    if let Ok(parsed) = url::Url::parse(val_str) {
+                        if let Some(hostname) = parsed.host_str() {
+                            if Self::is_valid_hostname(hostname) {
+                                let port = parsed.port();
+                                refs.push(ConfigReference {
+                                    file_path: path.display().to_string(),
+                                    hostname: hostname.to_string(),
+                                    port,
+                                    context: format!(
+                                        "Environment URL: {} (scheme={})",
+                                        key_str,
+                                        parsed.scheme()
+                                    ),
+                                    config_line: Some(format!(
+                                        "setting={} scheme={} host={} port={:?}",
+                                        key_str,
+                                        parsed.scheme(),
+                                        hostname,
+                                        port
+                                    )),
+                                });
+                            }
+                        }
+                    }
                 }
             }
         }
 
         Ok(refs)
+    }
+
+    fn is_host_env_key(key: &str) -> bool {
+        matches!(
+            key,
+            "DB_HOST"
+                | "DATABASE_HOST"
+                | "MYSQL_HOST"
+                | "POSTGRES_HOST"
+                | "REDIS_HOST"
+                | "CACHE_HOST"
+                | "API_HOST"
+                | "SMTP_HOST"
+                | "MAIL_HOST"
+                | "SEARCH_HOST"
+                | "ELASTICSEARCH_HOST"
+                | "BROKER_HOST"
+                | "QUEUE_HOST"
+        )
+    }
+
+    fn is_url_env_key(key: &str) -> bool {
+        matches!(
+            key,
+            "URL"
+                | "API_URL"
+                | "SERVICE_URL"
+                | "DATABASE_URL"
+                | "DB_URL"
+                | "REDIS_URL"
+                | "CACHE_URL"
+                | "SMTP_URL"
+                | "BROKER_URL"
+        )
+    }
+
+    fn parse_host_value(value: &str, default_port: Option<u16>) -> Option<(String, Option<u16>)> {
+        let value = value.trim_matches(|c: char| c == '"' || c == '\'' || c.is_whitespace());
+        let (hostname, port) = value.rsplit_once(':')
+            .filter(|(_, port)| port.parse::<u16>().is_ok())
+            .map(|(hostname, port)| (hostname, port.parse().ok()))
+            .unwrap_or((value, default_port));
+        Self::is_valid_hostname(hostname).then(|| (hostname.to_string(), port))
     }
 
     fn scan_database_configs() -> Result<Vec<ConfigReference>> {
@@ -354,5 +435,39 @@ impl ConfigScanner {
 
         s.chars()
             .all(|c| c.is_alphanumeric() || c == '.' || c == '-' || c == '_')
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ConfigScanner;
+    use std::path::Path;
+
+    #[test]
+    fn env_scanner_only_accepts_host_keys_and_urls() {
+        let refs = ConfigScanner::parse_env_file(
+            Path::new("/tmp/test.env"),
+            "DB_NAME=wordpress\nDB_PASSWORD=secret\nDB_HOST=db01:3306\nAPI_URL=https://api.example.com/v1?token=secret\n",
+        ).unwrap();
+
+        assert_eq!(refs.len(), 2);
+        assert!(refs.iter().any(|reference| reference.hostname == "db01"));
+        assert!(refs.iter().any(|reference| reference.hostname == "api.example.com"));
+        assert!(refs.iter().all(|reference| {
+            reference.config_line.as_deref().unwrap_or("").contains("host=")
+        }));
+    }
+
+    #[test]
+    fn app_url_evidence_excludes_credentials_and_query_strings() {
+        let refs = ConfigScanner::parse_app_config(
+            Path::new("/tmp/config.env"),
+            "API_URL=https://user:password@example.com/api?token=secret",
+        ).unwrap();
+
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].hostname, "example.com");
+        assert!(!refs[0].config_line.as_deref().unwrap().contains("password"));
+        assert!(!refs[0].config_line.as_deref().unwrap().contains("token"));
     }
 }
