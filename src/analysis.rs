@@ -303,20 +303,20 @@ impl<'a> Analyzer<'a> {
             appearances.sort();
             appearances.dedup();
 
-            let executions = appearances.len();
+            let observed_snapshots = appearances.len();
             let first_seen = appearances.first().cloned().unwrap_or_else(Utc::now);
             let last_seen = appearances.last().cloned().unwrap_or_else(Utc::now);
 
-            let only_once = executions == 1;
+            let observed_once = observed_snapshots == 1;
 
             result.insert(
                 name.clone(),
                 ProcessActivity {
                     name,
-                    executions,
+                    observed_snapshots,
                     first_seen,
                     last_seen,
-                    only_once_in_window: only_once,
+                    observed_once_in_window: observed_once,
                 },
             );
         }
@@ -375,7 +375,7 @@ impl<'a> Analyzer<'a> {
         }
 
         for proc in observed_processes.values() {
-            if proc.only_once_in_window && (proc.name.contains("backup") || proc.name.contains("sync") || proc.name.contains("update")) {
+            if proc.observed_once_in_window && (proc.name.contains("backup") || proc.name.contains("sync") || proc.name.contains("update")) {
                 risks.push(RiskAssessment {
                     name: "Critical process seen once".to_string(),
                     severity: RiskSeverity::Warn,
@@ -467,7 +467,7 @@ impl<'a> Analyzer<'a> {
         let one_time_critical = observed_processes
             .values()
             .filter(|p| {
-                p.only_once_in_window
+                p.observed_once_in_window
                     && (p.name.contains("backup") || p.name.contains("sync"))
             })
             .count();

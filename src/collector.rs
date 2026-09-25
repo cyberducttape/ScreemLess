@@ -2,6 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use std::collections::HashMap;
 use std::fs;
+use std::path::Path;
 use std::process::{Command, Output};
 
 use crate::models::*;
@@ -279,50 +280,99 @@ impl Collector {
         let mut cron_jobs = Vec::new();
         let mut unavailable = 0;
 
-        let cron_dirs = vec![
-            "/etc/cron.d",
-            "/etc/cron.daily",
-            "/etc/cron.hourly",
-            "/etc/cron.monthly",
-            "/etc/cron.weekly",
-        ];
+        Self::collect_cron_file(Path::new("/etc/crontab"), true, &mut cron_jobs, &mut unavailable);
 
-        for dir in cron_dirs {
-            match fs::read_dir(dir) {
-                Ok(entries) => for entry in entries {
-                    let entry = match entry {
-                        Ok(entry) => entry,
-                        Err(_) => { unavailable += 1; continue; }
-                    };
-                    if let Ok(path) = entry.path().canonicalize() {
-                        if path.is_file() {
-                            if let Ok(content) = fs::read_to_string(&path) {
-                                for line in content.lines() {
-                                    let trimmed = line.trim();
-                                    if !trimmed.is_empty() && !trimmed.starts_with('#') {
-                                        cron_jobs.push(CronJob {
-                                            schedule: "system".to_string(),
-                                            // Cron commands can contain passwords, tokens, and
-                                            // connection strings; retain only their existence.
-                                            command: "[redacted]".to_string(),
-                                            source: path.display().to_string(),
-                                        });
-                                    }
-                                }
-                            } else {
-                                unavailable += 1;
-                            }
-                        }
-                    } else {
-                        unavailable += 1;
+        match fs::read_dir("/etc/cron.d") {
+            Ok(entries) => for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    Self::collect_cron_file(&path, true, &mut cron_jobs, &mut unavailable);
+                }
+            },
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => unavailable += 1,
+            Err(_) => {}
+        }
+
+        for (directory, schedule) in [
+            ("/etc/cron.daily", "@daily"),
+            ("/etc/cron.hourly", "@hourly"),
+            ("/etc/cron.weekly", "@weekly"),
+            ("/etc/cron.monthly", "@monthly"),
+        ] {
+            match fs::read_dir(directory) {
+                Ok(entries) => for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_file() {
+                        cron_jobs.push(CronJob {
+                            schedule: schedule.to_string(),
+                            command: "[redacted]".to_string(),
+                            source: path.display().to_string(),
+                        });
                     }
                 },
-                Err(_) => unavailable += 1,
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => unavailable += 1,
+                Err(_) => {}
+            }
+        }
+
+        for pattern in ["/var/spool/cron/crontabs/*", "/var/spool/cron/*"] {
+            if let Ok(entries) = glob::glob(pattern) {
+                for entry in entries.flatten() {
+                    if entry.is_file() {
+                        Self::collect_cron_file(&entry, false, &mut cron_jobs, &mut unavailable);
+                    }
+                }
             }
         }
 
         cron_jobs.sort_by(|a, b| a.source.cmp(&b.source));
         Ok((cron_jobs, unavailable))
+    }
+
+    fn collect_cron_file(
+        path: &Path,
+        has_user_field: bool,
+        cron_jobs: &mut Vec<CronJob>,
+        unavailable: &mut usize,
+    ) {
+        let content = match fs::read_to_string(path) {
+            Ok(content) => content,
+            Err(error) => {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    *unavailable += 1;
+                }
+                return;
+            }
+        };
+
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            let fields: Vec<&str> = trimmed.split_whitespace().collect();
+            if fields.first().is_some_and(|field| field.contains('=')) {
+                continue;
+            }
+            let (schedule, command_start) = if fields.first().is_some_and(|field| field.starts_with('@')) {
+                if fields.len() < 2 { continue; }
+                (fields[0].to_string(), 1)
+            } else {
+                let required = if has_user_field { 7 } else { 6 };
+                if fields.len() < required { continue; }
+                let end = if has_user_field { 5 } else { 5 };
+                (fields[..5].join(" "), end + usize::from(has_user_field))
+            };
+
+            if command_start < fields.len() {
+                cron_jobs.push(CronJob {
+                    schedule,
+                    // Cron command bodies may contain credentials or tokens.
+                    command: "[redacted]".to_string(),
+                    source: path.display().to_string(),
+                });
+            }
+        }
     }
 
     fn collect_systemd_timers() -> Result<Vec<SystemdTimer>> {
@@ -458,5 +508,22 @@ mod tests {
         let parts: Vec<&str> = fields.split_whitespace().collect();
         assert!(parts.iter().any(|part| *part == "ESTAB"));
         assert_eq!(Collector::find_endpoints(&parts).len(), 2);
+    }
+
+    #[test]
+    fn parses_cron_schedule_without_persisting_command_body() {
+        let path = std::env::temp_dir().join(format!(
+            "screamless-cron-test-{}",
+            std::process::id()
+        ));
+        std::fs::write(&path, "0 2 * * * root /usr/bin/backup --token=secret\n").unwrap();
+        let mut jobs = Vec::new();
+        let mut unavailable = 0;
+        Collector::collect_cron_file(&path, true, &mut jobs, &mut unavailable);
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(unavailable, 0);
+        assert_eq!(jobs[0].schedule, "0 2 * * *");
+        assert_eq!(jobs[0].command, "[redacted]");
     }
 }

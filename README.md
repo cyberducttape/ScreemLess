@@ -63,10 +63,11 @@ Web server connects to:
 ### Inbound Dependencies  
 ```
 These servers depend on THIS one:
-  backup02     95% confidence (SSH keys, nightly cron at 02:00)
-  monitor01    92% confidence (443 connections observed)
-  mail-relay   70% confidence (config reference, no traffic in window)
+  web01        95% confidence (observed outbound connections to this server)
+  monitor01    92% confidence (observed outbound connections to this server)
 ```
+
+Process activity counts snapshots in which a process was observed; it does not claim to count process executions. Cron discovery parses schedules from system and user crontabs, while command bodies are redacted and job activity is not inferred.
 
 ### Shutdown Impact
 ```
@@ -238,8 +239,8 @@ INBOUND DEPENDENCIES:
   None detected (no other servers depend on this)
 
 RISKS:
-  ⚠️ 47 cron jobs (inactive for 3 days)
-  ℹ️ Old PHP 5.6 (not accessed in 4 days)
+  ⚠️ 47 scheduled jobs configured
+  ℹ️ Old PHP 5.6 observed during the window
 
 RECOMMENDATION:
   Safe to decommission. Notify DNS team to remove DNS entries.

@@ -327,7 +327,7 @@ impl<'a> Reporter<'a> {
 
         let critical_one_time = analysis.observed_processes
             .values()
-            .filter(|p| p.only_once_in_window && (p.name.contains("backup") || p.name.contains("sync")))
+            .filter(|p| p.observed_once_in_window && (p.name.contains("backup") || p.name.contains("sync")))
             .count();
 
         if critical_one_time > 0 {

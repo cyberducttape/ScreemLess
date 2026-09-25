@@ -1,9 +1,29 @@
 use anyhow::Result;
 use crate::models::AnalysisResult;
+use serde::Serialize;
+
+fn escape_html(value: &str) -> String {
+    value.chars().map(|character| match character {
+        '&' => "&amp;".to_string(),
+        '<' => "&lt;".to_string(),
+        '>' => "&gt;".to_string(),
+        '"' => "&quot;".to_string(),
+        '\'' => "&#39;".to_string(),
+        _ => character.to_string(),
+    }).collect()
+}
+
+fn safe_json_for_script<T: Serialize>(value: &T) -> Result<String> {
+    Ok(serde_json::to_string(value)?
+        .replace('<', "\\u003c")
+        .replace('>', "\\u003e")
+        .replace('&', "\\u0026"))
+}
 
 pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<String> {
-    let deps_json = serde_json::to_string(&analysis.dependencies)?;
-    let risks_json = serde_json::to_string(&analysis.risks)?;
+    let deps_json = safe_json_for_script(&analysis.dependencies)?;
+    let risks_json = safe_json_for_script(&analysis.risks)?;
+    let hostname_html = escape_html(hostname);
     let readiness = analysis.decommission_confidence;
 
     let readiness_class = if readiness >= 80 {
@@ -36,10 +56,10 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
             };
             format!(
                 "<div class='dependency'><div class='dep-host'>{}:{} <span class='dep-confidence'>{}%</span></div><div class='dep-process'>{}</div></div>",
-                display_addr,
+                escape_html(&display_addr),
                 dep.remote_port,
                 dep.confidence,
-                dep.processes.join(", ")
+                escape_html(&dep.processes.join(", "))
             )
         }).collect::<Vec<_>>().join("")
     };
@@ -51,7 +71,7 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
             let risk_class = if matches!(risk.severity, crate::models::RiskSeverity::Fail) { "fail" } else { "" };
             format!(
                 "<div class='risk {}'><div class='risk-name'>{}</div><div class='risk-desc'>{}</div></div>",
-                risk_class, risk.name, risk.description
+                risk_class, escape_html(&risk.name), escape_html(&risk.description)
             )
         }).collect::<Vec<_>>().join("")
     };
@@ -62,6 +82,7 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; object-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
     <title>Screamless: {}</title>
     <style>
         * {{
@@ -435,8 +456,8 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
     </script>
 </body>
 </html>"#,
-        hostname,
-        hostname,
+        hostname_html,
+        hostname_html,
         readiness_class,
         readiness,
         readiness_status,
@@ -444,7 +465,7 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
         total_deps,
         high_conf_count,
         risks_html,
-        serde_json::to_string(hostname)?,
+        safe_json_for_script(&hostname)?,
         deps_json,
         risks_json
     );
@@ -472,7 +493,7 @@ mod tests {
                 connection_count: 3,
                 first_seen: now,
                 last_seen: now,
-                processes: vec!["billing".to_string()],
+                processes: vec!["billing<arg>".to_string()],
                 confidence: 85,
                 evidence: Vec::new(),
                 config_references: Vec::new(),
@@ -483,21 +504,24 @@ mod tests {
             risks: vec![RiskAssessment {
                 name: "Example risk".to_string(),
                 severity: RiskSeverity::Warn,
-                description: "Example description".to_string(),
+                description: "<script>alert(1)</script>".to_string(),
                 evidence: "Example evidence".to_string(),
             }],
             decommission_confidence: 85,
             probe_statuses: ProbeStatuses::default(),
         };
 
-        let html = render_dashboard("db01", &analysis).unwrap();
-        assert!(html.contains("<title>Screamless: db01</title>"));
-        assert!(html.contains("<p>Server: <strong>db01</strong></p>"));
+        let html = render_dashboard("db<01", &analysis).unwrap();
+        assert!(html.contains("<title>Screamless: db&lt;01</title>"));
+        assert!(html.contains("<p>Server: <strong>db&lt;01</strong></p>"));
         assert!(html.contains("<div class=\"readiness-score ready\">85</div>"));
         assert!(html.contains("READY for decommission"));
         assert!(html.contains("const dependencies = [{"));
         assert!(html.contains("const risks = [{"));
         assert!(html.contains("Example risk"));
+        assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+        assert!(html.contains("billing&lt;arg&gt;"));
+        assert!(html.contains("Content-Security-Policy"));
         assert!(html.contains("addEventListener('pointerdown'"));
         assert!(!html.contains("cdnjs.cloudflare.com"));
     }

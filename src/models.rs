@@ -239,10 +239,12 @@ pub struct AnalysisResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProcessActivity {
     pub name: String,
-    pub executions: usize,
+    #[serde(default, alias = "executions")]
+    pub observed_snapshots: usize,
     pub first_seen: DateTime<Utc>,
     pub last_seen: DateTime<Utc>,
-    pub only_once_in_window: bool,
+    #[serde(default, alias = "only_once_in_window")]
+    pub observed_once_in_window: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
