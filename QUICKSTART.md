@@ -112,7 +112,17 @@ screamless observe &
 # Before deployment:
 - screamless preflight --server app01 --operation update
 ```
-Exit code 0 = safe, non-zero = unsafe (blocks merge)
+Exit codes:
+- `0` = safe
+- `1` = unsafe (blocks merge)
+- `2` = insufficient evidence
+- `3` = invalid invocation
+
+Use `--json` for a stable machine-readable result:
+
+```bash
+screamless preflight --server app01 --operation update --json
+```
 
 ### With Ansible/Terraform
 ```bash

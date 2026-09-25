@@ -327,11 +327,12 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
 
     <script>
         const dependencies = {};
-        const risks = {{}};
+        const risks = {};
         console.log('Dependencies loaded:', dependencies);
     </script>
 </body>
 </html>"#,
+        hostname,
         hostname,
         readiness_class,
         readiness,
@@ -345,4 +346,53 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
     );
 
     Ok(html)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_dashboard;
+    use crate::models::*;
+    use chrono::Utc;
+
+    #[test]
+    fn renders_dashboard_values_in_their_expected_fields() {
+        let now = Utc::now();
+        let analysis = AnalysisResult {
+            observation_window_hours: 1,
+            total_snapshots: 1,
+            observation_span: (now, now),
+            dependencies: vec![Dependency {
+                remote_addr: "10.0.0.2".to_string(),
+                remote_port: 3306,
+                protocol: "tcp".to_string(),
+                connection_count: 3,
+                first_seen: now,
+                last_seen: now,
+                processes: vec!["billing".to_string()],
+                confidence: 85,
+                evidence: Vec::new(),
+                config_references: Vec::new(),
+                hostname: Some("db01".to_string()),
+            }],
+            inbound_dependencies: Vec::new(),
+            observed_processes: std::collections::HashMap::new(),
+            risks: vec![RiskAssessment {
+                name: "Example risk".to_string(),
+                severity: RiskSeverity::Warn,
+                description: "Example description".to_string(),
+                evidence: "Example evidence".to_string(),
+            }],
+            decommission_confidence: 85,
+            probe_statuses: ProbeStatuses::default(),
+        };
+
+        let html = render_dashboard("db01", &analysis).unwrap();
+        assert!(html.contains("<title>Screamless: db01</title>"));
+        assert!(html.contains("<p>Server: <strong>db01</strong></p>"));
+        assert!(html.contains("<div class=\"readiness-score ready\">85</div>"));
+        assert!(html.contains("READY for decommission"));
+        assert!(html.contains("const dependencies = [{"));
+        assert!(html.contains("const risks = [{"));
+        assert!(html.contains("Example risk"));
+    }
 }

@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 use anyhow::Result;
+use serde::Serialize;
 use std::path::PathBuf;
 use tokio::time::{self, Duration};
 
@@ -81,6 +82,10 @@ pub enum Command {
         /// Operation to validate (restart, update, shutdown)
         #[arg(short, long)]
         operation: String,
+
+        /// Emit a stable JSON result for automation
+        #[arg(long)]
+        json: bool,
     },
 
     /// Take a single snapshot
@@ -104,8 +109,8 @@ pub async fn run(args: Args) -> Result<()> {
         Command::Infrastructure { servers, format } => {
             infrastructure(&args.db, servers, format)
         }
-        Command::Preflight { server, operation } => {
-            preflight(&args.db, server, operation)
+        Command::Preflight { server, operation, json } => {
+            preflight(&args.db, server, operation, json)
         }
         Command::Snapshot => {
             snapshot(&args.db).await
@@ -315,24 +320,77 @@ fn infrastructure(db_path: &std::path::Path, servers: String, format: String) ->
     Ok(())
 }
 
-fn preflight(db_path: &std::path::Path, server: String, operation: String) -> Result<()> {
+#[derive(Debug)]
+pub struct CliExit {
+    pub code: u8,
+    pub message: String,
+}
+
+impl std::fmt::Display for CliExit {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for CliExit {}
+
+pub fn error_exit_code(error: &anyhow::Error) -> u8 {
+    error.downcast_ref::<CliExit>().map(|exit| exit.code).unwrap_or(1)
+}
+
+#[derive(Serialize)]
+struct PreflightResult {
+    server: String,
+    operation: String,
+    status: String,
+    safe: bool,
+    exit_code: u8,
+    warnings: Vec<String>,
+    outbound_dependencies: usize,
+    inbound_dependencies: usize,
+    probe_statuses: crate::models::ProbeStatuses,
+}
+
+fn preflight(
+    db_path: &std::path::Path,
+    server: String,
+    operation: String,
+    json: bool,
+) -> Result<()> {
     use crate::analysis::Analyzer;
+
+    if !matches!(operation.as_str(), "restart" | "reboot" | "update" | "shutdown") {
+        if json {
+            println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                "server": server,
+                "operation": operation,
+                "status": "invalid_invocation",
+                "safe": false,
+                "exit_code": 3,
+                "warnings": ["Use restart, reboot, update, or shutdown"]
+            }))?);
+        }
+        return Err(anyhow::Error::new(CliExit {
+            code: 3,
+            message: format!(
+                "Unknown operation '{}'. Use restart, reboot, update, or shutdown",
+                operation
+            ),
+        }));
+    }
 
     let db = Database::new(db_path)?;
     let analyzer = Analyzer::new(&db);
     let analysis = analyzer.analyze(&server, 168)?;
 
-    println!("\n╭──────────────────────────────────────────╮");
-    println!("│   PREFLIGHT SAFETY CHECK                 │");
-    println!("╰──────────────────────────────────────────╯\n");
-
-    println!("Server: {}", server);
-    println!("Operation: {}\n", operation);
-
     let mut safe = true;
     let mut warnings = Vec::new();
+    let insufficient_evidence = analysis.total_snapshots == 0 || !analysis.probe_statuses.all_complete();
 
-    if !analysis.probe_statuses.all_complete() {
+    if analysis.total_snapshots == 0 {
+        warnings.push("No observations are available for this server".to_string());
+        safe = false;
+    } else if !analysis.probe_statuses.all_complete() {
         warnings.push("Required observation probes are incomplete; safety cannot be established".to_string());
         safe = false;
     }
@@ -359,6 +417,7 @@ fn preflight(db_path: &std::path::Path, server: String, operation: String) -> Re
                         "{} high-confidence external dependencies",
                         high_conf
                     ));
+                    safe = false;
                 }
             }
         }
@@ -375,36 +434,67 @@ fn preflight(db_path: &std::path::Path, server: String, operation: String) -> Re
                     "This server depends on {} external services",
                     analysis.dependencies.len()
                 ));
+                safe = false;
             }
         }
-        _ => {
-            return Err(anyhow::anyhow!(
-                "Unknown operation '{}'. Use restart, reboot, update, or shutdown",
-                operation
-            ));
-        }
+        _ => unreachable!("operation was validated before dispatch"),
     }
 
-    if safe {
-        println!("✅ SAFE TO PROCEED\n");
-        println!("No blocking issues detected for this operation.");
+    let exit_code = if safe { 0 } else if insufficient_evidence { 2 } else { 1 };
+    let status = match exit_code {
+        0 => "safe",
+        1 => "unsafe",
+        2 => "insufficient_evidence",
+        _ => unreachable!(),
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&PreflightResult {
+            server,
+            operation,
+            status: status.to_string(),
+            safe,
+            exit_code,
+            warnings: warnings.clone(),
+            outbound_dependencies: analysis.dependencies.len(),
+            inbound_dependencies: analysis.inbound_dependencies.len(),
+            probe_statuses: analysis.probe_statuses.clone(),
+        })?);
     } else {
-        println!("⚠️  PROCEED WITH CAUTION\n");
-        println!("Issues identified:");
-        for warning in &warnings {
-            println!("  - {}", warning);
+        println!("\n╭──────────────────────────────────────────╮");
+        println!("│   PREFLIGHT SAFETY CHECK                 │");
+        println!("╰──────────────────────────────────────────╯\n");
+        println!("Server: {}", server);
+        println!("Operation: {}\n", operation);
+
+        if safe {
+            println!("✅ SAFE TO PROCEED\n");
+            println!("No blocking issues detected for this operation.");
+        } else {
+            println!("⚠️  PROCEED WITH CAUTION\n");
+            println!("Issues identified:");
+            for warning in &warnings {
+                println!("  - {}", warning);
+            }
+            println!();
         }
-        println!();
+
+        if !warnings.is_empty() && !safe {
+            println!("Recommendations:");
+            println!("  1. Notify dependent systems");
+            println!("  2. Plan maintenance window");
+            println!("  3. Have rollback plan");
+        }
     }
 
-    if !warnings.is_empty() && !safe {
-        println!("Recommendations:");
-        println!("  1. Notify dependent systems");
-        println!("  2. Plan maintenance window");
-        println!("  3. Have rollback plan");
+    if exit_code == 0 {
+        Ok(())
+    } else {
+        Err(anyhow::Error::new(CliExit {
+            code: exit_code,
+            message: format!("Preflight status: {}", status),
+        }))
     }
-
-    Ok(())
 }
 
 fn format_duration(d: Duration) -> String {
