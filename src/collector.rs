@@ -1,8 +1,8 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use std::collections::HashMap;
 use std::fs;
-use std::process::Command;
+use std::process::{Command, Output};
 
 use crate::models::*;
 use crate::config_scanner::ConfigScanner;
@@ -13,16 +13,79 @@ impl Collector {
     pub async fn collect_snapshot() -> Result<ObservationSnapshot> {
         let hostname = Self::get_hostname()?;
         let timestamp = Utc::now();
+        let mut probe_statuses = ProbeStatuses::default();
+
+        let (listening_services, listening_unavailable) = match Self::collect_listening_services() {
+            Ok(result) => result,
+            Err(error) => {
+                probe_statuses.network_sockets = ProbeStatus::failed(error.to_string());
+                (Vec::new(), 0)
+            }
+        };
+        let (network_connections, connection_unavailable) = match Self::collect_network_connections() {
+            Ok(result) => result,
+            Err(error) => {
+                probe_statuses.network_sockets = ProbeStatus::failed(error.to_string());
+                (Vec::new(), 0)
+            }
+        };
+        let socket_unavailable = listening_unavailable + connection_unavailable;
+        if socket_unavailable > 0 {
+            probe_statuses.process_attribution = ProbeStatus::partial(
+                format!("process attribution unavailable for {} sockets", socket_unavailable),
+                socket_unavailable,
+            );
+        }
+
+        let processes = match Self::collect_processes() {
+            Ok(processes) => processes,
+            Err(error) => {
+                probe_statuses.process_attribution = ProbeStatus::partial(
+                    format!("process inventory unavailable: {}", error),
+                    0,
+                );
+                Vec::new()
+            }
+        };
+        let (cron_jobs, cron_unavailable) = Self::collect_cron_jobs()?;
+        if cron_unavailable > 0 {
+            probe_statuses.cron = ProbeStatus::partial(
+                format!("{} cron paths could not be read", cron_unavailable),
+                cron_unavailable,
+            );
+        }
+        let systemd_timers = match Self::collect_systemd_timers() {
+            Ok(timers) => timers,
+            Err(error) => {
+                probe_statuses.systemd = ProbeStatus::failed(error.to_string());
+                Vec::new()
+            }
+        };
+        let (dns_names, dns_unavailable) = match Self::collect_dns_names() {
+            Ok(result) => result,
+            Err(error) => {
+                probe_statuses.config_scan = ProbeStatus::failed(error.to_string());
+                probe_statuses.dns = ProbeStatus::failed(error.to_string());
+                (Vec::new(), 0)
+            }
+        };
+        if dns_unavailable > 0 && probe_statuses.dns.is_complete() {
+            probe_statuses.dns = ProbeStatus::partial(
+                format!("DNS resolution failed for {} names", dns_unavailable),
+                dns_unavailable,
+            );
+        }
 
         Ok(ObservationSnapshot {
             timestamp,
             hostname,
-            listening_services: Self::collect_listening_services()?,
-            network_connections: Self::collect_network_connections()?,
-            processes: Self::collect_processes()?,
-            cron_jobs: Self::collect_cron_jobs()?,
-            systemd_timers: Self::collect_systemd_timers()?,
-            dns_names: Self::collect_dns_names()?,
+            listening_services,
+            network_connections,
+            processes,
+            cron_jobs,
+            systemd_timers,
+            dns_names,
+            probe_statuses,
         })
     }
 
@@ -38,16 +101,15 @@ impl Collector {
             .context("Could not determine hostname")
     }
 
-    fn collect_listening_services() -> Result<Vec<ListeningService>> {
+    fn collect_listening_services() -> Result<(Vec<ListeningService>, usize)> {
         let mut services = Vec::new();
+        let mut unavailable = 0;
 
-        let pid_to_process = Self::build_pid_to_process_map()?;
-
-        let output = Command::new("ss")
-            .args(&["-tlnp"])
-            .output()
-            .or_else(|_| Command::new("netstat").args(&["-tlnp"]).output())
-            .context("Failed to run ss or netstat")?;
+        let (pid_to_process, map_unavailable) = match Self::build_pid_to_process_map() {
+            Ok(map) => (map, false),
+            Err(_) => (HashMap::new(), true),
+        };
+        let output = Self::run_socket_probe(&["-tlnp"])?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
 
@@ -55,6 +117,9 @@ impl Collector {
             let parts: Vec<&str> = line.split_whitespace().collect();
             if let Some((_, port)) = Self::find_endpoints(&parts).first() {
                 let pid = Self::extract_pid(parts.last().copied());
+                if pid == 0 || !pid_to_process.contains_key(&pid) {
+                    unavailable += 1;
+                }
                 let (process_name, user) = pid_to_process
                     .get(&pid)
                     .map(|(name, _, user)| (name.clone(), user.clone()))
@@ -70,29 +135,36 @@ impl Collector {
             }
         }
 
-        Ok(services)
+        let unavailable = if map_unavailable && !services.is_empty() {
+            unavailable.max(services.len())
+        } else {
+            unavailable
+        };
+        Ok((services, unavailable))
     }
 
-    fn collect_network_connections() -> Result<Vec<NetworkConnection>> {
+    fn collect_network_connections() -> Result<(Vec<NetworkConnection>, usize)> {
         let mut connections = Vec::new();
+        let mut unavailable = 0;
 
-        let pid_to_process = Self::build_pid_to_process_map()?;
-
-        let output = Command::new("ss")
-            .args(&["-tnp"])
-            .output()
-            .or_else(|_| Command::new("netstat").args(&["-tnp"]).output())
-            .context("Failed to run ss or netstat")?;
+        let (pid_to_process, map_unavailable) = match Self::build_pid_to_process_map() {
+            Ok(map) => (map, false),
+            Err(_) => (HashMap::new(), true),
+        };
+        let output = Self::run_socket_probe(&["-tnp"])?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
 
         for line in stdout.lines().skip(1) {
             let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 5 && (parts[0] == "tcp" || parts[0] == "tcp6") {
-                if parts[1].contains("ESTAB") || line.contains("ESTABLISHED") {
+            if parts.len() >= 4 {
+                if parts.iter().any(|part| *part == "ESTAB" || *part == "ESTABLISHED") {
                     let endpoints = Self::find_endpoints(&parts);
                     if let [local, remote, ..] = endpoints.as_slice() {
                         let pid = Self::extract_pid(parts.last().copied());
+                        if pid == 0 || !pid_to_process.contains_key(&pid) {
+                            unavailable += 1;
+                        }
                         let process_name = pid_to_process
                             .get(&pid)
                             .map(|(name, _, _)| name.clone())
@@ -113,7 +185,31 @@ impl Collector {
             }
         }
 
-        Ok(connections)
+        let unavailable = if map_unavailable && !connections.is_empty() {
+            unavailable.max(connections.len())
+        } else {
+            unavailable
+        };
+        Ok((connections, unavailable))
+    }
+
+    fn run_socket_probe(args: &[&str]) -> Result<Output> {
+        let ss_result = Command::new("ss").args(args).output();
+        if let Ok(output) = ss_result {
+            if output.status.success() {
+                return Ok(output);
+            }
+        }
+
+        let netstat = Command::new("netstat")
+            .args(args)
+            .output()
+            .context("Failed to execute ss and netstat")?;
+        if netstat.status.success() {
+            Ok(netstat)
+        } else {
+            Err(anyhow!("ss and netstat both failed"))
+        }
     }
 
     fn parse_addr_port(addr_port: &str) -> Option<(String, u16)> {
@@ -180,8 +276,9 @@ impl Collector {
         Ok(processes)
     }
 
-    fn collect_cron_jobs() -> Result<Vec<CronJob>> {
+    fn collect_cron_jobs() -> Result<(Vec<CronJob>, usize)> {
         let mut cron_jobs = Vec::new();
+        let mut unavailable = 0;
 
         let cron_dirs = vec![
             "/etc/cron.d",
@@ -192,8 +289,12 @@ impl Collector {
         ];
 
         for dir in cron_dirs {
-            if let Ok(entries) = fs::read_dir(dir) {
-                for entry in entries.flatten() {
+            match fs::read_dir(dir) {
+                Ok(entries) => for entry in entries {
+                    let entry = match entry {
+                        Ok(entry) => entry,
+                        Err(_) => { unavailable += 1; continue; }
+                    };
                     if let Ok(path) = entry.path().canonicalize() {
                         if path.is_file() {
                             if let Ok(content) = fs::read_to_string(&path) {
@@ -207,15 +308,20 @@ impl Collector {
                                         });
                                     }
                                 }
+                            } else {
+                                unavailable += 1;
                             }
                         }
+                    } else {
+                        unavailable += 1;
                     }
-                }
+                },
+                Err(_) => unavailable += 1,
             }
         }
 
         cron_jobs.sort_by(|a, b| a.source.cmp(&b.source));
-        Ok(cron_jobs)
+        Ok((cron_jobs, unavailable))
     }
 
     fn collect_systemd_timers() -> Result<Vec<SystemdTimer>> {
@@ -227,26 +333,27 @@ impl Collector {
             .context("Failed to run systemctl list-timers")?;
 
         if output.status.success() {
-            if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
-                let timers_array = json.as_array()
-                    .or_else(|| json.get("timers").and_then(|t| t.as_array()));
-                if let Some(timers_array) = timers_array {
-                    for timer_obj in timers_array {
-                        if let Some(unit) = timer_obj.get("unit").and_then(|u| u.as_str()) {
-                            let active = timer_obj.get("active")
-                                .and_then(|a| a.as_str())
-                                .map(|a| a == "active")
-                                .unwrap_or(true);
-                            timers.push(SystemdTimer {
-                                name: unit.replace(".timer", ""),
-                                unit: unit.to_string(),
-                                enabled: true,
-                                active,
-                            });
-                        }
-                    }
+            let json = serde_json::from_slice::<serde_json::Value>(&output.stdout)
+                .context("systemd returned invalid JSON")?;
+            let timers_array = json.as_array()
+                .or_else(|| json.get("timers").and_then(|t| t.as_array()))
+                .ok_or_else(|| anyhow!("systemd JSON did not contain a timer list"))?;
+            for timer_obj in timers_array {
+                if let Some(unit) = timer_obj.get("unit").and_then(|u| u.as_str()) {
+                    let active = timer_obj.get("active")
+                        .and_then(|a| a.as_str())
+                        .map(|a| a == "active")
+                        .unwrap_or(true);
+                    timers.push(SystemdTimer {
+                        name: unit.replace(".timer", ""),
+                        unit: unit.to_string(),
+                        enabled: true,
+                        active,
+                    });
                 }
             }
+        } else {
+            return Err(anyhow!("systemctl list-timers exited unsuccessfully"));
         }
 
         Ok(timers)
@@ -279,10 +386,11 @@ impl Collector {
         Ok(map)
     }
 
-    fn collect_dns_names() -> Result<Vec<DnsName>> {
+    fn collect_dns_names() -> Result<(Vec<DnsName>, usize)> {
         let mut names = Vec::new();
+        let mut unavailable = 0;
 
-        let config_refs = ConfigScanner::scan().unwrap_or_default();
+        let config_refs = ConfigScanner::scan()?;
         let timestamp = Utc::now();
 
         let mut seen = std::collections::HashSet::new();
@@ -299,6 +407,9 @@ impl Collector {
                         .collect(),
                     Err(_) => vec![],
                 };
+                if ip_addresses.is_empty() {
+                    unavailable += 1;
+                }
 
                 names.push(DnsName {
                     hostname: config_ref.hostname,
@@ -308,7 +419,7 @@ impl Collector {
             }
         }
 
-        Ok(names)
+        Ok((names, unavailable))
     }
 }
 
@@ -338,5 +449,13 @@ mod tests {
             ("127.0.0.1".to_string(), 42000),
             ("::1".to_string(), 5432),
         ]);
+    }
+
+    #[test]
+    fn accepts_modern_ss_state_first_format() {
+        let fields = "ESTAB 0 0 127.0.0.1:36886 127.0.0.1:55059";
+        let parts: Vec<&str> = fields.split_whitespace().collect();
+        assert!(parts.iter().any(|part| *part == "ESTAB"));
+        assert_eq!(Collector::find_endpoints(&parts).len(), 2);
     }
 }

@@ -32,7 +32,13 @@ impl<'a> Analyzer<'a> {
                 observed_processes: HashMap::new(),
                 risks: Vec::new(),
                 decommission_confidence: 0,
+                probe_statuses: ProbeStatuses::default(),
             });
+        }
+
+        let mut probe_statuses = ProbeStatuses::default();
+        for snapshot in &snapshots {
+            probe_statuses.merge(&snapshot.probe_statuses);
         }
 
         let first_snap = snapshots.first().unwrap();
@@ -45,14 +51,23 @@ impl<'a> Analyzer<'a> {
         let inbound_dependencies = ReverseInference::infer_inbound_dependencies(
             hostname,
             &["127.0.0.1".to_string()],
-        ).unwrap_or_default();
+        )?;
 
-        let risks = self.assess_risks(&snapshots, &dependencies, &observed_processes)?;
-        let decommission_confidence = self.calculate_decommission_confidence(
+        let mut risks = self.assess_risks(&snapshots, &dependencies, &observed_processes)?;
+        let mut decommission_confidence = self.calculate_decommission_confidence(
             &snapshots,
             &dependencies,
             &observed_processes,
         );
+        if !probe_statuses.all_complete() {
+            risks.push(RiskAssessment {
+                name: "Incomplete observation data".to_string(),
+                severity: RiskSeverity::Fail,
+                description: "One or more collection probes failed or had incomplete attribution".to_string(),
+                evidence: Self::probe_status_summary(&probe_statuses),
+            });
+            decommission_confidence = decommission_confidence.min(49);
+        }
 
         Ok(AnalysisResult {
             observation_window_hours: hours,
@@ -63,7 +78,25 @@ impl<'a> Analyzer<'a> {
             observed_processes,
             risks,
             decommission_confidence,
+            probe_statuses,
         })
+    }
+
+    fn probe_status_summary(statuses: &ProbeStatuses) -> String {
+        let mut incomplete = Vec::new();
+        for (name, status) in [
+            ("network_sockets", &statuses.network_sockets),
+            ("process_attribution", &statuses.process_attribution),
+            ("cron", &statuses.cron),
+            ("systemd", &statuses.systemd),
+            ("config_scan", &statuses.config_scan),
+            ("dns", &statuses.dns),
+        ] {
+            if !status.is_complete() {
+                incomplete.push(format!("{}: {:?}", name, status.state));
+            }
+        }
+        incomplete.join(", ")
     }
 
     fn infer_dependencies(&self, snapshots: &[ObservationSnapshot]) -> Result<Vec<Dependency>> {
@@ -83,7 +116,7 @@ impl<'a> Analyzer<'a> {
             }
         }
 
-        let config_refs = ConfigScanner::scan().unwrap_or_default();
+        let config_refs = ConfigScanner::scan()?;
         let ip_to_hostname = self.build_ip_to_hostname_map(snapshots);
 
         let mut dependencies = Vec::new();

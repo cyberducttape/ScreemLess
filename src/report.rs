@@ -37,6 +37,8 @@ impl<'a> Reporter<'a> {
         );
         println!("SNAPSHOTS: {}\n", analysis.total_snapshots);
 
+        self.print_probe_status(&analysis);
+
         println!("DEPENDENCY GRAPH");
         println!("{}", GraphRenderer::render_ascii(&analysis, &hostname));
         println!();
@@ -66,6 +68,7 @@ impl<'a> Reporter<'a> {
             "dependencies": analysis.dependencies,
             "risks": analysis.risks,
             "decommission_confidence": analysis.decommission_confidence,
+            "probe_statuses": analysis.probe_statuses,
         });
 
         println!("{}", serde_json::to_string_pretty(&json)?);
@@ -92,6 +95,8 @@ impl<'a> Reporter<'a> {
             println!("No observations found. Run 'screamless observe' first.");
             return Ok(());
         }
+
+        self.print_probe_status(&analysis);
 
         self.print_readiness_assessment(&analysis)?;
         self.print_decommission_risks(&analysis)?;
@@ -181,6 +186,20 @@ impl<'a> Reporter<'a> {
 
         println!();
         Ok(())
+    }
+
+    fn print_probe_status(&self, analysis: &AnalysisResult) {
+        if analysis.probe_statuses.all_complete() {
+            println!("DATA QUALITY: All collection probes complete\n");
+        } else {
+            println!("DATA QUALITY: INCOMPLETE - safety conclusions are blocked");
+            println!("  Network sockets: {:?}", analysis.probe_statuses.network_sockets.state);
+            println!("  Process attribution: {:?}", analysis.probe_statuses.process_attribution.state);
+            println!("  Cron: {:?}", analysis.probe_statuses.cron.state);
+            println!("  Systemd: {:?}", analysis.probe_statuses.systemd.state);
+            println!("  Config scan: {:?}", analysis.probe_statuses.config_scan.state);
+            println!("  DNS: {:?}\n", analysis.probe_statuses.dns.state);
+        }
     }
 
     fn print_inbound_dependencies(&self, analysis: &AnalysisResult) -> Result<()> {

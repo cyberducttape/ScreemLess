@@ -329,6 +329,11 @@ fn preflight(db_path: &std::path::Path, server: String, operation: String) -> Re
     let mut safe = true;
     let mut warnings = Vec::new();
 
+    if !analysis.probe_statuses.all_complete() {
+        warnings.push("Required observation probes are incomplete; safety cannot be established".to_string());
+        safe = false;
+    }
+
     match operation.as_str() {
         "restart" | "reboot" => {
             if !analysis.inbound_dependencies.is_empty() {

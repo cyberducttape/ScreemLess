@@ -2,6 +2,118 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ProbeState {
+    #[serde(rename = "COMPLETE")]
+    Complete,
+    #[serde(rename = "PARTIAL")]
+    Partial,
+    #[serde(rename = "FAILED")]
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProbeStatus {
+    pub state: ProbeState,
+    pub details: Option<String>,
+    pub unavailable: usize,
+}
+
+impl ProbeStatus {
+    pub fn complete() -> Self {
+        Self { state: ProbeState::Complete, details: None, unavailable: 0 }
+    }
+
+    pub fn partial(details: impl Into<String>, unavailable: usize) -> Self {
+        Self { state: ProbeState::Partial, details: Some(details.into()), unavailable }
+    }
+
+    pub fn failed(details: impl Into<String>) -> Self {
+        Self { state: ProbeState::Failed, details: Some(details.into()), unavailable: 0 }
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.state == ProbeState::Complete
+    }
+}
+
+impl Default for ProbeStatus {
+    fn default() -> Self { Self::complete() }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProbeStatuses {
+    pub network_sockets: ProbeStatus,
+    pub process_attribution: ProbeStatus,
+    pub cron: ProbeStatus,
+    pub systemd: ProbeStatus,
+    pub config_scan: ProbeStatus,
+    pub dns: ProbeStatus,
+}
+
+impl ProbeStatuses {
+    pub fn all_complete(&self) -> bool {
+        self.network_sockets.is_complete()
+            && self.process_attribution.is_complete()
+            && self.cron.is_complete()
+            && self.systemd.is_complete()
+            && self.config_scan.is_complete()
+            && self.dns.is_complete()
+    }
+
+    pub fn merge(&mut self, other: &Self) {
+        Self::merge_status(&mut self.network_sockets, &other.network_sockets);
+        Self::merge_status(&mut self.process_attribution, &other.process_attribution);
+        Self::merge_status(&mut self.cron, &other.cron);
+        Self::merge_status(&mut self.systemd, &other.systemd);
+        Self::merge_status(&mut self.config_scan, &other.config_scan);
+        Self::merge_status(&mut self.dns, &other.dns);
+    }
+
+    fn merge_status(current: &mut ProbeStatus, other: &ProbeStatus) {
+        let rank = |state: &ProbeState| match state {
+            ProbeState::Complete => 0,
+            ProbeState::Partial => 1,
+            ProbeState::Failed => 2,
+        };
+        if rank(&other.state) > rank(&current.state) {
+            *current = other.clone();
+        } else if rank(&other.state) == rank(&current.state) {
+            current.unavailable += other.unavailable;
+            if current.details.is_none() {
+                current.details = other.details.clone();
+            }
+        }
+    }
+}
+
+impl Default for ProbeStatuses {
+    fn default() -> Self {
+        Self {
+            network_sockets: ProbeStatus::complete(),
+            process_attribution: ProbeStatus::complete(),
+            cron: ProbeStatus::complete(),
+            systemd: ProbeStatus::complete(),
+            config_scan: ProbeStatus::complete(),
+            dns: ProbeStatus::complete(),
+        }
+    }
+}
+
+impl ProbeStatuses {
+    pub fn legacy_unknown() -> Self {
+        let unknown = || ProbeStatus::failed("probe status unavailable for this snapshot");
+        Self {
+            network_sockets: unknown(),
+            process_attribution: unknown(),
+            cron: unknown(),
+            systemd: unknown(),
+            config_scan: unknown(),
+            dns: unknown(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Evidence {
     pub level: EvidenceLevel,
@@ -120,6 +232,8 @@ pub struct AnalysisResult {
     pub observed_processes: HashMap<String, ProcessActivity>,
     pub risks: Vec<RiskAssessment>,
     pub decommission_confidence: u8,
+    #[serde(default)]
+    pub probe_statuses: ProbeStatuses,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -192,4 +306,6 @@ pub struct ObservationSnapshot {
     pub cron_jobs: Vec<CronJob>,
     pub systemd_timers: Vec<SystemdTimer>,
     pub dns_names: Vec<DnsName>,
+    #[serde(default = "ProbeStatuses::legacy_unknown")]
+    pub probe_statuses: ProbeStatuses,
 }
