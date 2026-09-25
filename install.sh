@@ -6,7 +6,8 @@ set -e
 
 VERSION="1.0.0"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
-REPO="https://github.com/anthropics/screamless"
+REPO="https://github.com/cyberducttape/ScreemLess"
+BRANCH="master"
 
 echo "🔍 Screamless $VERSION Installer"
 echo "=================================="
@@ -31,7 +32,7 @@ fi
 
 echo "Building Screamless..."
 cd "$(mktemp -d)"
-git clone --depth 1 "$REPO" .
+git clone --branch "$BRANCH" --depth 1 "$REPO" .
 cargo build --release
 
 BINARY="target/release/screamless"
@@ -62,4 +63,4 @@ echo "  screamless observe --duration 7d # Observe for 7 days"
 echo "  screamless report                # Generate report"
 echo "  screamless dashboard             # Interactive dashboard"
 echo ""
-echo "Full docs: $REPO/blob/main/README.md"
+echo "Full docs: $REPO/blob/$BRANCH/README.md"

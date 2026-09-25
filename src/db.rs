@@ -3,6 +3,8 @@ use crate::models::ObservationSnapshot;
 use serde_json;
 use std::path::Path;
 
+const SCHEMA_VERSION: i64 = 1;
+
 pub struct Database {
     conn: Connection,
 }
@@ -11,6 +13,7 @@ impl Database {
     pub fn new<P: AsRef<Path>>(path: P) -> SqlResult<Self> {
         let conn = Connection::open(path)?;
         let db = Database { conn };
+        db.conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         db.init_schema()?;
         Ok(db)
     }
@@ -69,22 +72,139 @@ impl Database {
                 active INTEGER NOT NULL,
                 FOREIGN KEY(snapshot_id) REFERENCES snapshots(id)
             );
+
+            CREATE INDEX IF NOT EXISTS idx_snapshots_hostname_timestamp
+                ON snapshots(hostname, timestamp);
+            CREATE INDEX IF NOT EXISTS idx_listening_services_snapshot
+                ON listening_services(snapshot_id);
+            CREATE INDEX IF NOT EXISTS idx_network_connections_snapshot
+                ON network_connections(snapshot_id);
             "#,
         )?;
+
+        let version: i64 = self.conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if version > SCHEMA_VERSION {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        if version < SCHEMA_VERSION {
+            // Version 1 is the normalized snapshot schema above. Future changes must
+            // be added as explicit versioned migrations instead of silent mutations.
+            self.backfill_normalized_tables()?;
+            self.conn.execute_batch(&format!("PRAGMA user_version = {};", SCHEMA_VERSION))?;
+        }
         Ok(())
     }
 
-    pub fn store_snapshot(&self, snapshot: &ObservationSnapshot) -> SqlResult<()> {
+    fn backfill_normalized_tables(&self) -> SqlResult<()> {
+        self.conn.execute_batch(
+            "DELETE FROM listening_services;
+             DELETE FROM network_connections;
+             DELETE FROM cron_jobs;
+             DELETE FROM systemd_timers;",
+        )?;
+
+        let snapshots = {
+            let mut stmt = self.conn.prepare("SELECT id, data FROM snapshots ORDER BY id")?;
+            let rows = stmt.query_map([], |row| {
+                let id = row.get::<_, i64>(0)?;
+                let json = row.get::<_, String>(1)?;
+                let snapshot = serde_json::from_str::<ObservationSnapshot>(&json).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(1, Type::Text, Box::new(error))
+                })?;
+                Ok((id, snapshot))
+            })?;
+            rows.collect::<SqlResult<Vec<_>>>()?
+        };
+
+        for (snapshot_id, snapshot) in snapshots {
+            for service in &snapshot.listening_services {
+                self.conn.execute(
+                    "INSERT INTO listening_services (snapshot_id, port, protocol, process_name, pid, user)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    rusqlite::params![snapshot_id, service.port, service.protocol, service.process_name, service.pid, service.user],
+                )?;
+            }
+            for connection in &snapshot.network_connections {
+                self.conn.execute(
+                    "INSERT INTO network_connections
+                     (snapshot_id, local_addr, local_port, remote_addr, remote_port, protocol, state, pid, process_name)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    rusqlite::params![snapshot_id, connection.local_addr, connection.local_port, connection.remote_addr, connection.remote_port, connection.protocol, connection.state, connection.pid, connection.process_name],
+                )?;
+            }
+            for job in &snapshot.cron_jobs {
+                self.conn.execute(
+                    "INSERT INTO cron_jobs (snapshot_id, schedule, command, source)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![snapshot_id, job.schedule, job.command, job.source],
+                )?;
+            }
+            for timer in &snapshot.systemd_timers {
+                self.conn.execute(
+                    "INSERT INTO systemd_timers (snapshot_id, name, unit, enabled, active)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    rusqlite::params![snapshot_id, timer.name, timer.unit, timer.enabled, timer.active],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn store_snapshot(&mut self, snapshot: &ObservationSnapshot) -> SqlResult<()> {
         let snapshot_json = serde_json::to_string(&snapshot)
             .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
 
         let timestamp = snapshot.timestamp.timestamp();
+        let tx = self.conn.transaction()?;
 
-        self.conn.execute(
-            "INSERT OR REPLACE INTO snapshots (hostname, timestamp, data)
-             VALUES (?1, ?2, ?3)",
+        tx.execute(
+            "INSERT INTO snapshots (hostname, timestamp, data)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(hostname, timestamp) DO UPDATE SET data = excluded.data",
             rusqlite::params![&snapshot.hostname, timestamp, snapshot_json],
         )?;
+
+        let snapshot_id: i64 = tx.query_row(
+            "SELECT id FROM snapshots WHERE hostname = ?1 AND timestamp = ?2",
+            rusqlite::params![&snapshot.hostname, timestamp],
+            |row| row.get(0),
+        )?;
+        tx.execute("DELETE FROM listening_services WHERE snapshot_id = ?1", [snapshot_id])?;
+        tx.execute("DELETE FROM network_connections WHERE snapshot_id = ?1", [snapshot_id])?;
+        tx.execute("DELETE FROM cron_jobs WHERE snapshot_id = ?1", [snapshot_id])?;
+        tx.execute("DELETE FROM systemd_timers WHERE snapshot_id = ?1", [snapshot_id])?;
+
+        for service in &snapshot.listening_services {
+            tx.execute(
+                "INSERT INTO listening_services (snapshot_id, port, protocol, process_name, pid, user)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![snapshot_id, service.port, service.protocol, service.process_name, service.pid, service.user],
+            )?;
+        }
+        for connection in &snapshot.network_connections {
+            tx.execute(
+                "INSERT INTO network_connections
+                 (snapshot_id, local_addr, local_port, remote_addr, remote_port, protocol, state, pid, process_name)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                rusqlite::params![snapshot_id, connection.local_addr, connection.local_port, connection.remote_addr, connection.remote_port, connection.protocol, connection.state, connection.pid, connection.process_name],
+            )?;
+        }
+        for job in &snapshot.cron_jobs {
+            tx.execute(
+                "INSERT INTO cron_jobs (snapshot_id, schedule, command, source)
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![snapshot_id, job.schedule, job.command, job.source],
+            )?;
+        }
+        for timer in &snapshot.systemd_timers {
+            tx.execute(
+                "INSERT INTO systemd_timers (snapshot_id, name, unit, enabled, active)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![snapshot_id, timer.name, timer.unit, timer.enabled, timer.active],
+            )?;
+        }
+
+        tx.commit()?;
 
         Ok(())
     }
@@ -149,10 +269,99 @@ impl Database {
     }
 
     /// Bound long-running observation databases while retaining recent history.
-    pub fn prune_snapshots_before(&self, cutoff_timestamp: i64) -> SqlResult<usize> {
-        self.conn.execute(
+    pub fn prune_snapshots_before(&mut self, cutoff_timestamp: i64) -> SqlResult<usize> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM listening_services
+             WHERE snapshot_id IN (SELECT id FROM snapshots WHERE timestamp < ?1)",
+            rusqlite::params![cutoff_timestamp],
+        )?;
+        tx.execute(
+            "DELETE FROM network_connections
+             WHERE snapshot_id IN (SELECT id FROM snapshots WHERE timestamp < ?1)",
+            rusqlite::params![cutoff_timestamp],
+        )?;
+        tx.execute(
+            "DELETE FROM cron_jobs
+             WHERE snapshot_id IN (SELECT id FROM snapshots WHERE timestamp < ?1)",
+            rusqlite::params![cutoff_timestamp],
+        )?;
+        tx.execute(
+            "DELETE FROM systemd_timers
+             WHERE snapshot_id IN (SELECT id FROM snapshots WHERE timestamp < ?1)",
+            rusqlite::params![cutoff_timestamp],
+        )?;
+        let deleted = tx.execute(
             "DELETE FROM snapshots WHERE timestamp < ?1",
             rusqlite::params![cutoff_timestamp],
-        )
+        )?;
+        tx.commit()?;
+        Ok(deleted)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Database;
+    use crate::models::*;
+    use chrono::Utc;
+
+    #[test]
+    fn stores_snapshot_data_and_normalized_rows_together() {
+        let path = std::env::temp_dir().join(format!("screamless-db-test-{}.db", std::process::id()));
+        let mut db = Database::new(&path).unwrap();
+        let snapshot = ObservationSnapshot {
+            timestamp: Utc::now(),
+            hostname: "test-host".to_string(),
+            listening_services: vec![ListeningService {
+                port: 443,
+                protocol: "tcp".to_string(),
+                process_name: "web".to_string(),
+                pid: 10,
+                user: "1000".to_string(),
+            }],
+            network_connections: vec![],
+            processes: vec![],
+            cron_jobs: vec![CronJob {
+                schedule: "0 2 * * *".to_string(),
+                command: "[redacted]".to_string(),
+                source: "/etc/crontab".to_string(),
+            }],
+            systemd_timers: vec![],
+            dns_names: vec![],
+            config_references: vec![],
+            probe_statuses: ProbeStatuses::default(),
+        };
+
+        db.store_snapshot(&snapshot).unwrap();
+        let listener_count: i64 = db.conn.query_row(
+            "SELECT COUNT(*) FROM listening_services",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        let cron_count: i64 = db.conn.query_row(
+            "SELECT COUNT(*) FROM cron_jobs",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(listener_count, 1);
+        assert_eq!(cron_count, 1);
+
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn reports_corrupt_snapshot_data_as_an_error() {
+        let path = std::env::temp_dir().join(format!("screamless-db-corrupt-{}.db", std::process::id()));
+        let db = Database::new(&path).unwrap();
+        db.conn.execute(
+            "INSERT INTO snapshots (hostname, timestamp, data) VALUES (?1, ?2, ?3)",
+            rusqlite::params!["broken-host", 1_i64, "not-json"],
+        ).unwrap();
+
+        assert!(db.get_all_snapshots_since(0).is_err());
+        drop(db);
+        let _ = std::fs::remove_file(path);
     }
 }

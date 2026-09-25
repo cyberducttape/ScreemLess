@@ -4,10 +4,10 @@
 
 ```bash
 # Using install script (easiest)
-curl -fsSL https://raw.githubusercontent.com/anthropics/screamless/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/cyberducttape/ScreemLess/master/install.sh | bash
 
 # Or build from source
-git clone https://github.com/anthropics/screamless
+git clone --branch master https://github.com/cyberducttape/ScreemLess
 cd screamless
 cargo build --release
 sudo cp target/release/screamless /usr/local/bin/
@@ -142,9 +142,9 @@ screamless preflight --server app01 --operation update --json
 
 ## Support
 
-- Issues: https://github.com/anthropics/screamless/issues
+- Issues: https://github.com/cyberducttape/ScreemLess/issues
 - Documentation: README.md in repo
-- Examples: See EXAMPLES.md
+- Examples: See the examples in this guide and README.md
 
 ---
 

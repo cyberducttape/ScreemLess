@@ -133,7 +133,7 @@ async fn snapshot(db_path: &std::path::Path) -> Result<()> {
     println!("  Cron jobs: {}", snapshot.cron_jobs.len());
     println!("  Systemd timers: {}", snapshot.systemd_timers.len());
 
-    let db = Database::new(db_path)?;
+    let mut db = Database::new(db_path)?;
     db.store_snapshot(&snapshot)?;
 
     println!("\nSnapshot stored in {}", db_path.display());
@@ -156,7 +156,7 @@ async fn observe(
     );
     println!("Press Ctrl+C to stop early\n");
 
-    let db = Database::new(db_path)?;
+    let mut db = Database::new(db_path)?;
     let start = std::time::Instant::now();
 
     loop {

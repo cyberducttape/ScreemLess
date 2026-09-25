@@ -141,7 +141,7 @@
 ## Installation
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/anthropics/screamless/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/cyberducttape/ScreemLess/master/install.sh | bash
 ```
 
 ## Upgrade Path

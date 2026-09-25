@@ -1,7 +1,13 @@
 [package]
 name = "screamless"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
+rust-version = "1.70"
+description = "Linux dependency archaeology and decommission safety analysis"
+readme = "README.md"
+license = "MIT"
+repository = "https://github.com/cyberducttape/ScreemLess"
+homepage = "https://github.com/cyberducttape/ScreemLess"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
