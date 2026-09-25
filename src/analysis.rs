@@ -47,10 +47,16 @@ impl<'a> Analyzer<'a> {
 
         let inbound_dependencies = self.infer_inbound_dependencies(hostname, since.timestamp())?;
 
-        let mut risks = self.assess_risks(&snapshots, &dependencies, &observed_processes)?;
+        let mut risks = self.assess_risks(
+            &snapshots,
+            &dependencies,
+            &inbound_dependencies,
+            &observed_processes,
+        )?;
         let mut decommission_confidence = self.calculate_decommission_confidence(
             &snapshots,
             &dependencies,
+            &inbound_dependencies,
             &observed_processes,
         );
         if !probe_statuses.all_complete() {
@@ -319,6 +325,7 @@ impl<'a> Analyzer<'a> {
         &self,
         snapshots: &[ObservationSnapshot],
         dependencies: &[Dependency],
+        inbound_dependencies: &[InboundDependency],
         observed_processes: &HashMap<String, ProcessActivity>,
     ) -> Result<Vec<RiskAssessment>> {
         let mut risks = Vec::new();
@@ -330,6 +337,26 @@ impl<'a> Analyzer<'a> {
                 severity: RiskSeverity::Warn,
                 description: "Server is listening on ports (likely has inbound dependencies)".to_string(),
                 evidence: "Listening services detected in observations".to_string(),
+            });
+        }
+
+        for inbound in inbound_dependencies {
+            let source = inbound.source_hostname.as_deref().unwrap_or(&inbound.source_ip);
+            risks.push(RiskAssessment {
+                name: "Confirmed inbound dependency".to_string(),
+                severity: if inbound.confidence >= 70 {
+                    RiskSeverity::Fail
+                } else {
+                    RiskSeverity::Warn
+                },
+                description: format!(
+                    "{} depends on this server ({}% confidence)",
+                    source, inbound.confidence
+                ),
+                evidence: inbound.evidence.iter()
+                    .map(|evidence| evidence.description.clone())
+                    .collect::<Vec<_>>()
+                    .join("; "),
             });
         }
 
@@ -405,6 +432,7 @@ impl<'a> Analyzer<'a> {
         &self,
         snapshots: &[ObservationSnapshot],
         dependencies: &[Dependency],
+        inbound_dependencies: &[InboundDependency],
         observed_processes: &HashMap<String, ProcessActivity>,
     ) -> u8 {
         let mut score = 100u16;
@@ -418,6 +446,18 @@ impl<'a> Analyzer<'a> {
             let high_confidence_deps = dependencies.iter().filter(|d| d.confidence >= 70).count();
             if high_confidence_deps > 0 {
                 score = score.saturating_sub((high_confidence_deps as u16) * 15);
+            }
+        }
+
+        if !inbound_dependencies.is_empty() {
+            let confirmed = inbound_dependencies
+                .iter()
+                .filter(|dependency| dependency.confidence >= 70)
+                .count();
+            if confirmed > 0 {
+                score = score.saturating_sub(50 + (confirmed as u16) * 20);
+            } else {
+                score = score.saturating_sub(30);
             }
         }
 
@@ -439,5 +479,40 @@ impl<'a> Analyzer<'a> {
         }
 
         score.min(100) as u8
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Analyzer;
+    use crate::db::Database;
+    use crate::models::{ImpactLevel, InboundDependency};
+
+    #[test]
+    fn confirmed_inbound_dependency_blocks_high_readiness() {
+        let path = std::env::temp_dir().join(format!(
+            "screamless-analysis-test-{}.db",
+            std::process::id()
+        ));
+        let db = Database::new(&path).unwrap();
+        let analyzer = Analyzer::new(&db);
+        let inbound = vec![InboundDependency {
+            source_ip: "unknown".to_string(),
+            source_hostname: Some("web01".to_string()),
+            confidence: 85,
+            evidence: Vec::new(),
+            detection_methods: vec!["central_outbound_observation".to_string()],
+            impact_level: ImpactLevel::High,
+        }];
+
+        let score = analyzer.calculate_decommission_confidence(
+            &[],
+            &[],
+            &inbound,
+            &std::collections::HashMap::new(),
+        );
+        assert!(score < 50);
+        drop(db);
+        let _ = std::fs::remove_file(path);
     }
 }

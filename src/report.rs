@@ -308,6 +308,23 @@ impl<'a> Reporter<'a> {
             checks.push("[PASS] No outbound dependencies detected".to_string());
         }
 
+        if !analysis.inbound_dependencies.is_empty() {
+            let confirmed = analysis.inbound_dependencies.iter()
+                .filter(|dependency| dependency.confidence >= 70)
+                .count();
+            if confirmed > 0 {
+                checks.push(format!(
+                    "[FAIL] {} confirmed inbound dependents",
+                    confirmed
+                ));
+            } else {
+                checks.push(format!(
+                    "[WARN] {} low-confidence inbound dependents",
+                    analysis.inbound_dependencies.len()
+                ));
+            }
+        }
+
         let critical_one_time = analysis.observed_processes
             .values()
             .filter(|p| p.only_once_in_window && (p.name.contains("backup") || p.name.contains("sync")))
@@ -350,6 +367,15 @@ impl<'a> Reporter<'a> {
                 dep.remote_port,
                 dep.connection_count,
                 dep.processes.join(", ")
+            );
+            any_blocking = true;
+        }
+
+        for inbound in analysis.inbound_dependencies.iter().filter(|d| d.confidence >= 70) {
+            let source = inbound.source_hostname.as_deref().unwrap_or(&inbound.source_ip);
+            println!(
+                "  • {} depends on this server ({}% confidence)",
+                source, inbound.confidence
             );
             any_blocking = true;
         }
