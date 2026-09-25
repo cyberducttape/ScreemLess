@@ -8,6 +8,8 @@ use crate::collector::Collector;
 use crate::db::Database;
 use crate::report::Reporter;
 
+const SNAPSHOT_RETENTION_DAYS: i64 = 30;
+
 #[derive(Parser)]
 #[command(name = "screamless")]
 #[command(about = "Automatic Linux dependency archaeology", long_about = None)]
@@ -161,6 +163,9 @@ async fn observe(
         match Collector::collect_snapshot().await {
             Ok(snapshot) => {
                 db.store_snapshot(&snapshot)?;
+                db.prune_snapshots_before(
+                    (chrono::Utc::now() - chrono::Duration::days(SNAPSHOT_RETENTION_DAYS)).timestamp(),
+                )?;
 
                 println!(
                     "[{}] Snapshot collected: {} services, {} connections",

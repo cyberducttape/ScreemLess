@@ -170,12 +170,12 @@ impl<'a> Analyzer<'a> {
     }
 
     fn infer_dependencies(&self, snapshots: &[ObservationSnapshot]) -> Result<Vec<Dependency>> {
-        let mut remote_hosts: HashMap<(String, u16), Vec<(DateTime<Utc>, HashSet<String>)>> =
+        let mut remote_hosts: HashMap<(String, u16, String), Vec<(DateTime<Utc>, HashSet<String>)>> =
             HashMap::new();
 
         for snapshot in snapshots {
             for conn in &snapshot.network_connections {
-                let key = (conn.remote_addr.clone(), conn.remote_port);
+                let key = (conn.remote_addr.clone(), conn.remote_port, conn.protocol.clone());
                 let mut processes = HashSet::new();
                 processes.insert(conn.process_name.clone());
 
@@ -194,7 +194,7 @@ impl<'a> Analyzer<'a> {
 
         let mut dependencies = Vec::new();
 
-        for ((remote_addr, remote_port), observations) in remote_hosts {
+        for ((remote_addr, remote_port, protocol), observations) in remote_hosts {
             let connection_count = observations.len();
 
             let mut all_processes = HashSet::new();
@@ -266,7 +266,7 @@ impl<'a> Analyzer<'a> {
             dependencies.push(Dependency {
                 remote_addr,
                 remote_port,
-                protocol: "tcp".to_string(),
+                protocol,
                 connection_count,
                 first_seen,
                 last_seen,

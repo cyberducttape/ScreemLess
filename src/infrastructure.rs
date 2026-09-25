@@ -77,8 +77,8 @@ impl InfrastructureMapper {
                                 EvidenceLevel::Med
                             },
                             description: format!(
-                                "Observed outbound TCP connection to port {} ({} observation(s))",
-                                dependency.remote_port, dependency.connection_count
+                                "Observed outbound {} connection to port {} ({} observation(s))",
+                                dependency.protocol, dependency.remote_port, dependency.connection_count
                             ),
                         }],
                         detection_methods: vec!["central_outbound_observation".to_string()],

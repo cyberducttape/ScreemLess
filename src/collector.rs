@@ -4,11 +4,16 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration as StdDuration, Instant};
 
 use crate::models::*;
 use crate::config_scanner::ConfigScanner;
 
 pub struct Collector;
+
+static CONFIG_DNS_CACHE: OnceLock<Mutex<Option<(Instant, Vec<DnsName>, Vec<ConfigReference>)>>> =
+    OnceLock::new();
 
 impl Collector {
     pub async fn collect_snapshot() -> Result<ObservationSnapshot> {
@@ -16,14 +21,25 @@ impl Collector {
         let timestamp = Utc::now();
         let mut probe_statuses = ProbeStatuses::default();
 
-        let (listening_services, listening_unavailable) = match Self::collect_listening_services() {
+        let (processes, pid_to_process) = match Self::collect_process_inventory() {
+            Ok(inventory) => inventory,
+            Err(error) => {
+                probe_statuses.process_attribution = ProbeStatus::partial(
+                    format!("process inventory unavailable: {}", error),
+                    0,
+                );
+                (Vec::new(), HashMap::new())
+            }
+        };
+
+        let (listening_services, listening_unavailable) = match Self::collect_listening_services(&pid_to_process) {
             Ok(result) => result,
             Err(error) => {
                 probe_statuses.network_sockets = ProbeStatus::failed(error.to_string());
                 (Vec::new(), 0)
             }
         };
-        let (network_connections, connection_unavailable) = match Self::collect_network_connections() {
+        let (network_connections, connection_unavailable) = match Self::collect_network_connections(&pid_to_process) {
             Ok(result) => result,
             Err(error) => {
                 probe_statuses.network_sockets = ProbeStatus::failed(error.to_string());
@@ -38,16 +54,6 @@ impl Collector {
             );
         }
 
-        let processes = match Self::collect_processes() {
-            Ok(processes) => processes,
-            Err(error) => {
-                probe_statuses.process_attribution = ProbeStatus::partial(
-                    format!("process inventory unavailable: {}", error),
-                    0,
-                );
-                Vec::new()
-            }
-        };
         let (cron_jobs, cron_unavailable) = Self::collect_cron_jobs()?;
         if cron_unavailable > 0 {
             probe_statuses.cron = ProbeStatus::partial(
@@ -103,19 +109,17 @@ impl Collector {
             .context("Could not determine hostname")
     }
 
-    fn collect_listening_services() -> Result<(Vec<ListeningService>, usize)> {
+    fn collect_listening_services(
+        pid_to_process: &HashMap<u32, (String, u32, String)>,
+    ) -> Result<(Vec<ListeningService>, usize)> {
         let mut services = Vec::new();
         let mut unavailable = 0;
 
-        let (pid_to_process, map_unavailable) = match Self::build_pid_to_process_map() {
-            Ok(map) => (map, false),
-            Err(_) => (HashMap::new(), true),
-        };
-        let output = Self::run_socket_probe(&["-tlnp"])?;
+        let output = Self::run_socket_probe(&["-tunlp"])?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
 
-        for line in stdout.lines().skip(1) {
+        for line in stdout.lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
             if let Some((_, port)) = Self::find_endpoints(&parts).first() {
                 let pid = Self::extract_pid(parts.last().copied());
@@ -129,40 +133,36 @@ impl Collector {
 
                 services.push(ListeningService {
                     port: *port,
-                    protocol: "tcp".to_string(),
+                    protocol: Self::socket_protocol(&parts),
                     process_name,
                     pid,
-                    user,
+                    user: user.clone(),
                 });
             }
         }
 
-        let unavailable = if map_unavailable && !services.is_empty() {
-            unavailable.max(services.len())
-        } else {
-            unavailable
-        };
         Ok((services, unavailable))
     }
 
-    fn collect_network_connections() -> Result<(Vec<NetworkConnection>, usize)> {
+    fn collect_network_connections(
+        pid_to_process: &HashMap<u32, (String, u32, String)>,
+    ) -> Result<(Vec<NetworkConnection>, usize)> {
         let mut connections = Vec::new();
         let mut unavailable = 0;
 
-        let (pid_to_process, map_unavailable) = match Self::build_pid_to_process_map() {
-            Ok(map) => (map, false),
-            Err(_) => (HashMap::new(), true),
-        };
-        let output = Self::run_socket_probe(&["-tnp"])?;
+        let output = Self::run_socket_probe(&["-tunp"])?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
 
-        for line in stdout.lines().skip(1) {
+        for line in stdout.lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() >= 4 {
-                if parts.iter().any(|part| *part == "ESTAB" || *part == "ESTABLISHED") {
+                if Self::is_connection_line(&parts) {
                     let endpoints = Self::find_endpoints(&parts);
                     if let [local, remote, ..] = endpoints.as_slice() {
+                        if remote.1 == 0 {
+                            continue;
+                        }
                         let pid = Self::extract_pid(parts.last().copied());
                         if pid == 0 || !pid_to_process.contains_key(&pid) {
                             unavailable += 1;
@@ -177,8 +177,8 @@ impl Collector {
                             local_port: local.1,
                             remote_addr: remote.0.clone(),
                             remote_port: remote.1,
-                            protocol: "tcp".to_string(),
-                            state: "ESTABLISHED".to_string(),
+                            protocol: Self::socket_protocol(&parts),
+                            state: Self::socket_state(&parts),
                             pid,
                             process_name,
                         });
@@ -187,11 +187,6 @@ impl Collector {
             }
         }
 
-        let unavailable = if map_unavailable && !connections.is_empty() {
-            unavailable.max(connections.len())
-        } else {
-            unavailable
-        };
         Ok((connections, unavailable))
     }
 
@@ -234,6 +229,39 @@ impl Collector {
             .collect()
     }
 
+    fn socket_protocol(parts: &[&str]) -> String {
+        parts.iter()
+            .find_map(|part| match *part {
+                "tcp" | "tcp6" => Some("tcp"),
+                "udp" | "udp6" => Some("udp"),
+                _ => None,
+            })
+            .or_else(|| {
+                if parts.iter().any(|part| *part == "UNCONN") {
+                    Some("udp")
+                } else {
+                    Some("tcp")
+                }
+            })
+            .unwrap()
+            .to_string()
+    }
+
+    fn socket_state(parts: &[&str]) -> String {
+        parts.iter()
+            .find(|part| matches!(**part, "LISTEN" | "ESTAB" | "ESTABLISHED" | "UNCONN" | "CLOSE-WAIT"))
+            .map(|state| match *state {
+                "ESTAB" => "ESTABLISHED",
+                other => other,
+            })
+            .unwrap_or("UNKNOWN")
+            .to_string()
+    }
+
+    fn is_connection_line(parts: &[&str]) -> bool {
+        parts.iter().any(|part| matches!(*part, "ESTAB" | "ESTABLISHED" | "UNCONN" | "CONNECTED" | "udp" | "udp6"))
+    }
+
     fn extract_pid(process_field: Option<&str>) -> u32 {
         let field = match process_field {
             Some(field) => field,
@@ -250,8 +278,9 @@ impl Collector {
         field.split('/').next().and_then(|value| value.parse().ok()).unwrap_or(0)
     }
 
-    fn collect_processes() -> Result<Vec<Process>> {
+    fn collect_process_inventory() -> Result<(Vec<Process>, HashMap<u32, (String, u32, String)>)> {
         let mut processes = Vec::new();
+        let mut pid_to_process = HashMap::new();
 
         for proc_entry in procfs::process::all_processes()? {
             let process = match proc_entry {
@@ -265,15 +294,19 @@ impl Collector {
                 processes.push(Process {
                     pid: process.pid() as u32,
                     name: stat.comm.clone(),
-                    user,
+                    user: user.clone(),
                     // Command lines frequently contain credentials. The executable name
                     // above is sufficient for dependency attribution.
                     cmdline: String::new(),
                 });
+                pid_to_process.insert(
+                    process.pid() as u32,
+                    (stat.comm, process.pid() as u32, user),
+                );
             }
         }
 
-        Ok(processes)
+        Ok((processes, pid_to_process))
     }
 
     fn collect_cron_jobs() -> Result<(Vec<CronJob>, usize)> {
@@ -410,34 +443,16 @@ impl Collector {
         Ok(timers)
     }
 
-    fn build_pid_to_process_map() -> Result<HashMap<u32, (String, u32, String)>> {
-        let mut map = HashMap::new();
-
-        for proc_entry in procfs::process::all_processes()? {
-            let process = match proc_entry {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
-
-            let pid = process.pid() as u32;
-            let stat = process.stat().ok();
-            let status = process.status().ok();
-
-            let name = stat
-                .map(|s| s.comm.clone())
-                .unwrap_or_else(|| "unknown".to_string());
-
-            let user = status
-                .map(|s| s.ruid.to_string())
-                .unwrap_or_else(|| "unknown".to_string());
-
-            map.insert(pid, (name, pid, user));
+    fn collect_dns_names() -> Result<(Vec<DnsName>, usize, Vec<ConfigReference>)> {
+        let cache = CONFIG_DNS_CACHE.get_or_init(|| Mutex::new(None));
+        if let Ok(guard) = cache.lock() {
+            if let Some((timestamp, names, references)) = guard.as_ref() {
+                if timestamp.elapsed() < StdDuration::from_secs(300) {
+                    return Ok((names.clone(), 0, references.clone()));
+                }
+            }
         }
 
-        Ok(map)
-    }
-
-    fn collect_dns_names() -> Result<(Vec<DnsName>, usize, Vec<ConfigReference>)> {
         let mut names = Vec::new();
         let mut unavailable = 0;
 
@@ -470,6 +485,9 @@ impl Collector {
             }
         }
 
+        if let Ok(mut guard) = cache.lock() {
+            *guard = Some((Instant::now(), names.clone(), config_refs.clone()));
+        }
         Ok((names, unavailable, config_refs))
     }
 }
@@ -525,5 +543,13 @@ mod tests {
         assert_eq!(unavailable, 0);
         assert_eq!(jobs[0].schedule, "0 2 * * *");
         assert_eq!(jobs[0].command, "[redacted]");
+    }
+
+    #[test]
+    fn recognizes_udp_socket_state_and_protocol() {
+        let fields = ["UNCONN", "0", "0", "127.0.0.1:5353", "0.0.0.0:*"];
+        assert!(Collector::is_connection_line(&fields));
+        assert_eq!(Collector::socket_protocol(&fields), "udp");
+        assert_eq!(Collector::socket_state(&fields), "UNCONN");
     }
 }

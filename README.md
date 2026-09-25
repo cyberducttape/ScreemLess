@@ -69,6 +69,8 @@ These servers depend on THIS one:
 
 Process activity counts snapshots in which a process was observed; it does not claim to count process executions. Cron discovery parses schedules from system and user crontabs, while command bodies are redacted and job activity is not inferred.
 
+Long-running `observe` sessions retain the most recent 30 days of snapshots automatically.
+
 ### Shutdown Impact
 ```
 If you shut down db01:
@@ -153,10 +155,12 @@ screamless dashboard --output compliance-report.html
 ## How It Works
 
 ### Outbound Detection
-- Observes TCP connections from `/proc/net/tcp`
+- Polls TCP and UDP sockets through `ss` with a `netstat` fallback
 - Correlates with running processes
 - Finds config file references
 - Assigns confidence based on evidence
+
+Polling is a fallback observation method and can miss very short-lived connections or datagrams. Event-driven eBPF, conntrack, and service-mesh telemetry are not currently included.
 
 ### Inbound Detection
 Screamless derives inbound dependencies by reversing observed outbound edges from the other hosts in the database. If `web01` is observed connecting to `db01:3306`, the topology records `web01` as a dependent of `db01`. Local DNS records, access-log IPs, Git remotes, SSH configuration, and mount configuration are not treated as server-to-server inbound dependencies.

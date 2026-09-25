@@ -105,6 +105,8 @@ screamless observe &
 - Run observations during off-peak
 - Use background mode: `screamless observe &`
 
+Observation uses periodic TCP/UDP polling, so very short-lived network activity may not be captured. The observer prunes snapshots older than 30 days.
+
 ## Integration
 
 ### With CI/CD (GitLab, GitHub Actions)

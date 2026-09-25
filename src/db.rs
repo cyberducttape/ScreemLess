@@ -147,4 +147,12 @@ impl Database {
 
         Ok(snapshots)
     }
+
+    /// Bound long-running observation databases while retaining recent history.
+    pub fn prune_snapshots_before(&self, cutoff_timestamp: i64) -> SqlResult<usize> {
+        self.conn.execute(
+            "DELETE FROM snapshots WHERE timestamp < ?1",
+            rusqlite::params![cutoff_timestamp],
+        )
+    }
 }
