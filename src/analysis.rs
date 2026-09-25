@@ -44,7 +44,7 @@ impl<'a> Analyzer<'a> {
         // Detect inbound dependencies
         let inbound_dependencies = ReverseInference::infer_inbound_dependencies(
             hostname,
-            &vec!["127.0.0.1".to_string()],
+            &["127.0.0.1".to_string()],
         ).unwrap_or_default();
 
         let risks = self.assess_risks(&snapshots, &dependencies, &observed_processes)?;
@@ -281,10 +281,10 @@ impl<'a> Analyzer<'a> {
             return 0;
         }
 
-        let total_score: u8 = evidence.iter().map(|e| e.level.score()).sum();
-        let max_score = (evidence.len() as u8) * 3;
+        let total_score: u16 = evidence.iter().map(|e| u16::from(e.level.score())).sum();
+        let max_score = (evidence.len() as u16) * 3;
 
-        ((total_score as u16 * 100) / max_score as u16) as u8
+        ((total_score * 100) / max_score) as u8
     }
 
     fn build_ip_to_hostname_map(&self, snapshots: &[ObservationSnapshot]) -> HashMap<String, String> {

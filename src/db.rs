@@ -1,4 +1,4 @@
-use rusqlite::{Connection, Result as SqlResult};
+use rusqlite::{Connection, Result as SqlResult, types::Type};
 use crate::models::ObservationSnapshot;
 use serde_json;
 use std::path::Path;
@@ -76,7 +76,7 @@ impl Database {
 
     pub fn store_snapshot(&self, snapshot: &ObservationSnapshot) -> SqlResult<()> {
         let snapshot_json = serde_json::to_string(&snapshot)
-            .expect("Failed to serialize snapshot");
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
 
         let timestamp = snapshot.timestamp.timestamp();
 
@@ -102,8 +102,9 @@ impl Database {
 
         match result {
             Ok(json) => {
-                let snapshot = serde_json::from_str(&json)
-                    .expect("Failed to deserialize snapshot");
+                let snapshot = serde_json::from_str(&json).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(0, Type::Text, Box::new(error))
+                })?;
                 Ok(Some(snapshot))
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -119,12 +120,14 @@ impl Database {
 
         let snapshots = stmt.query_map(
             rusqlite::params![hostname, since_timestamp],
-            |row| row.get::<_, String>(0),
+            |row| {
+                let json = row.get::<_, String>(0)?;
+                serde_json::from_str(&json).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(0, Type::Text, Box::new(error))
+                })
+            },
         )?
-            .collect::<SqlResult<Vec<_>>>()?
-            .into_iter()
-            .filter_map(|json| serde_json::from_str(&json).ok())
-            .collect();
+            .collect::<SqlResult<Vec<ObservationSnapshot>>>()?;
 
         Ok(snapshots)
     }

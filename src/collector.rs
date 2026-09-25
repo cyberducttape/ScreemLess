@@ -1,9 +1,8 @@
-use anyhow::{Result, Context};
+use anyhow::{Context, Result};
 use chrono::Utc;
+use std::collections::HashMap;
 use std::fs;
 use std::process::Command;
-use std::collections::HashMap;
-use std::net::IpAddr;
 
 use crate::models::*;
 use crate::config_scanner::ConfigScanner;
@@ -54,28 +53,20 @@ impl Collector {
 
         for line in stdout.lines().skip(1) {
             let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 5 {
-                if let Ok(port) = parts[3].split(':').last().unwrap_or(&"0").parse::<u16>() {
-                    if port > 0 {
-                        let pid = if let Some(pid_str) = parts.last() {
-                            pid_str.split('/').next()
-                                .and_then(|p| p.parse::<u32>().ok())
-                                .unwrap_or(0)
-                        } else {
-                            0
-                        };
+            if let Some((_, port)) = Self::find_endpoints(&parts).first() {
+                let pid = Self::extract_pid(parts.last().copied());
+                let (process_name, user) = pid_to_process
+                    .get(&pid)
+                    .map(|(name, _, user)| (name.clone(), user.clone()))
+                    .unwrap_or_else(|| ("unknown".to_string(), "unknown".to_string()));
 
-                        if let Some((name, _, user)) = pid_to_process.get(&pid) {
-                            services.push(ListeningService {
-                                port,
-                                protocol: "tcp".to_string(),
-                                process_name: name.clone(),
-                                pid,
-                                user: user.clone(),
-                            });
-                        }
-                    }
-                }
+                services.push(ListeningService {
+                    port: *port,
+                    protocol: "tcp".to_string(),
+                    process_name,
+                    pid,
+                    user,
+                });
             }
         }
 
@@ -99,30 +90,24 @@ impl Collector {
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() >= 5 && (parts[0] == "tcp" || parts[0] == "tcp6") {
                 if parts[1].contains("ESTAB") || line.contains("ESTABLISHED") {
-                    if let (Some(local), Some(remote)) = (parts.get(3), parts.get(4)) {
-                        let (local_addr, local_port) = Self::parse_addr_port(local);
-                        let (remote_addr, remote_port) = Self::parse_addr_port(remote);
+                    let endpoints = Self::find_endpoints(&parts);
+                    if let [local, remote, ..] = endpoints.as_slice() {
+                        let pid = Self::extract_pid(parts.last().copied());
+                        let process_name = pid_to_process
+                            .get(&pid)
+                            .map(|(name, _, _)| name.clone())
+                            .unwrap_or_else(|| "unknown".to_string());
 
-                        let pid = if let Some(pid_str) = parts.last() {
-                            pid_str.split('/').next()
-                                .and_then(|p| p.parse::<u32>().ok())
-                                .unwrap_or(0)
-                        } else {
-                            0
-                        };
-
-                        if let Some((name, _, _)) = pid_to_process.get(&pid) {
-                            connections.push(NetworkConnection {
-                                local_addr,
-                                local_port,
-                                remote_addr,
-                                remote_port,
-                                protocol: "tcp".to_string(),
-                                state: "ESTABLISHED".to_string(),
-                                pid,
-                                process_name: name.clone(),
-                            });
-                        }
+                        connections.push(NetworkConnection {
+                            local_addr: local.0.clone(),
+                            local_port: local.1,
+                            remote_addr: remote.0.clone(),
+                            remote_port: remote.1,
+                            protocol: "tcp".to_string(),
+                            state: "ESTABLISHED".to_string(),
+                            pid,
+                            process_name,
+                        });
                     }
                 }
             }
@@ -131,14 +116,40 @@ impl Collector {
         Ok(connections)
     }
 
-    fn parse_addr_port(addr_port: &str) -> (String, u16) {
+    fn parse_addr_port(addr_port: &str) -> Option<(String, u16)> {
         if let Some(last_colon) = addr_port.rfind(':') {
-            let addr = addr_port[..last_colon].trim_matches('[').to_string();
-            let port = addr_port[last_colon + 1..].parse::<u16>().unwrap_or(0);
-            (addr, port)
+            let addr = addr_port[..last_colon]
+                .strip_prefix('[')
+                .and_then(|addr| addr.strip_suffix(']'))
+                .unwrap_or(&addr_port[..last_colon])
+                .to_string();
+            let port = addr_port[last_colon + 1..].parse::<u16>().ok()?;
+            Some((addr, port))
         } else {
-            (addr_port.to_string(), 0)
+            None
         }
+    }
+
+    fn find_endpoints(parts: &[&str]) -> Vec<(String, u16)> {
+        parts.iter()
+            .filter_map(|part| Self::parse_addr_port(part))
+            .collect()
+    }
+
+    fn extract_pid(process_field: Option<&str>) -> u32 {
+        let field = match process_field {
+            Some(field) => field,
+            None => return 0,
+        };
+
+        if let Some(pid) = field.split("pid=").nth(1)
+            .and_then(|value| value.split(|c: char| !c.is_ascii_digit()).next())
+            .and_then(|value| value.parse().ok())
+        {
+            return pid;
+        }
+
+        field.split('/').next().and_then(|value| value.parse().ok()).unwrap_or(0)
     }
 
     fn collect_processes() -> Result<Vec<Process>> {
@@ -217,17 +228,20 @@ impl Collector {
 
         if output.status.success() {
             if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
-                if let Some(timers_array) = json.get("timers").and_then(|t| t.as_array()) {
+                let timers_array = json.as_array()
+                    .or_else(|| json.get("timers").and_then(|t| t.as_array()));
+                if let Some(timers_array) = timers_array {
                     for timer_obj in timers_array {
-                        if let (Some(unit), Some(active)) = (
-                            timer_obj.get("unit").and_then(|u| u.as_str()),
-                            timer_obj.get("active").and_then(|a| a.as_str()),
-                        ) {
+                        if let Some(unit) = timer_obj.get("unit").and_then(|u| u.as_str()) {
+                            let active = timer_obj.get("active")
+                                .and_then(|a| a.as_str())
+                                .map(|a| a == "active")
+                                .unwrap_or(true);
                             timers.push(SystemdTimer {
                                 name: unit.replace(".timer", ""),
                                 unit: unit.to_string(),
                                 enabled: true,
-                                active: active == "active",
+                                active,
                             });
                         }
                     }
@@ -295,5 +309,34 @@ impl Collector {
         }
 
         Ok(names)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Collector;
+
+    #[test]
+    fn parses_ss_ipv6_endpoint_without_brackets() {
+        assert_eq!(
+            Collector::parse_addr_port("[2001:db8::1]:443"),
+            Some(("2001:db8::1".to_string(), 443))
+        );
+    }
+
+    #[test]
+    fn extracts_pid_from_ss_process_metadata() {
+        assert_eq!(Collector::extract_pid(Some("users:((\"nginx\",pid=1234,fd=7))")), 1234);
+        assert_eq!(Collector::extract_pid(Some("1234/nginx")), 1234);
+        assert_eq!(Collector::extract_pid(None), 0);
+    }
+
+    #[test]
+    fn finds_local_and_remote_ss_endpoints() {
+        let fields = ["tcp", "ESTAB", "0", "127.0.0.1:42000", "[::1]:5432"];
+        assert_eq!(Collector::find_endpoints(&fields), vec![
+            ("127.0.0.1".to_string(), 42000),
+            ("::1".to_string(), 5432),
+        ]);
     }
 }

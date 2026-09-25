@@ -1,8 +1,7 @@
 use anyhow::Result;
 use std::fs;
-use std::path::Path;
 use regex::Regex;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::models::{InboundDependency, Evidence, EvidenceLevel, ImpactLevel};
 
@@ -29,7 +28,7 @@ impl ReverseInference {
         Ok(inbound)
     }
 
-    fn detect_from_access_logs(hostname: &str) -> Result<Vec<InboundDependency>> {
+    fn detect_from_access_logs(_hostname: &str) -> Result<Vec<InboundDependency>> {
         let mut deps = Vec::new();
         let log_paths = vec![
             "/var/log/nginx/access.log",
@@ -62,11 +61,11 @@ impl ReverseInference {
 
         for (ip, count) in ip_counts {
             if count > 10 {
-                let confidence = ((count as u8).min(255)) as u8;
+                let confidence = ((count.min(255) * 100) / 255).min(95) as u8;
                 deps.push(InboundDependency {
                     source_ip: ip,
                     source_hostname: None,
-                    confidence: (confidence / 255 * 100).min(95),
+                    confidence,
                     evidence: vec![Evidence {
                         level: EvidenceLevel::High,
                         description: format!("{} requests in recent logs", count),
@@ -80,7 +79,7 @@ impl ReverseInference {
         Ok(deps)
     }
 
-    fn detect_from_etc_hosts(hostname: &str, local_ips: &[String]) -> Result<Vec<InboundDependency>> {
+    fn detect_from_etc_hosts(hostname: &str, _local_ips: &[String]) -> Result<Vec<InboundDependency>> {
         let mut deps = Vec::new();
 
         if let Ok(content) = fs::read_to_string("/etc/hosts") {

@@ -6,7 +6,6 @@ use tokio::time::{self, Duration};
 use crate::collector::Collector;
 use crate::db::Database;
 use crate::report::Reporter;
-use crate::analysis::Analyzer;
 
 #[derive(Parser)]
 #[command(name = "screamless")]
@@ -207,20 +206,24 @@ fn parse_duration(s: &str) -> Result<Duration> {
     let value: u64 = caps[1].parse()?;
     let unit = &caps[2];
 
-    let duration = match unit {
-        "s" => Duration::from_secs(value),
-        "m" => Duration::from_secs(value * 60),
-        "h" => Duration::from_secs(value * 3600),
-        "d" => Duration::from_secs(value * 86400),
+    let multiplier = match unit {
+        "s" => 1,
+        "m" => 60,
+        "h" => 3600,
+        "d" => 86400,
         _ => unreachable!(),
     };
+    let seconds = value.checked_mul(multiplier)
+        .ok_or_else(|| anyhow::anyhow!("Duration is too large: {}", s))?;
+    if seconds == 0 {
+        return Err(anyhow::anyhow!("Duration must be greater than zero"));
+    }
 
-    Ok(duration)
+    Ok(Duration::from_secs(seconds))
 }
 
 fn dashboard(db_path: &std::path::Path, hostname: Option<String>, output: Option<std::path::PathBuf>) -> Result<()> {
     use crate::analysis::Analyzer;
-    use crate::graph::GraphRenderer;
 
     let db = Database::new(db_path)?;
     let analyzer = Analyzer::new(&db);
@@ -367,7 +370,10 @@ fn preflight(db_path: &std::path::Path, server: String, operation: String) -> Re
             }
         }
         _ => {
-            println!("Unknown operation: {}", operation);
+            return Err(anyhow::anyhow!(
+                "Unknown operation '{}'. Use restart, reboot, update, or shutdown",
+                operation
+            ));
         }
     }
 
@@ -403,5 +409,23 @@ fn format_duration(d: Duration) -> String {
         format!("{}h", secs / 3600)
     } else {
         format!("{}d", secs / 86400)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_duration;
+    use std::time::Duration;
+
+    #[test]
+    fn parses_duration_units() {
+        assert_eq!(parse_duration("30m").unwrap(), Duration::from_secs(1800));
+        assert_eq!(parse_duration("2d").unwrap(), Duration::from_secs(172800));
+    }
+
+    #[test]
+    fn rejects_zero_and_overflowing_durations() {
+        assert!(parse_duration("0s").is_err());
+        assert!(parse_duration("999999999999999999999999d").is_err());
     }
 }

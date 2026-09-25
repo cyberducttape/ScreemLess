@@ -1,6 +1,6 @@
 use anyhow::Result;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use regex::Regex;
 
 use crate::models::ConfigReference;
