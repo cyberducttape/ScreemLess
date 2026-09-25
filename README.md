@@ -157,14 +157,8 @@ screamless dashboard --output compliance-report.html
 - Finds config file references
 - Assigns confidence based on evidence
 
-### Inbound Detection (The Legendary Feature)
-Screamless infers who depends on YOU by:
-- **DNS records**: "This server is known as `db01.internal`"
-- **Access logs**: "These IPs connected to me recently"
-- **SSH keys**: "These systems have SSH access to me"
-- **Shared storage**: "These servers mount my NFS"
-- **Git configs**: "These repos reference me"
-- **Config files**: "Hardcoded references to me"
+### Inbound Detection
+Screamless derives inbound dependencies by reversing observed outbound edges from the other hosts in the database. If `web01` is observed connecting to `db01:3306`, the topology records `web01` as a dependent of `db01`. Local DNS records, access-log IPs, Git remotes, SSH configuration, and mount configuration are not treated as server-to-server inbound dependencies.
 
 Each detection method provides evidence. More evidence = higher confidence.
 
@@ -210,9 +204,9 @@ ssh root@server screamless report
 In 2026, most infrastructure is undocumented. Screamless fixes that by being **observational, not declarative**.
 
 - No config files to maintain
-- No agent to deploy on every system (just run from one point)
+- Collectors inspect the local host; multi-server graphs require snapshots from each host to be present in the analyzed database
 - No learning curve
-- No false positives
+- Configuration evidence is matched by hostname/IP and compatible port, not by port alone
 
 A single command gives you the truth about your servers.
 

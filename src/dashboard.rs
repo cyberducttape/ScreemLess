@@ -63,7 +63,6 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Screamless: {}</title>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
     <style>
         * {{
             margin: 0;
@@ -172,6 +171,12 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
             align-items: center;
             justify-content: center;
             color: #999;
+        }}
+
+        .graph-svg {{
+            width: 100%;
+            height: 100%;
+            touch-action: none;
         }}
 
         .dependency {{
@@ -292,7 +297,7 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
                 <div class="section">
                     <h2>Dependency Graph</h2>
                     <div class="graph-container" id="graph">
-                        Interactive graph visualization
+                        <svg class="graph-svg" id="graph-svg" role="img" aria-label="Interactive dependency graph"></svg>
                     </div>
                 </div>
             </div>
@@ -326,9 +331,107 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
     </div>
 
     <script>
+        const localHostname = {};
         const dependencies = {};
         const risks = {};
-        console.log('Dependencies loaded:', dependencies);
+        const graphElement = document.getElementById('graph');
+        const svg = document.getElementById('graph-svg');
+        const svgNamespace = 'http://www.w3.org/2000/svg';
+        const nodes = [{{id: localHostname, local: true}}];
+        const links = [];
+        const nodeIds = new Set([localHostname]);
+
+        dependencies.forEach(function (dependency) {{
+            const target = (dependency.hostname || dependency.remote_addr) + ':' + dependency.remote_port;
+            if (!nodeIds.has(target)) {{
+                nodeIds.add(target);
+                nodes.push({{id: target, local: false, confidence: dependency.confidence}});
+            }}
+            links.push({{source: localHostname, target: target, confidence: dependency.confidence}});
+        }});
+
+        function graphPoint(index, total, width, height) {{
+            if (index === 0) return {{x: width / 2, y: height / 2}};
+            const angle = ((index - 1) / Math.max(1, total - 1)) * Math.PI * 2;
+            const radius = Math.min(width, height) * 0.32;
+            return {{x: width / 2 + Math.cos(angle) * radius, y: height / 2 + Math.sin(angle) * radius}};
+        }}
+
+        const positions = new Map();
+        function renderGraph() {{
+            const width = graphElement.clientWidth;
+            const height = graphElement.clientHeight;
+            svg.setAttribute('viewBox', '0 0 ' + width + ' ' + height);
+            svg.replaceChildren();
+            nodes.forEach(function (node, index) {{
+                if (!positions.has(node.id)) positions.set(node.id, graphPoint(index, nodes.length, width, height));
+            }});
+
+            links.forEach(function (link) {{
+                const line = document.createElementNS(svgNamespace, 'line');
+                line.setAttribute('class', 'graph-link');
+                line.dataset.source = link.source;
+                line.dataset.target = link.target;
+                line.dataset.confidence = link.confidence;
+                svg.appendChild(line);
+            }});
+
+            nodes.forEach(function (node) {{
+                const group = document.createElementNS(svgNamespace, 'g');
+                const circle = document.createElementNS(svgNamespace, 'circle');
+                const label = document.createElementNS(svgNamespace, 'text');
+                circle.setAttribute('r', node.local ? '18' : '12');
+                circle.setAttribute('fill', node.local ? '#667eea' : '#764ba2');
+                label.textContent = node.id;
+                label.setAttribute('x', node.local ? '22' : '16');
+                label.setAttribute('y', '4');
+                label.setAttribute('font-size', '12');
+                label.setAttribute('fill', '#333');
+                group.appendChild(circle);
+                group.appendChild(label);
+                group.dataset.nodeId = node.id;
+                group.style.cursor = 'grab';
+                group.addEventListener('pointerdown', function (event) {{
+                    event.preventDefault();
+                    group.setPointerCapture(event.pointerId);
+                    group.style.cursor = 'grabbing';
+                    const move = function (moveEvent) {{
+                        const point = svg.createSVGPoint();
+                        point.x = moveEvent.clientX;
+                        point.y = moveEvent.clientY;
+                        const localPoint = point.matrixTransform(svg.getScreenCTM().inverse());
+                        positions.set(node.id, {{x: localPoint.x, y: localPoint.y}});
+                        renderGraph();
+                    }};
+                    const end = function () {{
+                        group.style.cursor = 'grab';
+                        group.removeEventListener('pointermove', move);
+                        group.removeEventListener('pointerup', end);
+                    }};
+                    group.addEventListener('pointermove', move);
+                    group.addEventListener('pointerup', end);
+                }});
+                svg.appendChild(group);
+            }});
+
+            Array.from(svg.querySelectorAll('line')).forEach(function (line) {{
+                const source = positions.get(line.dataset.source);
+                const target = positions.get(line.dataset.target);
+                line.setAttribute('x1', source.x);
+                line.setAttribute('y1', source.y);
+                line.setAttribute('x2', target.x);
+                line.setAttribute('y2', target.y);
+                line.setAttribute('stroke', '#aaa');
+                line.setAttribute('stroke-width', '2');
+            }});
+            Array.from(svg.querySelectorAll('g')).forEach(function (group) {{
+                const position = positions.get(group.dataset.nodeId);
+                group.setAttribute('transform', 'translate(' + position.x + ',' + position.y + ')');
+            }});
+        }}
+
+        renderGraph();
+        window.addEventListener('resize', renderGraph);
     </script>
 </body>
 </html>"#,
@@ -341,6 +444,7 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
         total_deps,
         high_conf_count,
         risks_html,
+        serde_json::to_string(hostname)?,
         deps_json,
         risks_json
     );
@@ -394,5 +498,7 @@ mod tests {
         assert!(html.contains("const dependencies = [{"));
         assert!(html.contains("const risks = [{"));
         assert!(html.contains("Example risk"));
+        assert!(html.contains("addEventListener('pointerdown'"));
+        assert!(!html.contains("cdnjs.cloudflare.com"));
     }
 }

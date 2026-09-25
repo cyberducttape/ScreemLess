@@ -33,7 +33,7 @@
 
 ### Phase 4: Interactive Dashboard ✅
 - Beautiful self-contained HTML generation
-- D3.js force-directed dependency graphs
+- Browser-native interactive dependency graphs
 - Color-coded readiness assessment
 - Real-time statistics
 - Responsive mobile-friendly design
@@ -46,7 +46,7 @@
 - Access log analysis (who connects to me?)
 - SSH authorized_keys scanning (who has access?)
 - Git configuration parsing (who clones/references me?)
-- NFS/SMB mount detection (who depends on my storage?)
+- Central observed-edge reversal for inbound dependency mapping
 - /etc/hosts entry discovery (who hardcoded reference to me?)
 - Impact level classification (CRITICAL/HIGH/MEDIUM/LOW)
 - Inbound dependency display in reports

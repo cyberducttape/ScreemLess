@@ -234,11 +234,15 @@ impl<'a> Analyzer<'a> {
                 });
             }
 
+            let hostname = ip_to_hostname.get(&remote_addr).cloned();
             let config_references = config_refs
                 .iter()
                 .filter(|cr| {
-                    (cr.hostname == remote_addr || cr.port == Some(remote_port))
-                        || cr.hostname.split('.').last() == remote_addr.split('.').last()
+                    let hostname_matches = cr.hostname.eq_ignore_ascii_case(&remote_addr)
+                        || hostname.as_ref()
+                            .is_some_and(|resolved| cr.hostname.eq_ignore_ascii_case(resolved));
+                    let port_matches = cr.port.is_none() || cr.port == Some(remote_port);
+                    hostname_matches && port_matches
                 })
                 .cloned()
                 .collect::<Vec<_>>();
@@ -250,7 +254,6 @@ impl<'a> Analyzer<'a> {
                 });
             }
 
-            let hostname = ip_to_hostname.get(&remote_addr).cloned();
             if hostname.is_some() {
                 evidence.push(Evidence {
                     level: EvidenceLevel::Med,

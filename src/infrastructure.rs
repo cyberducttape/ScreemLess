@@ -165,7 +165,11 @@ impl InfrastructureMapper {
         // A service is critical if many others depend on it
         // and those dependents have few alternatives
         inbound.len() > 3 && inbound.iter().any(|dep| {
-            matches!(dep.impact_level, crate::models::ImpactLevel::Critical)
+            dep.confidence >= 70
+                || matches!(
+                    dep.impact_level,
+                    crate::models::ImpactLevel::Critical | crate::models::ImpactLevel::High
+                )
         })
     }
 
