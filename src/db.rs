@@ -131,4 +131,20 @@ impl Database {
 
         Ok(snapshots)
     }
+
+    pub fn get_all_snapshots_since(&self, since_timestamp: i64) -> SqlResult<Vec<ObservationSnapshot>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT data FROM snapshots WHERE timestamp >= ?1 ORDER BY timestamp ASC",
+        )?;
+
+        let snapshots = stmt.query_map(rusqlite::params![since_timestamp], |row| {
+            let json = row.get::<_, String>(0)?;
+            serde_json::from_str(&json).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(0, Type::Text, Box::new(error))
+            })
+        })?
+        .collect::<SqlResult<Vec<ObservationSnapshot>>>()?;
+
+        Ok(snapshots)
+    }
 }

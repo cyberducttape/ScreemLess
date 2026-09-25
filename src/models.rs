@@ -306,6 +306,8 @@ pub struct ObservationSnapshot {
     pub cron_jobs: Vec<CronJob>,
     pub systemd_timers: Vec<SystemdTimer>,
     pub dns_names: Vec<DnsName>,
+    #[serde(default)]
+    pub config_references: Vec<ConfigReference>,
     #[serde(default = "ProbeStatuses::legacy_unknown")]
     pub probe_statuses: ProbeStatuses,
 }

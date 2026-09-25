@@ -61,12 +61,12 @@ impl Collector {
                 Vec::new()
             }
         };
-        let (dns_names, dns_unavailable) = match Self::collect_dns_names() {
+        let (dns_names, dns_unavailable, config_references) = match Self::collect_dns_names() {
             Ok(result) => result,
             Err(error) => {
                 probe_statuses.config_scan = ProbeStatus::failed(error.to_string());
                 probe_statuses.dns = ProbeStatus::failed(error.to_string());
-                (Vec::new(), 0)
+                (Vec::new(), 0, Vec::new())
             }
         };
         if dns_unavailable > 0 && probe_statuses.dns.is_complete() {
@@ -85,6 +85,7 @@ impl Collector {
             cron_jobs,
             systemd_timers,
             dns_names,
+            config_references,
             probe_statuses,
         })
     }
@@ -386,7 +387,7 @@ impl Collector {
         Ok(map)
     }
 
-    fn collect_dns_names() -> Result<(Vec<DnsName>, usize)> {
+    fn collect_dns_names() -> Result<(Vec<DnsName>, usize, Vec<ConfigReference>)> {
         let mut names = Vec::new();
         let mut unavailable = 0;
 
@@ -395,7 +396,7 @@ impl Collector {
 
         let mut seen = std::collections::HashSet::new();
 
-        for config_ref in config_refs {
+        for config_ref in &config_refs {
             if seen.insert(config_ref.hostname.clone()) {
                 use std::net::ToSocketAddrs;
 
@@ -412,14 +413,14 @@ impl Collector {
                 }
 
                 names.push(DnsName {
-                    hostname: config_ref.hostname,
+                    hostname: config_ref.hostname.clone(),
                     ip_addresses,
                     timestamp,
                 });
             }
         }
 
-        Ok((names, unavailable))
+        Ok((names, unavailable, config_refs))
     }
 }
 

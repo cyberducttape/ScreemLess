@@ -1,5 +1,8 @@
 use std::collections::{HashMap, HashSet};
-use crate::models::{ServerDependencyChain, AnalysisResult, Dependency, InboundDependency};
+use crate::models::{
+    AnalysisResult, Dependency, Evidence, EvidenceLevel, ImpactLevel, InboundDependency,
+    ServerDependencyChain,
+};
 
 pub struct InfrastructureMapper;
 
@@ -8,10 +11,11 @@ impl InfrastructureMapper {
         servers: &HashMap<String, (AnalysisResult, Vec<InboundDependency>)>,
     ) -> HashMap<String, ServerDependencyChain> {
         let mut chains = HashMap::new();
+        let inferred_inbound = Self::reverse_observed_edges(servers);
 
-        for (server_name, (analysis, inbound)) in servers {
+        for (server_name, (analysis, _)) in servers {
             let outbound_deps = analysis.dependencies.clone();
-            let inbound_deps = inbound.clone();
+            let inbound_deps = inferred_inbound.get(server_name).cloned().unwrap_or_default();
 
             let is_single_point_of_failure = Self::is_critical_service(server_name, &outbound_deps, &inbound_deps);
             let total_impact = Self::calculate_total_impact(&inbound_deps);
@@ -29,6 +33,66 @@ impl InfrastructureMapper {
         }
 
         chains
+    }
+
+    fn reverse_observed_edges(
+        servers: &HashMap<String, (AnalysisResult, Vec<InboundDependency>)>,
+    ) -> HashMap<String, Vec<InboundDependency>> {
+        let mut inbound = HashMap::<String, Vec<InboundDependency>>::new();
+
+        for (source, (analysis, _)) in servers {
+            for dependency in &analysis.dependencies {
+                let target = dependency
+                    .hostname
+                    .as_deref()
+                    .filter(|hostname| servers.contains_key(*hostname))
+                    .or_else(|| {
+                        servers.contains_key(&dependency.remote_addr)
+                            .then_some(dependency.remote_addr.as_str())
+                    });
+                let Some(target) = target else { continue };
+                if target == source { continue; }
+
+                let entry = inbound.entry(target.to_string()).or_default();
+                if let Some(existing) = entry.iter_mut().find(|edge| {
+                    edge.source_hostname.as_deref() == Some(source.as_str())
+                }) {
+                    existing.confidence = existing.confidence.max(dependency.confidence);
+                    existing.evidence.push(Evidence {
+                        level: EvidenceLevel::Med,
+                        description: format!(
+                            "Additional observed outbound connection on port {}",
+                            dependency.remote_port
+                        ),
+                    });
+                } else {
+                    entry.push(InboundDependency {
+                        source_ip: "unknown".to_string(),
+                        source_hostname: Some(source.clone()),
+                        confidence: dependency.confidence,
+                        evidence: vec![Evidence {
+                            level: if dependency.confidence >= 70 {
+                                EvidenceLevel::High
+                            } else {
+                                EvidenceLevel::Med
+                            },
+                            description: format!(
+                                "Observed outbound TCP connection to port {} ({} observation(s))",
+                                dependency.remote_port, dependency.connection_count
+                            ),
+                        }],
+                        detection_methods: vec!["central_outbound_observation".to_string()],
+                        impact_level: if dependency.confidence >= 85 {
+                            ImpactLevel::High
+                        } else {
+                            ImpactLevel::Medium
+                        },
+                    });
+                }
+            }
+        }
+
+        inbound
     }
 
     pub fn find_dependency_clusters(
@@ -174,4 +238,54 @@ pub struct ShutdownImpact {
     pub affected_servers: Vec<(String, crate::models::ImpactLevel)>,
     pub cascade_risk: bool,
     pub safe_to_shutdown: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::InfrastructureMapper;
+    use crate::models::{AnalysisResult, Dependency, ProbeStatuses};
+    use chrono::Utc;
+
+    fn analysis(dependencies: Vec<Dependency>) -> AnalysisResult {
+        let now = Utc::now();
+        AnalysisResult {
+            observation_window_hours: 1,
+            total_snapshots: 1,
+            observation_span: (now, now),
+            dependencies,
+            inbound_dependencies: Vec::new(),
+            observed_processes: std::collections::HashMap::new(),
+            risks: Vec::new(),
+            decommission_confidence: 100,
+            probe_statuses: ProbeStatuses::default(),
+        }
+    }
+
+    #[test]
+    fn reverses_observed_outbound_edge_into_inbound_dependency() {
+        let now = Utc::now();
+        let dependency = Dependency {
+            remote_addr: "10.0.0.2".to_string(),
+            remote_port: 3306,
+            protocol: "tcp".to_string(),
+            connection_count: 4,
+            first_seen: now,
+            last_seen: now,
+            processes: vec!["billing".to_string()],
+            confidence: 85,
+            evidence: Vec::new(),
+            config_references: Vec::new(),
+            hostname: Some("db01".to_string()),
+        };
+
+        let mut servers = std::collections::HashMap::new();
+        servers.insert("web01".to_string(), (analysis(vec![dependency]), Vec::new()));
+        servers.insert("db01".to_string(), (analysis(Vec::new()), Vec::new()));
+
+        let graph = InfrastructureMapper::build_full_dependency_graph(&servers);
+        let inbound = &graph["db01"].inbound_deps;
+        assert_eq!(inbound.len(), 1);
+        assert_eq!(inbound[0].source_hostname.as_deref(), Some("web01"));
+        assert_eq!(inbound[0].detection_methods, vec!["central_outbound_observation"]);
+    }
 }

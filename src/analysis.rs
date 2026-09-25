@@ -4,8 +4,6 @@ use std::collections::{HashMap, HashSet};
 
 use crate::db::Database;
 use crate::models::*;
-use crate::config_scanner::ConfigScanner;
-use crate::reverse_inference::ReverseInference;
 
 pub struct Analyzer<'a> {
     db: &'a Database,
@@ -47,11 +45,7 @@ impl<'a> Analyzer<'a> {
         let dependencies = self.infer_dependencies(&snapshots)?;
         let observed_processes = self.analyze_process_activity(&snapshots)?;
 
-        // Detect inbound dependencies
-        let inbound_dependencies = ReverseInference::infer_inbound_dependencies(
-            hostname,
-            &["127.0.0.1".to_string()],
-        )?;
+        let inbound_dependencies = self.infer_inbound_dependencies(hostname, since.timestamp())?;
 
         let mut risks = self.assess_risks(&snapshots, &dependencies, &observed_processes)?;
         let mut decommission_confidence = self.calculate_decommission_confidence(
@@ -99,6 +93,76 @@ impl<'a> Analyzer<'a> {
         incomplete.join(", ")
     }
 
+    fn infer_inbound_dependencies(
+        &self,
+        target_hostname: &str,
+        since_timestamp: i64,
+    ) -> Result<Vec<InboundDependency>> {
+        #[derive(Default)]
+        struct SourceEvidence {
+            count: usize,
+            ports: HashSet<u16>,
+            processes: HashSet<String>,
+            complete: bool,
+        }
+
+        let snapshots = self.db.get_all_snapshots_since(since_timestamp)?;
+        let target = target_hostname.to_ascii_lowercase();
+        let mut sources: HashMap<String, SourceEvidence> = HashMap::new();
+
+        for snapshot in snapshots {
+            let source = snapshot.hostname.clone();
+            if source.eq_ignore_ascii_case(target_hostname) {
+                continue;
+            }
+
+            let target_ips = snapshot.dns_names.iter()
+                .filter(|dns| dns.hostname.eq_ignore_ascii_case(target_hostname))
+                .flat_map(|dns| dns.ip_addresses.iter().cloned())
+                .collect::<HashSet<_>>();
+
+            for connection in snapshot.network_connections.iter().filter(|connection| {
+                connection.remote_addr.eq_ignore_ascii_case(&target)
+                    || target_ips.contains(&connection.remote_addr)
+            }) {
+                let evidence = sources.entry(source.clone()).or_insert_with(|| SourceEvidence {
+                    complete: true,
+                    ..SourceEvidence::default()
+                });
+                evidence.count += 1;
+                evidence.ports.insert(connection.remote_port);
+                evidence.processes.insert(connection.process_name.clone());
+                evidence.complete &= snapshot.probe_statuses.network_sockets.is_complete();
+            }
+        }
+
+        let mut inbound = Vec::new();
+        for (source, evidence) in sources {
+            let confidence = (55 + evidence.count.min(9) * 5).min(100) as u8;
+            let confidence = if evidence.complete { confidence } else { confidence.min(69) };
+            let port_list = evidence.ports.iter().map(u16::to_string).collect::<Vec<_>>().join(", ");
+            let process_list = evidence.processes.iter().cloned().collect::<Vec<_>>().join(", ");
+
+            inbound.push(InboundDependency {
+                source_ip: "unknown".to_string(),
+                source_hostname: Some(source),
+                confidence,
+                evidence: vec![Evidence {
+                    level: if confidence >= 70 { EvidenceLevel::High } else { EvidenceLevel::Med },
+                    description: format!(
+                        "Observed outbound TCP traffic to this server on port(s) {} ({} observation(s), process(es): {})",
+                        port_list, evidence.count, process_list
+                    ),
+                }],
+                detection_methods: vec!["central_outbound_observation".to_string()],
+                impact_level: if confidence >= 85 { ImpactLevel::High } else { ImpactLevel::Medium },
+            });
+        }
+
+        inbound.sort_by(|a, b| b.confidence.cmp(&a.confidence));
+        Ok(inbound)
+    }
+
     fn infer_dependencies(&self, snapshots: &[ObservationSnapshot]) -> Result<Vec<Dependency>> {
         let mut remote_hosts: HashMap<(String, u16), Vec<(DateTime<Utc>, HashSet<String>)>> =
             HashMap::new();
@@ -116,7 +180,10 @@ impl<'a> Analyzer<'a> {
             }
         }
 
-        let config_refs = ConfigScanner::scan()?;
+        let config_refs = snapshots
+            .iter()
+            .flat_map(|snapshot| snapshot.config_references.iter().cloned())
+            .collect::<Vec<_>>();
         let ip_to_hostname = self.build_ip_to_hostname_map(snapshots);
 
         let mut dependencies = Vec::new();

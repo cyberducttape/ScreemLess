@@ -266,7 +266,10 @@ fn infrastructure(db_path: &std::path::Path, servers: String, format: String) ->
         match analyzer.analyze(server, 168) {
             Ok(analysis) => {
                 println!("  ✓ {}", server);
-                server_analyses.insert(server.to_string(), (analysis, vec![]));
+                server_analyses.insert(
+                    server.to_string(),
+                    (analysis.clone(), analysis.inbound_dependencies.clone()),
+                );
             }
             Err(e) => {
                 eprintln!("  ✗ {}: {}", server, e);
