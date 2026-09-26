@@ -1,4 +1,5 @@
 use crate::models::AnalysisResult;
+use crate::report::Reporter;
 use anyhow::Result;
 use chrono::Utc;
 use serde::Serialize;
@@ -29,21 +30,33 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
     let risks_json = safe_json_for_script(&analysis.risks)?;
     let hostname_html = escape_html(hostname);
     let readiness = analysis.decommission_confidence;
-
-    let readiness_class = if readiness >= 80 {
-        "ready"
-    } else if readiness >= 50 {
-        "caution"
-    } else {
-        "not-ready"
-    };
-
-    let readiness_status = if readiness >= 80 {
-        "NO ACTIVE DEPENDENCIES DETECTED in the collected evidence — validate remaining unknowns before proceeding"
-    } else if readiness >= 50 {
-        "CAUTION - Review items before proceeding"
-    } else {
-        "NOT READY - Blocking issues detected"
+    let blocking_risks = analysis.risks.iter().any(|risk| {
+        matches!(
+            risk.severity,
+            crate::models::RiskSeverity::Warn | crate::models::RiskSeverity::Fail
+        )
+    });
+    let decommission_status = Reporter::decommission_exit_code(
+        analysis.total_snapshots,
+        analysis.probe_statuses.all_complete(),
+        &analysis.coverage.evidence_quality,
+        analysis.coverage.coverage_percent,
+        analysis.decommission_confidence,
+        blocking_risks,
+    );
+    let (readiness_class, readiness_status) = match decommission_status {
+        0 => (
+            "ready",
+            "NO HIGH-CONFIDENCE ACTIVITY DETECTED in collected evidence — this is not proof of absence; validate with service owners.",
+        ),
+        2 => (
+            "caution",
+            "ACTIVITY OR BLOCKING RISKS DETECTED — decommissioning is blocked pending investigation.",
+        ),
+        _ => (
+            "not-ready",
+            "INSUFFICIENT EVIDENCE — do not interpret this score as clearance.",
+        ),
     };
 
     let high_conf_count = analysis
@@ -60,16 +73,17 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
         .map(|site| site.ports.len())
         .sum::<usize>();
     let unknown_count = analysis.coverage.remaining_unknowns.len()
-        + if analysis.probe_statuses.network_sockets.is_complete() {
-            0
-        } else {
-            1
-        }
-        + if analysis.probe_statuses.config_scan.is_complete() {
-            0
-        } else {
-            1
-        };
+        + [
+            &analysis.probe_statuses.network_sockets,
+            &analysis.probe_statuses.process_attribution,
+            &analysis.probe_statuses.cron,
+            &analysis.probe_statuses.systemd,
+            &analysis.probe_statuses.config_scan,
+            &analysis.probe_statuses.dns,
+        ]
+        .iter()
+        .filter(|status| !status.is_complete())
+        .count();
     let observed_duration = format_duration(analysis.coverage.actual_span_seconds);
     let freshness = analysis
         .coverage
@@ -79,10 +93,11 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
         .unwrap_or_else(|| "unknown".to_string());
     let evidence_rows = [
         ("Network", "network_sockets"),
-        ("Processes", "process_attribution"),
+        ("Process attribution", "process_attribution"),
         ("Configuration", "config_scan"),
         ("DNS", "dns"),
-        ("Scheduled jobs", "cron"),
+        ("Cron jobs", "cron"),
+        ("Systemd timers", "systemd"),
     ]
     .into_iter()
     .map(|(label, key)| {
@@ -92,7 +107,8 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
             "process_attribution" => &analysis.probe_statuses.process_attribution.state,
             "config_scan" => &analysis.probe_statuses.config_scan.state,
             "dns" => &analysis.probe_statuses.dns.state,
-            _ => &analysis.probe_statuses.cron.state,
+            "cron" => &analysis.probe_statuses.cron.state,
+            _ => &analysis.probe_statuses.systemd.state,
         };
         format!(
             "<div class='evidence-row'><b>{}</b><span class='evidence-status'>{:?}</span><div class='evidence-meter'><i style='width: {:.1}%'></i></div><strong>{:.1}%</strong></div>",
@@ -699,12 +715,20 @@ mod tests {
     #[test]
     fn renders_dashboard_values_in_their_expected_fields() {
         let now = Utc::now();
-        let analysis = AnalysisResult {
+        let mut analysis = AnalysisResult {
             observation_window_hours: 1,
             total_snapshots: 1,
             observation_span: (now, now),
             host_identity: HostIdentity::default(),
-            coverage: ObservationCoverage::default(),
+            coverage: ObservationCoverage {
+                coverage_percent: 100.0,
+                successful_samples: 60,
+                expected_samples: 60,
+                evidence_quality: "HIGH".to_string(),
+                actual_span_seconds: 3_600,
+                last_observation: Some(now),
+                ..ObservationCoverage::default()
+            },
             dependencies: vec![Dependency {
                 remote_addr: "10.0.0.2".to_string(),
                 remote_port: 3306,
@@ -735,8 +759,9 @@ mod tests {
         let html = render_dashboard("db<01", &analysis).unwrap();
         assert!(html.contains("<title>Screamless: db&lt;01</title>"));
         assert!(html.contains("<p>Server: <strong>db&lt;01</strong></p>"));
-        assert!(html.contains("<div class=\"readiness-score ready\">85</div>"));
-        assert!(html.contains("NO ACTIVE DEPENDENCIES DETECTED"));
+        assert!(html.contains("<div class=\"readiness-score caution\">85</div>"));
+        assert!(html.contains("ACTIVITY OR BLOCKING RISKS DETECTED"));
+        assert!(html.contains("Systemd timers"));
         assert!(html.contains("const dependencies = [{"));
         assert!(html.contains("const risks = [{"));
         assert!(html.contains("Example risk"));
@@ -745,5 +770,12 @@ mod tests {
         assert!(html.contains("Content-Security-Policy"));
         assert!(html.contains("addEventListener('pointerdown'"));
         assert!(!html.contains("cdnjs.cloudflare.com"));
+
+        analysis.risks.clear();
+        analysis.coverage.evidence_quality = "LOW".to_string();
+        analysis.decommission_confidence = 100;
+        let low_evidence_html = render_dashboard("db01", &analysis).unwrap();
+        assert!(low_evidence_html.contains("<div class=\"readiness-score not-ready\">100</div>"));
+        assert!(low_evidence_html.contains("INSUFFICIENT EVIDENCE"));
     }
 }

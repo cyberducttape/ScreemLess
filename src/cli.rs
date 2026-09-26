@@ -514,10 +514,12 @@ fn preflight(
 
     let mut safe = true;
     let mut warnings = Vec::new();
-    let insufficient_evidence = analysis.total_snapshots == 0
-        || !analysis.probe_statuses.all_complete()
-        || analysis.coverage.evidence_quality != "HIGH"
-        || analysis.coverage.coverage_percent < 90.0;
+    let insufficient_evidence = !Reporter::has_sufficient_evidence(
+        analysis.total_snapshots,
+        analysis.probe_statuses.all_complete(),
+        &analysis.coverage.evidence_quality,
+        analysis.coverage.coverage_percent,
+    );
 
     if analysis.total_snapshots == 0 {
         warnings.push("No observations are available for this server".to_string());

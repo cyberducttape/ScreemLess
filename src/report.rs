@@ -172,7 +172,20 @@ impl<'a> Reporter<'a> {
         Ok(exit_code)
     }
 
-    fn decommission_exit_code(
+    pub(crate) fn has_sufficient_evidence(
+        total_snapshots: usize,
+        probes_complete: bool,
+        evidence_quality: &str,
+        coverage_percent: f64,
+    ) -> bool {
+        total_snapshots > 0
+            && probes_complete
+            && evidence_quality == "HIGH"
+            && coverage_percent.is_finite()
+            && coverage_percent >= 90.0
+    }
+
+    pub(crate) fn decommission_exit_code(
         total_snapshots: usize,
         probes_complete: bool,
         evidence_quality: &str,
@@ -180,12 +193,12 @@ impl<'a> Reporter<'a> {
         confidence: u8,
         has_blocking_risks: bool,
     ) -> u8 {
-        if total_snapshots == 0
-            || !probes_complete
-            || evidence_quality != "HIGH"
-            || !coverage_percent.is_finite()
-            || coverage_percent < 90.0
-        {
+        if !Self::has_sufficient_evidence(
+            total_snapshots,
+            probes_complete,
+            evidence_quality,
+            coverage_percent,
+        ) {
             return 4;
         }
 
