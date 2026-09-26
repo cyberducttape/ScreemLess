@@ -8,6 +8,47 @@ pub struct Database {
     conn: Connection,
 }
 
+pub(crate) struct SnapshotWindow<'a> {
+    conn: &'a Connection,
+    since_timestamp: i64,
+}
+
+impl SnapshotWindow<'_> {
+    pub(crate) fn snapshots_for_host(&self, hostname: &str) -> SqlResult<Vec<ObservationSnapshot>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT data FROM snapshots WHERE hostname = ?1 AND timestamp >= ?2
+             ORDER BY timestamp ASC",
+        )?;
+        let snapshots = stmt
+            .query_map(rusqlite::params![hostname, self.since_timestamp], |row| {
+                let json = row.get::<_, String>(0)?;
+                serde_json::from_str(&json).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(0, Type::Text, Box::new(error))
+                })
+            })?
+            .collect();
+        snapshots
+    }
+
+    pub(crate) fn for_each<F>(&self, mut visit: F) -> SqlResult<()>
+    where
+        F: FnMut(ObservationSnapshot) -> SqlResult<()>,
+    {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT data FROM snapshots WHERE timestamp >= ?1 ORDER BY timestamp ASC")?;
+        let mut rows = stmt.query(rusqlite::params![self.since_timestamp])?;
+        while let Some(row) = rows.next()? {
+            let json = row.get::<_, String>(0)?;
+            let snapshot = serde_json::from_str(&json).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(0, Type::Text, Box::new(error))
+            })?;
+            visit(snapshot)?;
+        }
+        Ok(())
+    }
+}
+
 impl Database {
     pub fn new<P: AsRef<Path>>(path: P) -> SqlResult<Self> {
         let path = path.as_ref();
@@ -196,46 +237,23 @@ impl Database {
         }
     }
 
-    pub fn get_snapshots_since(
-        &self,
-        hostname: &str,
-        since_timestamp: i64,
-    ) -> SqlResult<Vec<ObservationSnapshot>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT data FROM snapshots WHERE hostname = ?1 AND timestamp >= ?2
-             ORDER BY timestamp ASC",
-        )?;
-
-        let snapshots = stmt
-            .query_map(rusqlite::params![hostname, since_timestamp], |row| {
-                let json = row.get::<_, String>(0)?;
-                serde_json::from_str(&json).map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(0, Type::Text, Box::new(error))
-                })
-            })?
-            .collect::<SqlResult<Vec<ObservationSnapshot>>>()?;
-
-        Ok(snapshots)
-    }
-
-    pub fn get_all_snapshots_since(
+    pub(crate) fn with_snapshot_window<T, F, E>(
         &self,
         since_timestamp: i64,
-    ) -> SqlResult<Vec<ObservationSnapshot>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT data FROM snapshots WHERE timestamp >= ?1 ORDER BY timestamp ASC")?;
-
-        let snapshots = stmt
-            .query_map(rusqlite::params![since_timestamp], |row| {
-                let json = row.get::<_, String>(0)?;
-                serde_json::from_str(&json).map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(0, Type::Text, Box::new(error))
-                })
-            })?
-            .collect::<SqlResult<Vec<ObservationSnapshot>>>()?;
-
-        Ok(snapshots)
+        read: F,
+    ) -> Result<T, E>
+    where
+        F: FnOnce(&SnapshotWindow<'_>) -> Result<T, E>,
+        E: From<rusqlite::Error>,
+    {
+        let tx = self.conn.unchecked_transaction().map_err(E::from)?;
+        let window = SnapshotWindow {
+            conn: &tx,
+            since_timestamp,
+        };
+        let result = read(&window)?;
+        tx.commit().map_err(E::from)?;
+        Ok(result)
     }
 
     /// Bound long-running observation databases while retaining recent history.
@@ -276,6 +294,29 @@ mod tests {
     use crate::models::*;
     use chrono::Utc;
     use rusqlite::Connection;
+
+    fn test_snapshot(hostname: &str, timestamp: chrono::DateTime<Utc>) -> ObservationSnapshot {
+        ObservationSnapshot {
+            timestamp,
+            hostname: hostname.to_string(),
+            host_identity: HostIdentity {
+                hostname: hostname.to_string(),
+                ..HostIdentity::default()
+            },
+            listening_services: vec![],
+            network_connections: vec![],
+            processes: vec![],
+            cron_jobs: vec![],
+            systemd_timers: vec![],
+            dns_names: vec![],
+            config_references: vec![],
+            config_scan_audit: None,
+            software: vec![],
+            sampling_interval_seconds: Some(60),
+            privileges: "full".to_string(),
+            probe_statuses: ProbeStatuses::default(),
+        }
+    }
 
     #[test]
     fn stores_snapshot_as_canonical_audit_record_without_normalized_duplicates() {
@@ -329,7 +370,10 @@ mod tests {
             .unwrap();
         assert_eq!(listener_count, 0);
         assert_eq!(cron_count, 0);
-        assert_eq!(db.get_snapshots_since("test-host", 0).unwrap().len(), 2);
+        let snapshots = db
+            .with_snapshot_window(0, |window| window.snapshots_for_host("test-host"))
+            .unwrap();
+        assert_eq!(snapshots.len(), 2);
 
         #[cfg(unix)]
         {
@@ -396,6 +440,62 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_window_is_stable_while_a_writer_commits() {
+        let path = std::env::temp_dir().join(format!(
+            "screamless-db-window-{}-{}.db",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let mut db = Database::new(&path).unwrap();
+        let first = test_snapshot("first", Utc::now());
+        db.store_snapshot(&first).unwrap();
+
+        let count_in_snapshot = db
+            .with_snapshot_window(0, |window| {
+                let mut first_pass_count = 0;
+                window.for_each(|_| {
+                    first_pass_count += 1;
+                    Ok(())
+                })?;
+
+                let second =
+                    test_snapshot("second", first.timestamp + chrono::Duration::seconds(1));
+                let writer = Connection::open(&path)?;
+                writer.execute(
+                    "INSERT INTO snapshots (hostname, timestamp, data) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![
+                        &second.hostname,
+                        second.timestamp.timestamp_millis(),
+                        serde_json::to_string(&second).unwrap()
+                    ],
+                )?;
+
+                let mut second_pass_count = 0;
+                window.for_each(|_| {
+                    second_pass_count += 1;
+                    Ok(())
+                })?;
+                Ok::<_, rusqlite::Error>((first_pass_count, second_pass_count))
+            })
+            .unwrap();
+
+        assert_eq!(count_in_snapshot, (1, 1));
+        let count_after_commit = db
+            .with_snapshot_window(0, |window| {
+                let mut count = 0;
+                window.for_each(|_| {
+                    count += 1;
+                    Ok(())
+                })?;
+                Ok::<_, rusqlite::Error>(count)
+            })
+            .unwrap();
+        assert_eq!(count_after_commit, 2);
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn reports_corrupt_snapshot_data_as_an_error() {
         let path =
             std::env::temp_dir().join(format!("screamless-db-corrupt-{}.db", std::process::id()));
@@ -407,7 +507,9 @@ mod tests {
             )
             .unwrap();
 
-        assert!(db.get_all_snapshots_since(0).is_err());
+        assert!(db
+            .with_snapshot_window(0, |window| window.for_each(|_| Ok(())))
+            .is_err());
         drop(db);
         let _ = std::fs::remove_file(path);
     }
