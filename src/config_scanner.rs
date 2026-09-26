@@ -374,17 +374,80 @@ impl ConfigScanner {
     }
 
     fn parse_target(target: &str) -> Option<(String, Option<u16>)> {
-        let target = target.trim().trim_matches('"').trim_matches('\'');
-        let target = target
-            .strip_prefix("http://")
-            .or_else(|| target.strip_prefix("https://"))
-            .unwrap_or(target);
-        let (hostname, port) = target
-            .rsplit_once(':')
-            .filter(|(_, port)| port.parse::<u16>().is_ok())
-            .map(|(hostname, port)| (hostname, port.parse().ok()))
-            .unwrap_or((target, None));
-        Self::is_valid_hostname(hostname).then(|| (hostname.to_string(), port))
+        Self::parse_endpoint(target, None)
+    }
+
+    fn parse_endpoint(value: &str, default_port: Option<u16>) -> Option<(String, Option<u16>)> {
+        let value = value.trim().trim_matches('"').trim_matches('\'');
+        if value.is_empty() || value.starts_with('/') || value.starts_with("unix://") {
+            return None;
+        }
+
+        if value.contains("://") {
+            let parsed = url::Url::parse(value).ok()?;
+            let hostname = parsed
+                .host_str()?
+                .trim_matches(|character| character == '[' || character == ']')
+                .to_string();
+            if !Self::is_valid_hostname(&hostname) && hostname.parse::<std::net::IpAddr>().is_err()
+            {
+                return None;
+            }
+            return Some((
+                hostname,
+                parsed
+                    .port()
+                    .or(default_port)
+                    .or_else(|| Self::default_port_for_scheme(parsed.scheme())),
+            ));
+        }
+
+        let (hostname, port) = if value.starts_with('[') {
+            let closing = value.find(']')?;
+            let hostname = &value[1..closing];
+            let port = match value[closing + 1..].strip_prefix(':') {
+                Some(port) => Some(port.parse::<u16>().ok()?),
+                None => default_port,
+            };
+            (hostname, port)
+        } else if value.parse::<std::net::IpAddr>().is_ok() {
+            (value, default_port)
+        } else if let Some((hostname, port)) = value.rsplit_once(':') {
+            if !hostname.contains(':') && port.parse::<u16>().is_ok() {
+                (hostname, port.parse::<u16>().ok())
+            } else {
+                (value, default_port)
+            }
+        } else {
+            (value, default_port)
+        };
+
+        (Self::is_valid_hostname(hostname) || hostname.parse::<std::net::IpAddr>().is_ok())
+            .then(|| (hostname.to_string(), port))
+    }
+
+    fn default_port_for_key(key: &str) -> Option<u16> {
+        let key = key.to_ascii_lowercase();
+        if key.contains("postgres") {
+            Some(5432)
+        } else if key.contains("mysql") || key == "db_host" || key == "database_host" {
+            Some(3306)
+        } else {
+            None
+        }
+    }
+
+    fn default_port_for_scheme(scheme: &str) -> Option<u16> {
+        match scheme.to_ascii_lowercase().as_str() {
+            "http" => Some(80),
+            "https" => Some(443),
+            "mysql" | "mariadb" => Some(3306),
+            "postgres" | "postgresql" => Some(5432),
+            "redis" | "rediss" => Some(6379),
+            "mongodb" | "mongodb+srv" => Some(27017),
+            "amqp" => Some(5672),
+            _ => None,
+        }
     }
 
     fn scan_php_fpm() -> Result<Vec<ConfigReference>> {
@@ -468,7 +531,7 @@ impl ConfigScanner {
         let mut refs = Vec::new();
 
         let db_host_re = Regex::new(
-            "(?mi)(?:DB_HOST|db_host|database\\.host|mysql\\.host|postgres\\.host|DATABASES.*host)\\s*[=:]\\s*[\"']?([^\\s;,\"'\\n}]+)"
+            "(?mi)(DB_HOST|DATABASE_HOST|database\\.host|mysql\\.host|postgres\\.host|POSTGRES_HOST|DATABASES.*host)\\s*[=:]\\s*[\"']?([^\\s;,\"'\\n}]+)"
         )?;
         let redis_re = Regex::new(
             "(?mi)(?:REDIS_HOST|CACHE_URL|redis\\.host|cache\\.redis)\\s*[=:]\\s*[\"']?([^\\s;,\"'\\n}]+)"
@@ -484,7 +547,7 @@ impl ConfigScanner {
         )?;
 
         let patterns = vec![
-            (db_host_re, "Database host", Some(3306)),
+            (db_host_re, "Database host", None),
             (redis_re, "Cache/Redis host", Some(6379)),
             (api_re, "API endpoint", None),
             (es_re, "Elasticsearch host", Some(9200)),
@@ -493,35 +556,23 @@ impl ConfigScanner {
 
         for (re, context, default_port) in patterns {
             for caps in re.captures_iter(content) {
-                if let Some(host_match) = caps.get(1) {
+                let host_match = if context == "Database host" {
+                    caps.get(2)
+                } else {
+                    caps.get(1)
+                };
+                if let Some(host_match) = host_match {
                     let host_str = host_match
                         .as_str()
                         .trim_matches(|c: char| c == '"' || c == '\'' || c == ' ');
 
-                    if host_str.starts_with("http://") || host_str.starts_with("https://") {
-                        if let Ok(parsed) = url::Url::parse(host_str) {
-                            if let Some(host) = parsed.host_str() {
-                                let hostname = host.to_string();
-                                let port = parsed.port().or(default_port);
-                                if Self::is_valid_hostname(&hostname) {
-                                    refs.push(ConfigReference {
-                                        file_path: path.display().to_string(),
-                                        hostname: hostname.clone(),
-                                        port,
-                                        context: context.to_string(),
-                                        config_line: Some(format!(
-                                            "setting={} scheme={} host={} port={:?}",
-                                            context,
-                                            parsed.scheme(),
-                                            hostname,
-                                            port
-                                        )),
-                                    });
-                                }
-                            }
-                        }
-                    } else if let Some((hostname, explicit_port)) = Self::parse_target(host_str) {
-                        let port = explicit_port.or(default_port);
+                    let default_port = if context == "Database host" {
+                        caps.get(1)
+                            .and_then(|key| Self::default_port_for_key(key.as_str()))
+                    } else {
+                        default_port
+                    };
+                    if let Some((hostname, port)) = Self::parse_endpoint(host_str, default_port) {
                         refs.push(ConfigReference {
                             file_path: path.display().to_string(),
                             hostname: hostname.clone(),
@@ -610,7 +661,9 @@ impl ConfigScanner {
                 let val_str = value.as_str().trim_matches(|c| c == '"' || c == '\'');
 
                 if Self::is_host_env_key(key_str) {
-                    if let Some((hostname, port)) = Self::parse_host_value(val_str, None) {
+                    if let Some((hostname, port)) =
+                        Self::parse_endpoint(val_str, Self::default_port_for_key(key_str))
+                    {
                         refs.push(ConfigReference {
                             file_path: path.display().to_string(),
                             hostname: hostname.clone(),
@@ -626,7 +679,9 @@ impl ConfigScanner {
                     if let Ok(parsed) = url::Url::parse(val_str) {
                         if let Some(hostname) = parsed.host_str() {
                             if Self::is_valid_hostname(hostname) {
-                                let port = parsed.port();
+                                let port = parsed
+                                    .port()
+                                    .or_else(|| Self::default_port_for_scheme(parsed.scheme()));
                                 refs.push(ConfigReference {
                                     file_path: path.display().to_string(),
                                     hostname: hostname.to_string(),
@@ -686,16 +741,6 @@ impl ConfigScanner {
                 | "SMTP_URL"
                 | "BROKER_URL"
         )
-    }
-
-    fn parse_host_value(value: &str, default_port: Option<u16>) -> Option<(String, Option<u16>)> {
-        let value = value.trim_matches(|c: char| c == '"' || c == '\'' || c.is_whitespace());
-        let (hostname, port) = value
-            .rsplit_once(':')
-            .filter(|(_, port)| port.parse::<u16>().is_ok())
-            .map(|(hostname, port)| (hostname, port.parse().ok()))
-            .unwrap_or((value, default_port));
-        Self::is_valid_hostname(hostname).then(|| (hostname.to_string(), port))
     }
 
     fn scan_database_configs() -> Result<Vec<ConfigReference>> {
@@ -893,5 +938,38 @@ mod tests {
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].hostname, "db01");
         assert_eq!(refs[0].port, Some(3306));
+    }
+
+    #[test]
+    fn endpoint_parser_handles_protocol_defaults_ipv6_and_unix_sockets() {
+        assert_eq!(
+            ConfigScanner::parse_endpoint("db01.internal:3306", None),
+            Some(("db01.internal".to_string(), Some(3306)))
+        );
+        assert_eq!(
+            ConfigScanner::parse_endpoint("postgres://[2001:db8::1]", None),
+            Some(("2001:db8::1".to_string(), Some(5432)))
+        );
+        assert_eq!(
+            ConfigScanner::parse_endpoint("[2001:db8::1]:5432", None),
+            Some(("2001:db8::1".to_string(), Some(5432)))
+        );
+        assert_eq!(
+            ConfigScanner::parse_endpoint("/var/run/postgresql/.s.PGSQL.5432", None),
+            None
+        );
+    }
+
+    #[test]
+    fn postgres_host_gets_postgres_default_port() {
+        let refs = ConfigScanner::parse_app_config(
+            Path::new("/tmp/config.env"),
+            "postgres.host=db01.internal\n",
+        )
+        .unwrap();
+
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].hostname, "db01.internal");
+        assert_eq!(refs[0].port, Some(5432));
     }
 }
