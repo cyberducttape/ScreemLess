@@ -503,6 +503,9 @@ impl<'a> Analyzer<'a> {
             })
             .sum();
         let latest_web_services = snapshots.last().map(web_services).unwrap_or_default();
+        let latest_listener_evidence_complete = snapshots
+            .last()
+            .is_some_and(|snapshot| snapshot.probe_statuses.network_sockets.is_complete());
         for snapshot in snapshots {
             let services = web_services(snapshot);
             let inbound_connections = snapshot
@@ -589,7 +592,9 @@ impl<'a> Analyzer<'a> {
                 .iter()
                 .filter(|service| site.ports.is_empty() || site.ports.contains(&service.0))
                 .collect::<Vec<_>>();
-            site.status = if matching_latest_services.is_empty() {
+            site.status = if !latest_listener_evidence_complete {
+                "listener_state_unknown"
+            } else if matching_latest_services.is_empty() {
                 "no_matching_listener_observed"
             } else if configured_sites
                 && (site.ports.is_empty()
@@ -2527,6 +2532,18 @@ mod tests {
             .all(|site| site.listener_activity_observations == 0));
         assert_eq!(shared_service_inventory.web_listener_observations, 1);
         assert_eq!(shared_service_inventory.listener_activity_observations, 1);
+
+        let mut incomplete_listener_snapshot = snapshot.clone();
+        incomplete_listener_snapshot.listening_services.clear();
+        incomplete_listener_snapshot.probe_statuses.network_sockets =
+            crate::models::ProbeStatus::failed("socket collection unavailable");
+        let incomplete_listener_inventory =
+            Analyzer::build_inventory(&[incomplete_listener_snapshot], &[]);
+        assert_eq!(incomplete_listener_inventory.websites.len(), 1);
+        assert_eq!(
+            incomplete_listener_inventory.websites[0].status,
+            "listener_state_unknown"
+        );
 
         let mut proxy_snapshot = snapshot;
         proxy_snapshot.config_references.push(ConfigReference {

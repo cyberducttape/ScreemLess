@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Report website listener state as unknown when the latest socket probe is
+  incomplete; do not interpret missing listener evidence as a site without a
+  listener.
 - Use `null` rather than a misleading zero when configuration syntax support
   has not been measured; bumped report JSON to 2.0 and infrastructure JSON to
   3.0 because the nested audit shape changed.

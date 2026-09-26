@@ -331,7 +331,9 @@ pub struct SoftwareInventory {
 pub struct WebsiteInventory {
     pub name: String,
     /// Listener evidence only; this is not an HTTP health check or proof that
-    /// a virtual host serves requests.
+    /// a virtual host serves requests. `no_matching_listener_observed` is only
+    /// assigned when the latest socket probe completed; otherwise status is
+    /// `listener_state_unknown`.
     pub status: String,
     pub ports: Vec<u16>,
     #[serde(alias = "availability_observations", alias = "usage_observations")]

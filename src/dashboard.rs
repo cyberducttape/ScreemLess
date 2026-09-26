@@ -136,8 +136,8 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
     );
     let inventory_json = safe_json_for_script(&analysis.inventory)?;
     let inventory_cards = format!(
-        "<div class='inventory-grid'><div><b>Configured websites</b><span>{}</span><small>{} with matching listener · {} shared/unattributed · {} without observed listener · not vhost health</small></div><div><b>Listener samples</b><span>{}</span><small>host-level snapshots with a web listener</small></div><div><b>Listener activity</b><span>{}</span><small>host-level socket observations; not site traffic</small></div><div><b>Users</b><span>{}</span><small>observed runtime users</small></div><div><b>Databases</b><span>{}</span><small>inferred connections</small></div><div><b>Site content</b><span>{}</span><small>configured document roots</small></div><div><b>Storage</b><span>{}</span><small>inferred connections</small></div><div><b>Tech stack</b><span>{}</span><small>recognized application processes</small></div><div><b>Load balancers</b><span>{}</span><small>config-backed candidates</small></div></div>",
-        analysis.inventory.websites.len(), analysis.inventory.websites.iter().filter(|s| s.status != "no_matching_listener_observed").count(), analysis.inventory.websites.iter().filter(|s| s.status == "shared_listener_unattributed").count(), analysis.inventory.websites.iter().filter(|s| s.status == "no_matching_listener_observed").count(),
+        "<div class='inventory-grid'><div><b>Configured websites</b><span>{}</span><small>{} listener observed · {} shared/unattributed · {} no listener seen · {} unknown · not vhost health</small></div><div><b>Listener samples</b><span>{}</span><small>host-level snapshots with a web listener</small></div><div><b>Listener activity</b><span>{}</span><small>host-level socket observations; not site traffic</small></div><div><b>Users</b><span>{}</span><small>observed runtime users</small></div><div><b>Databases</b><span>{}</span><small>inferred connections</small></div><div><b>Site content</b><span>{}</span><small>configured document roots</small></div><div><b>Storage</b><span>{}</span><small>inferred connections</small></div><div><b>Tech stack</b><span>{}</span><small>recognized application processes</small></div><div><b>Load balancers</b><span>{}</span><small>config-backed candidates</small></div></div>",
+        analysis.inventory.websites.len(), analysis.inventory.websites.iter().filter(|s| s.status == "listener_observed").count(), analysis.inventory.websites.iter().filter(|s| s.status == "shared_listener_unattributed").count(), analysis.inventory.websites.iter().filter(|s| s.status == "no_matching_listener_observed").count(), analysis.inventory.websites.iter().filter(|s| s.status == "listener_state_unknown").count(),
         analysis.inventory.web_listener_observations, analysis.inventory.listener_activity_observations, analysis.inventory.users.len(), analysis.inventory.databases.len(), analysis.inventory.websites.iter().map(|s| s.content_paths.len()).sum::<usize>(), analysis.inventory.storage_connections.len(), analysis.inventory.tech_stack.len(), analysis.inventory.load_balancers.len());
     let software_html =
         if analysis.inventory.software.is_empty() {
@@ -759,6 +759,15 @@ mod tests {
             inventory: SiteInventory::default(),
             config_scan_audit: None,
         };
+        analysis.inventory.websites.push(WebsiteInventory {
+            name: "example.com".to_string(),
+            status: "listener_state_unknown".to_string(),
+            ports: vec![443],
+            listener_presence_observations: 0,
+            listener_activity_observations: 0,
+            content_paths: Vec::new(),
+            tech_stack: Vec::new(),
+        });
 
         let html = render_dashboard("db<01", &analysis).unwrap();
         assert!(html.contains("<title>Screamless: db&lt;01</title>"));
@@ -767,6 +776,9 @@ mod tests {
         assert!(html.contains("Activity or blocking risks detected"));
         assert!(!html.contains("readiness-score"));
         assert!(html.contains("Systemd timers"));
+        assert!(html.contains(
+            "0 listener observed · 0 shared/unattributed · 0 no listener seen · 1 unknown · not vhost health"
+        ));
         assert!(html.contains("const dependencies = [{"));
         assert!(html.contains("const risks = [{"));
         assert!(html.contains("Example risk"));
