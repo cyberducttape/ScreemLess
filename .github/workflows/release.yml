@@ -4,13 +4,13 @@ on:
   push:
     tags: ['v*.*.*']
 
-permissions:
-  contents: write
-  id-token: write
+permissions: {}
 
 jobs:
-  release:
+  build:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
@@ -23,6 +23,8 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           cargo build --locked --release
+          mkdir -p dist
+          install -m 0644 LICENSE CHANGELOG.md dist/
           mkdir -p "dist/screamless-${VERSION}"
           install -m 0755 target/release/screamless "dist/screamless-${VERSION}/screamless"
           install -m 0644 LICENSE CHANGELOG.md README.md packaging/screamless-agent.service "dist/screamless-${VERSION}/"
@@ -57,14 +59,53 @@ jobs:
 
       - name: Generate checksums
         working-directory: dist
-        run: sha256sum *.tar.gz *.deb *.rpm SBOM.spdx.json > SHA256SUMS
+        run: sha256sum -- *.tar.gz *.deb *.rpm SBOM.spdx.json > SHA256SUMS
 
-      - name: Sign release files when Cosign is available
+      - name: Upload unsigned release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-release-files
+          path: dist/
+          if-no-files-found: error
+
+  sign:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download unsigned release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: unsigned-release-files
+          path: dist/
+
+      - name: Install Cosign
         uses: sigstore/cosign-installer@v3
 
       - name: Sign checksums with keyless Cosign
         working-directory: dist
         run: cosign sign-blob --yes --output-signature SHA256SUMS.sig --output-certificate SHA256SUMS.pem SHA256SUMS
+
+      - name: Upload signed release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-release-files
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    needs: sign
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download signed release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: signed-release-files
+          path: dist/
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
@@ -78,5 +119,5 @@ jobs:
             dist/SHA256SUMS.sig
             dist/SHA256SUMS.pem
             dist/SBOM.spdx.json
-            LICENSE
-            CHANGELOG.md
+            dist/LICENSE
+            dist/CHANGELOG.md
