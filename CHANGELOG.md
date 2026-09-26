@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Render configured website evidence per site in the dashboard, distinguishing
+  observed listeners from unknown/unmatched state and labeling socket activity
+  as observations rather than request counts.
 - Count inaccessible `/proc` process entries as incomplete attribution while
   ignoring normal process-exit races; reset fast-probe status each sample so
   recovered socket/process probes do not remain stale or force slow retries.

@@ -139,6 +139,66 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
         "<div class='inventory-grid'><div><b>Configured websites</b><span>{}</span><small>{} listener observed · {} shared/unattributed · {} no listener seen · {} unknown · not vhost health</small></div><div><b>Listener samples</b><span>{}</span><small>host-level snapshots with a web listener</small></div><div><b>Listener activity</b><span>{}</span><small>host-level socket observations; not site traffic</small></div><div><b>Users</b><span>{}</span><small>observed runtime users</small></div><div><b>Databases</b><span>{}</span><small>inferred connections</small></div><div><b>Site content</b><span>{}</span><small>configured document roots</small></div><div><b>Storage</b><span>{}</span><small>inferred connections</small></div><div><b>Tech stack</b><span>{}</span><small>recognized application processes</small></div><div><b>Load balancers</b><span>{}</span><small>config-backed candidates</small></div></div>",
         analysis.inventory.websites.len(), analysis.inventory.websites.iter().filter(|s| s.status == "listener_observed").count(), analysis.inventory.websites.iter().filter(|s| s.status == "shared_listener_unattributed").count(), analysis.inventory.websites.iter().filter(|s| s.status == "no_matching_listener_observed").count(), analysis.inventory.websites.iter().filter(|s| s.status == "listener_state_unknown").count(),
         analysis.inventory.web_listener_observations, analysis.inventory.listener_activity_observations, analysis.inventory.users.len(), analysis.inventory.databases.len(), analysis.inventory.websites.iter().map(|s| s.content_paths.len()).sum::<usize>(), analysis.inventory.storage_connections.len(), analysis.inventory.tech_stack.len(), analysis.inventory.load_balancers.len());
+    let website_rows = analysis
+        .inventory
+        .websites
+        .iter()
+        .map(|site| {
+            let status = match site.status.as_str() {
+                "listener_observed" => "Listener observed",
+                "shared_listener_unattributed" => "Listener observed · site attribution unavailable",
+                "no_matching_listener_observed" => "No matching listener observed",
+                "listener_state_unknown" => "Listener state unknown",
+                _ => "Unknown status",
+            };
+            let listener_activity = if site.status == "shared_listener_unattributed" {
+                "Unattributed (shared listener)".to_string()
+            } else {
+                format!(
+                    "{} socket observations (not requests)",
+                    site.listener_activity_observations
+                )
+            };
+            let ports = if site.ports.is_empty() {
+                "not specified".to_string()
+            } else {
+                site.ports
+                    .iter()
+                    .map(u16::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let content_paths = if site.content_paths.is_empty() {
+                "not discovered".to_string()
+            } else {
+                site.content_paths.join(", ")
+            };
+            let listener_stack = if site.tech_stack.is_empty() {
+                "not matched".to_string()
+            } else {
+                site.tech_stack.join(", ")
+            };
+            format!(
+                "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                escape_html(&site.name),
+                escape_html(status),
+                site.listener_presence_observations,
+                escape_html(&listener_activity),
+                escape_html(&ports),
+                escape_html(&content_paths),
+                escape_html(&listener_stack),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    let website_inventory = if website_rows.is_empty() {
+        "<p class='muted'>No configured website records were discovered.</p>".to_string()
+    } else {
+        format!(
+            "<div class='site-table-wrap'><table class='site-table'><thead><tr><th>Configured site</th><th>Observed listener state</th><th>Candidate listener samples</th><th>Listener activity</th><th>Ports</th><th>Configured content roots</th><th>Observed listener stack</th></tr></thead><tbody>{}</tbody></table></div><p class='muted'>Listener samples do not prove virtual-host health. Activity values are socket observations, not HTTP requests; shared listener activity is not attributed to individual sites. The listener stack does not identify application runtimes behind a proxy.</p>",
+            website_rows
+        )
+    };
     let software_html =
         if analysis.inventory.software.is_empty() {
             "<p class='muted'>No versioned software observations available</p>".to_string()
@@ -306,6 +366,12 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
             border-bottom: 2px solid #667eea;
             padding-bottom: 10px;
         }}
+
+        .site-table-wrap {{ overflow-x: auto; }}
+        .site-table {{ width: 100%; border-collapse: collapse; background: #fff; font-size: 13px; }}
+        .site-table th, .site-table td {{ padding: 10px; text-align: left; vertical-align: top; border-bottom: 1px solid #e1e5eb; }}
+        .site-table th {{ color: #475467; background: #f8f9fb; white-space: nowrap; }}
+        .muted {{ color: #667085; font-size: 12px; line-height: 1.5; }}
 
         .graph-container {{
             background: white;
@@ -525,6 +591,8 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
         <div class="section" style="margin: 0 30px 30px;">
             <h2>Site & Infrastructure Inventory</h2>
             {}
+            <h3 style="margin-top: 20px; color: #555;">Configured Website Evidence</h3>
+            {}
             <h3 style="margin-top: 20px; color: #555;">Detected Software Versions</h3>
             <div class="software-list">{}</div>
         </div>
@@ -700,6 +768,7 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
         high_conf_count,
         risks_html,
         inventory_cards,
+        website_inventory,
         software_html,
         safe_json_for_script(&hostname)?,
         deps_json,
@@ -760,13 +829,13 @@ mod tests {
             config_scan_audit: None,
         };
         analysis.inventory.websites.push(WebsiteInventory {
-            name: "example.com".to_string(),
+            name: "example.com<script>".to_string(),
             status: "listener_state_unknown".to_string(),
             ports: vec![443],
             listener_presence_observations: 0,
             listener_activity_observations: 0,
-            content_paths: Vec::new(),
-            tech_stack: Vec::new(),
+            content_paths: vec!["/srv/site</td><script>alert(1)</script>".to_string()],
+            tech_stack: vec!["nginx<bad>".to_string()],
         });
 
         let html = render_dashboard("db<01", &analysis).unwrap();
@@ -776,6 +845,14 @@ mod tests {
         assert!(html.contains("Activity or blocking risks detected"));
         assert!(!html.contains("readiness-score"));
         assert!(html.contains("Systemd timers"));
+        assert!(html.contains("Configured Website Evidence"));
+        assert!(html.contains("Observed listener state"));
+        assert!(html.contains("Listener state unknown"));
+        assert!(html.contains("example.com&lt;script&gt;"));
+        assert!(html.contains("/srv/site&lt;/td&gt;&lt;script&gt;alert(1)&lt;/script&gt;"));
+        assert!(html.contains("nginx&lt;bad&gt;"));
+        assert!(html.contains("Activity values are socket observations, not HTTP requests"));
+        assert!(html.contains("does not identify application runtimes behind a proxy"));
         assert!(html.contains(
             "0 listener observed · 0 shared/unattributed · 0 no listener seen · 1 unknown · not vhost health"
         ));
