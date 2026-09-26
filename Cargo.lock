@@ -624,6 +624,7 @@ dependencies = [
  "chrono",
  "clap",
  "glob",
+ "libc",
  "procfs",
  "regex",
  "rusqlite",

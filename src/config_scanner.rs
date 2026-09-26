@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use regex::Regex;
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::models::{ConfigReference, ConfigScanAudit};
@@ -1014,15 +1015,39 @@ impl ConfigScanner {
             if !Self::path_is_within_search_root(path, &identity, roots) {
                 anyhow::bail!("Config path resolves outside configured scan roots");
             }
-            let entry_metadata = fs::symlink_metadata(path)
-                .with_context(|| format!("Unable to inspect config file {}", path.display()))?;
-            if entry_metadata.file_type().is_symlink() {
-                anyhow::bail!("Refusing to read a config-file symlink: {}", path.display());
+
+            // Pin the directory entry without following its final symlink or
+            // opening a FIFO/device. Inspect that pinned inode before opening
+            // its procfs descriptor for reading, avoiding pathname TOCTOU.
+            let mut inspect_options = fs::OpenOptions::new();
+            inspect_options.read(true);
+            #[cfg(target_os = "linux")]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                inspect_options.custom_flags(libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC);
             }
-            let metadata = fs::metadata(path)
+            let inspect_file = inspect_options
+                .open(path)
+                .with_context(|| format!("Unable to inspect config file {}", path.display()))?;
+            let metadata = inspect_file
+                .metadata()
                 .with_context(|| format!("Unable to stat config file {}", path.display()))?;
             if !metadata.is_file() {
                 anyhow::bail!("Config path is not a regular file: {}", path.display());
+            }
+
+            #[cfg(target_os = "linux")]
+            let descriptor_path = {
+                use std::os::fd::AsRawFd;
+                PathBuf::from(format!("/proc/self/fd/{}", inspect_file.as_raw_fd()))
+            };
+            #[cfg(not(target_os = "linux"))]
+            let descriptor_path = path.to_path_buf();
+            let opened_path = fs::canonicalize(&descriptor_path).with_context(|| {
+                format!("Unable to resolve opened config file {}", path.display())
+            })?;
+            if !Self::path_is_within_search_root(&opened_path, &opened_path, roots) {
+                anyhow::bail!("Opened config file resolves outside configured scan roots");
             }
             if metadata.len() > MAX_CONFIG_FILE_BYTES {
                 anyhow::bail!(
@@ -1031,8 +1056,21 @@ impl ConfigScanner {
                     path.display()
                 );
             }
-            fs::read_to_string(path)
-                .with_context(|| format!("Unable to read config file {}", path.display()))
+            let mut file = fs::File::open(&descriptor_path)
+                .with_context(|| format!("Unable to open pinned config file {}", path.display()))?;
+            let mut content = String::new();
+            file.by_ref()
+                .take(MAX_CONFIG_FILE_BYTES + 1)
+                .read_to_string(&mut content)
+                .with_context(|| format!("Unable to read config file {}", path.display()))?;
+            if content.len() as u64 > MAX_CONFIG_FILE_BYTES {
+                anyhow::bail!(
+                    "Config file exceeds {} byte limit while reading: {}",
+                    MAX_CONFIG_FILE_BYTES,
+                    path.display()
+                );
+            }
+            Ok(content)
         })();
 
         match result {
@@ -1094,6 +1132,7 @@ mod tests {
         let missing = root.join("missing.conf");
         let oversized = root.join("oversized.conf");
         let linked_directory = root.join("linked");
+        let fifo = root.join("fifo.conf");
         fs::write(&readable, "backend = db01:5432\n").unwrap();
         fs::write(outside.join("outside.conf"), "DB_HOST=outside\n").unwrap();
         fs::File::create(&oversized)
@@ -1102,6 +1141,13 @@ mod tests {
             .unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink(&outside, &linked_directory).unwrap();
+        #[cfg(target_os = "linux")]
+        {
+            use std::ffi::CString;
+            use std::os::unix::ffi::OsStrExt;
+            let fifo_path = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o600) }, 0);
+        }
 
         let mut context = super::ScanContext::default();
         let roots = [root.to_str().unwrap()];
@@ -1124,8 +1170,12 @@ mod tests {
             &roots
         )
         .is_none());
+        #[cfg(target_os = "linux")]
+        assert!(ConfigScanner::read_config_file_with_roots(&fifo, &mut context, &roots).is_none());
 
-        #[cfg(unix)]
+        #[cfg(target_os = "linux")]
+        let expected_discovered = 5;
+        #[cfg(all(unix, not(target_os = "linux")))]
         let expected_discovered = 4;
         #[cfg(not(unix))]
         let expected_discovered = 3;
