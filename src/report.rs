@@ -42,6 +42,19 @@ impl<'a> Reporter<'a> {
 
         self.print_probe_status(&analysis);
         self.print_observation_coverage(&analysis);
+        if let Some(audit) = &analysis.config_scan_audit {
+            println!("CONFIGURATION SCAN AUDIT");
+            println!("  Scanner: {}", audit.scanner_version);
+            println!(
+                "  Files discovered: {} | parsed: {} | skipped: {}",
+                audit.files_discovered, audit.files_parsed, audit.files_skipped
+            );
+            println!(
+                "  Permission denied: {} | unsupported syntax: {} | bytes scanned: {}",
+                audit.permission_denied, audit.syntax_unsupported, audit.bytes_scanned
+            );
+            println!();
+        }
         println!(
             "NETWORK EVIDENCE: polling socket observations; short-lived connections may be missed\n"
         );
@@ -86,6 +99,7 @@ impl<'a> Reporter<'a> {
             "risks": analysis.risks,
             "decommission_confidence": analysis.decommission_confidence,
             "probe_statuses": analysis.probe_statuses,
+            "config_scan_audit": analysis.config_scan_audit,
         });
 
         println!("{}", serde_json::to_string_pretty(&json)?);

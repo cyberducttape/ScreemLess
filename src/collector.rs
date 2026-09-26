@@ -16,7 +16,15 @@ static CONFIG_DNS_CACHE: OnceLock<ConfigDnsCache> = OnceLock::new();
 static PASSWD_CACHE: OnceLock<HashMap<u32, String>> = OnceLock::new();
 
 type ProcessAttribution = HashMap<u32, (String, u32, String)>;
-type ConfigDnsCache = Mutex<Option<(Instant, Vec<DnsName>, usize, Vec<ConfigReference>)>>;
+type ConfigDnsCache = Mutex<
+    Option<(
+        Instant,
+        Vec<DnsName>,
+        usize,
+        Vec<ConfigReference>,
+        ConfigScanAudit,
+    )>,
+>;
 type ProcessInventory = (Vec<Process>, ProcessAttribution, Vec<SoftwareInventory>);
 
 const SLOW_REFRESH_INTERVAL: StdDuration = StdDuration::from_secs(60 * 60);
@@ -31,6 +39,7 @@ pub struct CollectionState {
     systemd_timers: Vec<SystemdTimer>,
     dns_names: Vec<DnsName>,
     config_references: Vec<ConfigReference>,
+    config_scan_audit: Option<ConfigScanAudit>,
     host_identity: HostIdentity,
     slow_probe_statuses: ProbeStatuses,
 }
@@ -117,9 +126,10 @@ impl Collector {
                 Err(error) => probe_statuses.systemd = ProbeStatus::failed(error.to_string()),
             }
             match Self::collect_dns_names() {
-                Ok((dns_names, dns_unavailable, config_references)) => {
+                Ok((dns_names, dns_unavailable, config_references, config_scan_audit)) => {
                     state.dns_names = dns_names;
                     state.config_references = config_references;
+                    state.config_scan_audit = Some(config_scan_audit);
                     if dns_unavailable > 0 {
                         probe_statuses.dns = ProbeStatus::partial(
                             format!("DNS resolution failed for {} names", dns_unavailable),
@@ -150,6 +160,7 @@ impl Collector {
             systemd_timers: state.systemd_timers.clone(),
             dns_names: state.dns_names.clone(),
             config_references: state.config_references.clone(),
+            config_scan_audit: state.config_scan_audit.clone(),
             software: state.software.clone(),
             sampling_interval_seconds: None,
             privileges: Self::current_privilege_level(),
@@ -802,12 +813,17 @@ impl Collector {
         Ok(timers)
     }
 
-    fn collect_dns_names() -> Result<(Vec<DnsName>, usize, Vec<ConfigReference>)> {
+    fn collect_dns_names() -> Result<(Vec<DnsName>, usize, Vec<ConfigReference>, ConfigScanAudit)> {
         let cache = CONFIG_DNS_CACHE.get_or_init(|| Mutex::new(None));
         if let Ok(guard) = cache.lock() {
-            if let Some((timestamp, names, unavailable, references)) = guard.as_ref() {
+            if let Some((timestamp, names, unavailable, references, audit)) = guard.as_ref() {
                 if timestamp.elapsed() < StdDuration::from_secs(300) {
-                    return Ok((names.clone(), *unavailable, references.clone()));
+                    return Ok((
+                        names.clone(),
+                        *unavailable,
+                        references.clone(),
+                        audit.clone(),
+                    ));
                 }
             }
         }
@@ -815,7 +831,7 @@ impl Collector {
         let mut names = Vec::new();
         let mut unavailable = 0;
 
-        let config_refs = ConfigScanner::scan()?;
+        let (config_refs, config_scan_audit) = ConfigScanner::scan_with_audit()?;
         let timestamp = Utc::now();
 
         let mut seen = std::collections::HashSet::new();
@@ -846,9 +862,10 @@ impl Collector {
                 names.clone(),
                 unavailable,
                 config_refs.clone(),
+                config_scan_audit.clone(),
             ));
         }
-        Ok((names, unavailable, config_refs))
+        Ok((names, unavailable, config_refs, config_scan_audit))
     }
 }
 

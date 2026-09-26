@@ -287,6 +287,7 @@ mod tests {
             systemd_timers: vec![],
             dns_names: vec![],
             config_references: vec![],
+            config_scan_audit: None,
             software: vec![],
             sampling_interval_seconds: None,
             privileges: "full".to_string(),

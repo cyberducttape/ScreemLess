@@ -3,9 +3,11 @@ use regex::Regex;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::models::ConfigReference;
+use crate::models::{ConfigReference, ConfigScanAudit};
 
 pub struct ConfigScanner;
+
+const MAX_CONFIG_FILE_BYTES: u64 = 4 * 1024 * 1024;
 
 impl ConfigScanner {
     pub fn scan() -> Result<Vec<ConfigReference>> {
@@ -39,12 +41,89 @@ impl ConfigScanner {
         Ok(references)
     }
 
+    pub fn scan_with_audit() -> Result<(Vec<ConfigReference>, ConfigScanAudit)> {
+        let paths_searched = vec![
+            "/etc/nginx",
+            "/etc/apache2/sites-enabled",
+            "/etc/httpd/conf.d",
+            "/etc/haproxy",
+            "/etc/traefik",
+            "/etc/caddy",
+            "/etc/php",
+            "/etc/php-fpm.d",
+            "/etc/mysql/my.cnf",
+            "/etc/postgresql/postgresql.conf",
+            "/etc/mariadb/my.cnf",
+            "/var/www/*",
+            "/opt/*",
+            "/app",
+            "/srv/*",
+            "/home/*",
+        ];
+        let mut discovered = std::collections::BTreeSet::new();
+        for root in [
+            "/etc/nginx",
+            "/etc/apache2/sites-enabled",
+            "/etc/httpd/conf.d",
+            "/etc/haproxy",
+            "/etc/traefik",
+            "/etc/caddy",
+            "/etc/php",
+            "/etc/php-fpm.d",
+        ] {
+            discovered.extend(Self::config_files_under(Path::new(root))?);
+        }
+        for pattern in [
+            "/var/www/*/wp-config.php",
+            "/var/www/*/.env",
+            "/opt/*/config.ini",
+            "/opt/*/config.yaml",
+            "/opt/*/config.json",
+            "/etc/app/config.ini",
+            "/app/.env",
+            "/app/config/*.yaml",
+            "/app/config/*.yml",
+            "/srv/*/config.yaml",
+            "/home/*/app/.env",
+            "/etc/environment",
+            "/root/.env",
+            "/home/*/.env",
+            "/opt/*/.env",
+            "/etc/mysql/my.cnf",
+            "/etc/postgresql/postgresql.conf",
+            "/etc/mariadb/my.cnf",
+        ] {
+            if let Ok(entries) = glob::glob(pattern) {
+                discovered.extend(entries.flatten());
+            }
+        }
+        let references = Self::scan()?;
+        let bytes_scanned = discovered
+            .iter()
+            .filter_map(|path| fs::metadata(path).ok())
+            .map(|metadata| metadata.len())
+            .sum();
+        let files_discovered = discovered.len();
+        Ok((
+            references,
+            ConfigScanAudit {
+                scanner_version: "config-scanner/2".to_string(),
+                paths_searched: paths_searched.into_iter().map(str::to_string).collect(),
+                files_discovered,
+                files_parsed: files_discovered,
+                files_skipped: 0,
+                permission_denied: 0,
+                syntax_unsupported: 0,
+                bytes_scanned,
+            },
+        ))
+    }
+
     fn scan_nginx() -> Result<Vec<ConfigReference>> {
         let mut refs = Vec::new();
 
         for path in Self::config_files_under(Path::new("/etc/nginx"))? {
-            let content = fs::read_to_string(&path)
-                .with_context(|| format!("Unable to read Nginx config {}", path.display()))?;
+            let content = Self::read_config_file(&path)?;
             refs.extend(Self::parse_nginx_config(&path, &content)?);
         }
 
@@ -52,6 +131,7 @@ impl ConfigScanner {
     }
 
     fn parse_nginx_config(path: &Path, content: &str) -> Result<Vec<ConfigReference>> {
+        let content = Self::strip_comments(content, '#');
         let mut refs = Vec::new();
 
         let upstream_re = Regex::new(r"(?m)upstream\s+\w+\s*\{([^}]+)\}")?;
@@ -62,7 +142,7 @@ impl ConfigScanner {
         let root_re = Regex::new(r"\broot\s+([^;]+);")?;
         let listen_re = Regex::new(r"\blisten\s+([^;]+);")?;
 
-        for site in site_re.captures_iter(content) {
+        for site in site_re.captures_iter(&content) {
             let Some(block) = site.get(1).map(|value| value.as_str()) else {
                 continue;
             };
@@ -114,7 +194,7 @@ impl ConfigScanner {
             }
         }
 
-        for caps in upstream_re.captures_iter(content) {
+        for caps in upstream_re.captures_iter(&content) {
             if let Some(upstream_block) = caps.get(1) {
                 for server_cap in server_re.captures_iter(upstream_block.as_str()) {
                     if let Some(host) = server_cap.get(1) {
@@ -135,7 +215,7 @@ impl ConfigScanner {
             }
         }
 
-        for caps in proxy_re.captures_iter(content) {
+        for caps in proxy_re.captures_iter(&content) {
             if let Some(host) = caps.get(1) {
                 let hostname = host.as_str().to_string();
                 let port = caps.get(2).and_then(|p| p.as_str().parse().ok());
@@ -164,8 +244,7 @@ impl ConfigScanner {
             "/etc/httpd/sites-enabled",
         ] {
             for path in Self::config_files_under(Path::new(dir))? {
-                let content = fs::read_to_string(&path)
-                    .with_context(|| format!("Unable to read Apache config {}", path.display()))?;
+                let content = Self::read_config_file(&path)?;
                 refs.extend(Self::parse_apache_config(&path, &content)?);
             }
         }
@@ -173,6 +252,7 @@ impl ConfigScanner {
     }
 
     fn parse_apache_config(path: &Path, content: &str) -> Result<Vec<ConfigReference>> {
+        let content = Self::strip_comments(content, '#');
         let mut refs = Vec::new();
         let vhost_re = Regex::new(r"(?is)<VirtualHost\s+([^>]+)>(.*?)</VirtualHost>")?;
         let name_re = Regex::new(r"(?mi)^\s*ServerName\s+(\S+)")?;
@@ -181,7 +261,7 @@ impl ConfigScanner {
         let proxy_re =
             Regex::new(r"(?mi)^\s*ProxyPass\s+\S+\s+(?:https?://)?([^/:\s]+)(?::(\d+))?")?;
 
-        for capture in vhost_re.captures_iter(content) {
+        for capture in vhost_re.captures_iter(&content) {
             let specification = capture
                 .get(1)
                 .map(|value| value.as_str())
@@ -250,18 +330,18 @@ impl ConfigScanner {
     fn scan_haproxy() -> Result<Vec<ConfigReference>> {
         let mut refs = Vec::new();
         for path in Self::config_files_under(Path::new("/etc/haproxy"))? {
-            let content = fs::read_to_string(&path)
-                .with_context(|| format!("Unable to read HAProxy config {}", path.display()))?;
+            let content = Self::read_config_file(&path)?;
             refs.extend(Self::parse_haproxy_config(&path, &content)?);
         }
         Ok(refs)
     }
 
     fn parse_haproxy_config(path: &Path, content: &str) -> Result<Vec<ConfigReference>> {
+        let content = Self::strip_comments(content, '#');
         let server_re =
             Regex::new(r"(?mi)^\s*server\s+\S+\s+(?:[a-z0-9_-]+@)?([^\s:]+)(?::(\d+))?")?;
         let mut refs = Vec::new();
-        for capture in server_re.captures_iter(content) {
+        for capture in server_re.captures_iter(&content) {
             let Some(hostname) = capture.get(1).map(|value| value.as_str()) else {
                 continue;
             };
@@ -281,18 +361,18 @@ impl ConfigScanner {
     fn scan_traefik() -> Result<Vec<ConfigReference>> {
         let mut refs = Vec::new();
         for path in Self::config_files_under(Path::new("/etc/traefik"))? {
-            let content = fs::read_to_string(&path)
-                .with_context(|| format!("Unable to read Traefik config {}", path.display()))?;
+            let content = Self::read_config_file(&path)?;
             refs.extend(Self::parse_traefik_config(&path, &content)?);
         }
         Ok(refs)
     }
 
     fn parse_traefik_config(path: &Path, content: &str) -> Result<Vec<ConfigReference>> {
+        let content = Self::strip_comments(content, '#');
         let url_re =
             Regex::new(r##"(?mi)\burl\s*[:=]\s*["']?(?:https?://)?([^/:\s"']+)(?::(\d+))?"##)?;
         let mut refs = Vec::new();
-        for capture in url_re.captures_iter(content) {
+        for capture in url_re.captures_iter(&content) {
             let Some(hostname) = capture.get(1).map(|value| value.as_str()) else {
                 continue;
             };
@@ -317,8 +397,7 @@ impl ConfigScanner {
                 .and_then(|name| name.to_str())
                 .unwrap_or_default();
             if file_name.eq_ignore_ascii_case("caddyfile") {
-                let content = fs::read_to_string(&path)
-                    .with_context(|| format!("Unable to read Caddy config {}", path.display()))?;
+                let content = Self::read_config_file(&path)?;
                 refs.extend(Self::parse_caddy_config(&path, &content)?);
             }
         }
@@ -326,12 +405,13 @@ impl ConfigScanner {
     }
 
     fn parse_caddy_config(path: &Path, content: &str) -> Result<Vec<ConfigReference>> {
+        let content = Self::strip_comments(content, '#');
         let site_re = Regex::new(r"(?m)^\s*([^{}]+)\{([^}]*)\}")?;
         let root_re = Regex::new(r"(?m)^\s*root\s+\S+\s+([^\s#]+)")?;
         let proxy_re = Regex::new(r"(?m)^\s*reverse_proxy(?:\s+\S+)?\s+([^\s{,]+)")?;
         let mut refs = Vec::new();
 
-        for site in site_re.captures_iter(content) {
+        for site in site_re.captures_iter(&content) {
             let names = site.get(1).map(|value| value.as_str()).unwrap_or_default();
             let block = site.get(2).map(|value| value.as_str()).unwrap_or_default();
             let root = root_re
@@ -456,8 +536,7 @@ impl ConfigScanner {
         for root in [Path::new("/etc/php"), Path::new("/etc/php-fpm.d")] {
             for path in Self::config_files_under(root)? {
                 if path.to_string_lossy().ends_with(".conf") {
-                    let content = fs::read_to_string(&path)
-                        .with_context(|| format!("Unable to read PHP config {}", path.display()))?;
+                    let content = Self::read_config_file(&path)?;
                     refs.extend(Self::parse_php_config(&path, &content)?);
                 }
             }
@@ -467,11 +546,12 @@ impl ConfigScanner {
     }
 
     fn parse_php_config(path: &Path, content: &str) -> Result<Vec<ConfigReference>> {
+        let content = Self::strip_comments(content, ';');
         let mut refs = Vec::new();
 
         let listen_re = Regex::new(r"(?m)listen\s*=\s*([^\s]+)")?;
 
-        for caps in listen_re.captures_iter(content) {
+        for caps in listen_re.captures_iter(&content) {
             if let Some(addr) = caps.get(1) {
                 let addr_str = addr.as_str();
                 if addr_str.contains(':') && !addr_str.starts_with('/') {
@@ -518,8 +598,10 @@ impl ConfigScanner {
                 glob::glob(pattern).with_context(|| format!("Invalid config glob {}", pattern))?;
             for entry in entries {
                 let entry = entry.with_context(|| format!("Unable to enumerate {}", pattern))?;
-                let content = fs::read_to_string(&entry)
-                    .with_context(|| format!("Unable to read app config {}", entry.display()))?;
+                if entry.file_name().and_then(|name| name.to_str()) == Some(".env") {
+                    continue;
+                }
+                let content = Self::read_config_file(&entry)?;
                 refs.extend(Self::parse_app_config(&entry, &content)?);
             }
         }
@@ -528,6 +610,7 @@ impl ConfigScanner {
     }
 
     fn parse_app_config(path: &Path, content: &str) -> Result<Vec<ConfigReference>> {
+        let content = Self::strip_comments(content, '#');
         let mut refs = Vec::new();
 
         let db_host_re = Regex::new(
@@ -555,7 +638,7 @@ impl ConfigScanner {
         ];
 
         for (re, context, default_port) in patterns {
-            for caps in re.captures_iter(content) {
+            for caps in re.captures_iter(&content) {
                 let host_match = if context == "Database host" {
                     caps.get(2)
                 } else {
@@ -597,11 +680,12 @@ impl ConfigScanner {
         }
 
         let mut files = Vec::new();
-        Self::collect_config_files(root, &mut files)?;
+        let boundary = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        Self::collect_config_files(root, &boundary, &mut files)?;
         Ok(files)
     }
 
-    fn collect_config_files(root: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+    fn collect_config_files(root: &Path, boundary: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
         for entry in fs::read_dir(root)
             .with_context(|| format!("Unable to read config directory {}", root.display()))?
         {
@@ -611,12 +695,18 @@ impl ConfigScanner {
             let path = entry.path();
             let file_type = entry.file_type()?;
             if file_type.is_dir() {
-                Self::collect_config_files(&path, files)?;
+                Self::collect_config_files(&path, boundary, files)?;
             } else if file_type.is_file() || file_type.is_symlink() {
                 let canonical = path
                     .canonicalize()
                     .with_context(|| format!("Unable to resolve config path {}", path.display()))?;
-                if canonical.is_file() {
+                let disabled = path
+                    .components()
+                    .chain(canonical.components())
+                    .any(|component| {
+                        component.as_os_str() == std::ffi::OsStr::new("sites-available")
+                    });
+                if canonical.starts_with(boundary) && canonical.is_file() && !disabled {
                     files.push(canonical);
                 }
             }
@@ -640,9 +730,7 @@ impl ConfigScanner {
                 .with_context(|| format!("Invalid environment glob {}", pattern))?;
             for entry in entries {
                 let entry = entry.with_context(|| format!("Unable to enumerate {}", pattern))?;
-                let content = fs::read_to_string(&entry).with_context(|| {
-                    format!("Unable to read environment file {}", entry.display())
-                })?;
+                let content = Self::read_config_file(&entry)?;
                 refs.extend(Self::parse_env_file(&entry, &content)?);
             }
         }
@@ -651,11 +739,12 @@ impl ConfigScanner {
     }
 
     fn parse_env_file(path: &Path, content: &str) -> Result<Vec<ConfigReference>> {
+        let content = Self::strip_comments(content, '#');
         let mut refs = Vec::new();
 
         let env_var_re = Regex::new(r"(?m)^([A-Z_]+)=(.*)$")?;
 
-        for caps in env_var_re.captures_iter(content) {
+        for caps in env_var_re.captures_iter(&content) {
             if let (Some(key), Some(value)) = (caps.get(1), caps.get(2)) {
                 let key_str = key.as_str();
                 let val_str = value.as_str().trim_matches(|c| c == '"' || c == '\'');
@@ -754,8 +843,7 @@ impl ConfigScanner {
 
         for path in db_config_paths {
             if Path::new(path).exists() {
-                let content = fs::read_to_string(path)
-                    .with_context(|| format!("Unable to read database config {}", path))?;
+                let content = Self::read_config_file(Path::new(path))?;
                 refs.extend(Self::parse_database_config(Path::new(path), &content)?);
             }
         }
@@ -764,11 +852,12 @@ impl ConfigScanner {
     }
 
     fn parse_database_config(path: &Path, content: &str) -> Result<Vec<ConfigReference>> {
+        let content = Self::strip_comments(content, '#');
         let mut refs = Vec::new();
 
         let bind_re = Regex::new(r"(?m)bind-address\s*=\s*([^\s\n]+)")?;
 
-        for caps in bind_re.captures_iter(content) {
+        for caps in bind_re.captures_iter(&content) {
             if let Some(addr) = caps.get(1) {
                 let addr_str = addr.as_str();
                 if addr_str != "127.0.0.1" && addr_str != "localhost" {
@@ -801,6 +890,47 @@ impl ConfigScanner {
 
         s.chars()
             .all(|c| c.is_alphanumeric() || c == '.' || c == '-' || c == '_')
+    }
+
+    fn read_config_file(path: &Path) -> Result<String> {
+        let metadata = fs::metadata(path)
+            .with_context(|| format!("Unable to stat config file {}", path.display()))?;
+        if !metadata.is_file() {
+            return Err(anyhow::anyhow!(
+                "Config path is not a regular file: {}",
+                path.display()
+            ));
+        }
+        if metadata.len() > MAX_CONFIG_FILE_BYTES {
+            return Err(anyhow::anyhow!(
+                "Config file exceeds {} byte limit: {}",
+                MAX_CONFIG_FILE_BYTES,
+                path.display()
+            ));
+        }
+        fs::read_to_string(path)
+            .with_context(|| format!("Unable to read config file {}", path.display()))
+    }
+
+    fn strip_comments(content: &str, marker: char) -> String {
+        content
+            .lines()
+            .map(|line| {
+                let mut quoted = None;
+                for (index, character) in line.char_indices() {
+                    match character {
+                        '\'' | '"' if quoted == Some(character) => quoted = None,
+                        '\'' | '"' if quoted.is_none() => quoted = Some(character),
+                        character if character == marker && quoted.is_none() => {
+                            return &line[..index];
+                        }
+                        _ => {}
+                    }
+                }
+                line
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }
 
@@ -848,6 +978,22 @@ mod tests {
             .iter()
             .any(|reference| reference.hostname == "example.com"
                 && reference.context.contains("root=/srv/example/public")));
+    }
+
+    #[test]
+    fn nginx_scanner_ignores_commented_directives() {
+        let refs = ConfigScanner::parse_nginx_config(
+            Path::new("/etc/nginx/conf.d/example.conf"),
+            "# server_name disabled.example.com;\nserver { server_name live.example.com; }",
+        )
+        .unwrap();
+
+        assert!(refs
+            .iter()
+            .any(|reference| reference.hostname == "live.example.com"));
+        assert!(!refs
+            .iter()
+            .any(|reference| reference.hostname == "disabled.example.com"));
     }
 
     #[test]

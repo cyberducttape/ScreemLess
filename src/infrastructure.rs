@@ -276,6 +276,7 @@ mod tests {
             decommission_confidence: 100,
             probe_statuses: ProbeStatuses::default(),
             inventory: crate::models::SiteInventory::default(),
+            config_scan_audit: None,
         }
     }
 

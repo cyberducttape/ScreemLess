@@ -150,6 +150,18 @@ pub struct ConfigReference {
     pub config_line: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ConfigScanAudit {
+    pub scanner_version: String,
+    pub paths_searched: Vec<String>,
+    pub files_discovered: usize,
+    pub files_parsed: usize,
+    pub files_skipped: usize,
+    pub permission_denied: usize,
+    pub syntax_unsupported: usize,
+    pub bytes_scanned: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InboundDependency {
     pub source_ip: String,
@@ -236,6 +248,8 @@ pub struct AnalysisResult {
     pub probe_statuses: ProbeStatuses,
     #[serde(default)]
     pub inventory: SiteInventory,
+    #[serde(default)]
+    pub config_scan_audit: Option<ConfigScanAudit>,
 }
 
 /// Describes how much of the requested observation window was actually
@@ -379,6 +393,8 @@ pub struct ObservationSnapshot {
     pub dns_names: Vec<DnsName>,
     #[serde(default)]
     pub config_references: Vec<ConfigReference>,
+    #[serde(default)]
+    pub config_scan_audit: Option<ConfigScanAudit>,
     #[serde(default)]
     pub software: Vec<SoftwareInventory>,
     #[serde(default)]

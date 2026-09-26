@@ -80,6 +80,7 @@ impl<'a> Analyzer<'a> {
                 decommission_confidence: 0,
                 probe_statuses: ProbeStatuses::default(),
                 inventory: SiteInventory::default(),
+                config_scan_audit: None,
             });
         }
 
@@ -139,6 +140,10 @@ impl<'a> Analyzer<'a> {
             decommission_confidence,
             probe_statuses,
             inventory,
+            config_scan_audit: snapshots
+                .iter()
+                .rev()
+                .find_map(|snapshot| snapshot.config_scan_audit.clone()),
         })
     }
 
@@ -1234,6 +1239,7 @@ mod tests {
             systemd_timers: Vec::new(),
             dns_names: Vec::new(),
             config_references: Vec::new(),
+            config_scan_audit: None,
             software: Vec::new(),
             sampling_interval_seconds: Some(60),
             privileges: "full".to_string(),
@@ -1278,6 +1284,7 @@ mod tests {
             systemd_timers: Vec::new(),
             dns_names: Vec::new(),
             config_references: Vec::new(),
+            config_scan_audit: None,
             software: Vec::new(),
             sampling_interval_seconds: Some(60),
             privileges: "full".to_string(),
@@ -1298,6 +1305,7 @@ mod tests {
             systemd_timers: Vec::new(),
             dns_names: Vec::new(),
             config_references: Vec::new(),
+            config_scan_audit: None,
             software: Vec::new(),
             sampling_interval_seconds: Some(60),
             privileges: "full".to_string(),
@@ -1358,6 +1366,7 @@ mod tests {
                 context: "nginx site; root=/srv/example/public; ports=443".to_string(),
                 config_line: None,
             }],
+            config_scan_audit: None,
             software: Vec::new(),
             sampling_interval_seconds: None,
             privileges: "full".to_string(),

@@ -575,6 +575,7 @@ mod tests {
             decommission_confidence: 85,
             probe_statuses: ProbeStatuses::default(),
             inventory: SiteInventory::default(),
+            config_scan_audit: None,
         };
 
         let html = render_dashboard("db<01", &analysis).unwrap();
