@@ -477,6 +477,8 @@ impl<'a> Analyzer<'a> {
                     is_web_process(&service.process_name) || matches!(service.port, 80 | 443)
                 })
                 .map(|service| (service.port, service.process_name.clone()))
+                .collect::<BTreeSet<_>>()
+                .into_iter()
                 .collect::<Vec<_>>()
         };
         let web_listener_observations = snapshots
@@ -539,6 +541,13 @@ impl<'a> Analyzer<'a> {
                     }
                 }
             } else {
+                let mut process_owners_by_port = HashMap::<u16, BTreeSet<String>>::new();
+                for (port, process_name) in &services {
+                    process_owners_by_port
+                        .entry(*port)
+                        .or_default()
+                        .insert(process_name.clone());
+                }
                 for service in services {
                     let key = format!("{}:{}", service.1, service.0);
                     let entry = websites
@@ -553,10 +562,19 @@ impl<'a> Analyzer<'a> {
                             tech_stack: Vec::new(),
                         });
                     entry.listener_presence_observations += 1;
-                    entry.listener_activity_observations += inbound_connections
-                        .iter()
-                        .filter(|connection| connection.local_port == service.0)
-                        .count();
+                    // A port-only socket observation cannot distinguish
+                    // processes sharing a port on different bind addresses.
+                    // Keep the host total, but only assign it to a process
+                    // entry when that process is the unique observed owner.
+                    if process_owners_by_port
+                        .get(&service.0)
+                        .is_some_and(|owners| owners.len() == 1)
+                    {
+                        entry.listener_activity_observations += inbound_connections
+                            .iter()
+                            .filter(|connection| connection.local_port == service.0)
+                            .count();
+                    }
                     if !entry.ports.contains(&service.0) {
                         entry.ports.push(service.0);
                     }
@@ -2427,6 +2445,26 @@ mod tests {
             .all(|site| site.status == "shared_listener_unattributed"));
         assert_eq!(shared_port_inventory.web_listener_observations, 1);
         assert_eq!(shared_port_inventory.listener_activity_observations, 1);
+
+        let mut shared_service_port = snapshot.clone();
+        shared_service_port.config_references.clear();
+        shared_service_port
+            .listening_services
+            .push(ListeningService {
+                port: 443,
+                protocol: "tcp".to_string(),
+                process_name: "caddy".to_string(),
+                pid: 11,
+                user: "www-data".to_string(),
+            });
+        let shared_service_inventory = Analyzer::build_inventory(&[shared_service_port], &[]);
+        assert_eq!(shared_service_inventory.websites.len(), 2);
+        assert!(shared_service_inventory
+            .websites
+            .iter()
+            .all(|site| site.listener_activity_observations == 0));
+        assert_eq!(shared_service_inventory.web_listener_observations, 1);
+        assert_eq!(shared_service_inventory.listener_activity_observations, 1);
 
         let mut proxy_snapshot = snapshot;
         proxy_snapshot.config_references.push(ConfigReference {

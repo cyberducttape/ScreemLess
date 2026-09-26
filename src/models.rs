@@ -338,6 +338,8 @@ pub struct WebsiteInventory {
     pub listener_presence_observations: usize,
     #[serde(default)]
     #[serde(alias = "inbound_connection_observations")]
+    /// Per-site/service socket observations are withheld when a shared port
+    /// cannot be attributed to one listener owner.
     pub listener_activity_observations: usize,
     pub content_paths: Vec<String>,
     pub tech_stack: Vec<String>,
