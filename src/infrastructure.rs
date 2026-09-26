@@ -267,6 +267,7 @@ mod tests {
             observation_window_hours: 1,
             total_snapshots: 1,
             observation_span: (now, now),
+            coverage: crate::models::ObservationCoverage::default(),
             dependencies,
             inbound_dependencies: Vec::new(),
             observed_processes: std::collections::HashMap::new(),

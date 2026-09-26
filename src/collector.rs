@@ -101,6 +101,8 @@ impl Collector {
             dns_names,
             config_references,
             software,
+            sampling_interval_seconds: None,
+            privileges: Self::current_privilege_level(),
             probe_statuses,
         })
     }
@@ -115,6 +117,23 @@ impl Collector {
                     .context("Failed to get hostname")
             })
             .context("Could not determine hostname")
+    }
+
+    fn current_privilege_level() -> String {
+        let uid = fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|status| {
+                status
+                    .lines()
+                    .find(|line| line.starts_with("Uid:"))
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .and_then(|value| value.parse::<u32>().ok())
+            });
+        if uid == Some(0) {
+            "full".to_string()
+        } else {
+            "restricted".to_string()
+        }
     }
 
     fn collect_listening_services(

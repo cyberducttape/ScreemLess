@@ -38,7 +38,7 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
     };
 
     let readiness_status = if readiness >= 80 {
-        "READY for decommission"
+        "NO ACTIVE DEPENDENCIES DETECTED in the collected evidence — validate remaining unknowns before proceeding"
     } else if readiness >= 50 {
         "CAUTION - Review items before proceeding"
     } else {
@@ -51,6 +51,14 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
         .filter(|d| d.confidence >= 70)
         .count();
     let total_deps = analysis.dependencies.len();
+    let coverage_summary = format!(
+        "Evidence quality: {} · Observation coverage: {:.2}% · {} successful / {} expected samples · Privileges: {}",
+        escape_html(&analysis.coverage.evidence_quality),
+        analysis.coverage.coverage_percent,
+        analysis.coverage.successful_samples,
+        analysis.coverage.expected_samples,
+        escape_html(&analysis.coverage.privileges)
+    );
     let inventory_json = safe_json_for_script(&analysis.inventory)?;
     let inventory_cards = format!(
         "<div class='inventory-grid'><div><b>Websites</b><span>{}</span><small>{} active / {} inactive</small></div><div><b>Availability coverage</b><span>{}</span><small>snapshots with a web listener</small></div><div><b>Inbound connection observations</b><span>{}</span><small>not HTTP request analytics</small></div><div><b>Users</b><span>{}</span><small>observed runtime users</small></div><div><b>Databases</b><span>{}</span><small>inferred connections</small></div><div><b>Site content</b><span>{}</span><small>configured document roots</small></div><div><b>Storage</b><span>{}</span><small>inferred connections</small></div><div><b>Tech stack</b><span>{}</span><small>recognized application processes</small></div><div><b>Load balancers</b><span>{}</span><small>config-backed candidates</small></div></div>",
@@ -355,6 +363,7 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
                 {}
             </div>
         </div>
+        <div class="coverage-summary">{}</div>
 
         <div class="main-content">
             <div>
@@ -511,6 +520,7 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
         readiness_class,
         readiness,
         readiness_status,
+        coverage_summary,
         deps_html,
         total_deps,
         high_conf_count,
@@ -539,6 +549,7 @@ mod tests {
             observation_window_hours: 1,
             total_snapshots: 1,
             observation_span: (now, now),
+            coverage: ObservationCoverage::default(),
             dependencies: vec![Dependency {
                 remote_addr: "10.0.0.2".to_string(),
                 remote_port: 3306,
@@ -569,7 +580,7 @@ mod tests {
         assert!(html.contains("<title>Screamless: db&lt;01</title>"));
         assert!(html.contains("<p>Server: <strong>db&lt;01</strong></p>"));
         assert!(html.contains("<div class=\"readiness-score ready\">85</div>"));
-        assert!(html.contains("READY for decommission"));
+        assert!(html.contains("NO ACTIVE DEPENDENCIES DETECTED"));
         assert!(html.contains("const dependencies = [{"));
         assert!(html.contains("const risks = [{"));
         assert!(html.contains("Example risk"));

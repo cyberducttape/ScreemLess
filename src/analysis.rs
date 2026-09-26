@@ -31,6 +31,7 @@ impl<'a> Analyzer<'a> {
                 observation_window_hours: hours,
                 total_snapshots: 0,
                 observation_span: (now, now),
+                coverage: Self::build_observation_coverage(&[], now, hours),
                 dependencies: Vec::new(),
                 inbound_dependencies: Vec::new(),
                 observed_processes: HashMap::new(),
@@ -48,6 +49,7 @@ impl<'a> Analyzer<'a> {
 
         let first_snap = snapshots.first().unwrap();
         let last_snap = snapshots.last().unwrap();
+        let coverage = Self::build_observation_coverage(&snapshots, now, hours);
 
         let dependencies = self.infer_dependencies(&snapshots)?;
         let observed_processes = self.analyze_process_activity(&snapshots)?;
@@ -66,7 +68,7 @@ impl<'a> Analyzer<'a> {
             &dependencies,
             &inbound_dependencies,
             &observed_processes,
-            hours,
+            &coverage,
         );
         if !probe_statuses.all_complete() {
             risks.push(RiskAssessment {
@@ -84,6 +86,7 @@ impl<'a> Analyzer<'a> {
             observation_window_hours: hours,
             total_snapshots: snapshots.len(),
             observation_span: (first_snap.timestamp, last_snap.timestamp),
+            coverage,
             dependencies,
             inbound_dependencies,
             observed_processes,
@@ -785,7 +788,7 @@ impl<'a> Analyzer<'a> {
         dependencies: &[Dependency],
         inbound_dependencies: &[InboundDependency],
         observed_processes: &HashMap<String, ProcessActivity>,
-        requested_hours: u32,
+        coverage: &ObservationCoverage,
     ) -> u8 {
         let mut score = 100u16;
 
@@ -829,23 +832,148 @@ impl<'a> Analyzer<'a> {
             score = score.saturating_sub(20);
         }
 
-        let observed_hours = snapshots
-            .last()
-            .and_then(|last| {
-                snapshots
-                    .first()
-                    .map(|first| last.timestamp - first.timestamp)
-            })
-            .map(|span| span.num_minutes().max(0) as f64 / 60.0)
-            .unwrap_or(0.0);
-        let requested_hours = f64::from(requested_hours.max(1));
-        let coverage_cap = if snapshots.len() < 3 {
-            25.0
+        let coverage_cap = coverage.coverage_percent.round().clamp(0.0, 100.0) as u16;
+        let quality_cap = if coverage.evidence_quality == "HIGH" {
+            100
+        } else if coverage.evidence_quality == "MEDIUM" {
+            79
         } else {
-            ((observed_hours / requested_hours).min(1.0) * 100.0).round()
+            49
+        };
+        score.min(coverage_cap).min(quality_cap) as u8
+    }
+
+    fn build_observation_coverage(
+        snapshots: &[ObservationSnapshot],
+        now: DateTime<Utc>,
+        requested_window_hours: u32,
+    ) -> ObservationCoverage {
+        let actual_span_seconds = snapshots
+            .first()
+            .zip(snapshots.last())
+            .map(|(first, last)| (last.timestamp - first.timestamp).num_seconds().max(0))
+            .unwrap_or(0);
+        let interval_seconds = Self::estimated_interval_seconds(snapshots);
+        let requested_seconds = i64::from(requested_window_hours.max(1)) * 3600;
+        let expected_samples =
+            ((requested_seconds as f64 / interval_seconds as f64).ceil() as usize).max(1);
+        let successful_samples = snapshots.len();
+        let coverage_percent =
+            ((successful_samples as f64 / expected_samples as f64) * 100.0).min(100.0);
+
+        let probe_names = [
+            "network_sockets",
+            "process_attribution",
+            "dns",
+            "config_scan",
+            "cron",
+            "systemd",
+        ];
+        let mut probe_coverage = HashMap::new();
+        let mut remaining_unknowns = Vec::new();
+        for name in probe_names {
+            let complete = snapshots
+                .iter()
+                .filter(|snapshot| Self::probe_status(snapshot, name).is_complete())
+                .count();
+            let percent = if snapshots.is_empty() {
+                0.0
+            } else {
+                complete as f64 * 100.0 / snapshots.len() as f64
+            };
+            probe_coverage.insert(name.to_string(), percent);
+            if percent < 100.0 {
+                let detail = snapshots
+                    .iter()
+                    .filter_map(|snapshot| Self::probe_status(snapshot, name).details.as_deref())
+                    .next()
+                    .unwrap_or("probe was incomplete");
+                remaining_unknowns.push(format!("{}: {}", name, detail));
+            }
+        }
+        if coverage_percent < 90.0 {
+            remaining_unknowns.push("observation window is not sufficiently covered".to_string());
+        }
+        if let Some(last) = snapshots.last() {
+            let freshness = (now - last.timestamp).num_seconds().max(0);
+            if freshness > interval_seconds * 2 {
+                remaining_unknowns.push(format!("last observation is {} seconds old", freshness));
+            }
+        } else {
+            remaining_unknowns.push("no successful observations".to_string());
+        }
+
+        let privileges = if !snapshots.is_empty()
+            && snapshots
+                .iter()
+                .all(|snapshot| snapshot.privileges == "full")
+        {
+            "full".to_string()
+        } else if snapshots
+            .iter()
+            .any(|snapshot| snapshot.privileges == "restricted")
+        {
+            "restricted".to_string()
+        } else {
+            "unknown".to_string()
+        };
+        if privileges != "full" {
+            remaining_unknowns.push("collector is not running with full privileges".to_string());
+        }
+        let evidence_quality = if coverage_percent >= 90.0
+            && probe_coverage.values().all(|percent| *percent >= 99.0)
+            && privileges == "full"
+        {
+            "HIGH"
+        } else if coverage_percent >= 50.0 && !snapshots.is_empty() {
+            "MEDIUM"
+        } else {
+            "LOW"
         };
 
-        score.min(coverage_cap.max(25.0) as u16).min(100) as u8
+        ObservationCoverage {
+            requested_window_hours,
+            actual_span_seconds,
+            expected_samples,
+            successful_samples,
+            coverage_percent,
+            last_observation: snapshots.last().map(|snapshot| snapshot.timestamp),
+            probe_coverage,
+            privileges,
+            evidence_quality: evidence_quality.to_string(),
+            remaining_unknowns,
+        }
+    }
+
+    fn probe_status<'snapshot>(
+        snapshot: &'snapshot ObservationSnapshot,
+        name: &str,
+    ) -> &'snapshot ProbeStatus {
+        match name {
+            "network_sockets" => &snapshot.probe_statuses.network_sockets,
+            "process_attribution" => &snapshot.probe_statuses.process_attribution,
+            "dns" => &snapshot.probe_statuses.dns,
+            "config_scan" => &snapshot.probe_statuses.config_scan,
+            "cron" => &snapshot.probe_statuses.cron,
+            "systemd" => &snapshot.probe_statuses.systemd,
+            _ => unreachable!("unknown probe name"),
+        }
+    }
+
+    fn estimated_interval_seconds(snapshots: &[ObservationSnapshot]) -> i64 {
+        let mut intervals = snapshots
+            .iter()
+            .filter_map(|snapshot| snapshot.sampling_interval_seconds)
+            .map(|seconds| seconds.max(1) as i64)
+            .collect::<Vec<_>>();
+        if intervals.is_empty() {
+            intervals = snapshots
+                .windows(2)
+                .map(|pair| (pair[1].timestamp - pair[0].timestamp).num_seconds().max(1))
+                .collect();
+        }
+        intervals.sort_unstable();
+        intervals.get(intervals.len() / 2).copied().unwrap_or(60)
     }
 }
 
@@ -855,7 +983,7 @@ mod tests {
     use crate::db::Database;
     use crate::models::{
         ConfigReference, Evidence, EvidenceLevel, ImpactLevel, InboundDependency, ListeningService,
-        NetworkConnection, ObservationSnapshot, ProbeStatuses, Process,
+        NetworkConnection, ObservationCoverage, ObservationSnapshot, ProbeStatuses, Process,
     };
     use chrono::Utc;
 
@@ -881,7 +1009,11 @@ mod tests {
             &[],
             &inbound,
             &std::collections::HashMap::new(),
-            168,
+            &ObservationCoverage {
+                coverage_percent: 100.0,
+                evidence_quality: "HIGH".to_string(),
+                ..ObservationCoverage::default()
+            },
         );
         assert!(score < 50);
         drop(db);
@@ -909,6 +1041,32 @@ mod tests {
         assert!(
             Analyzer::calculate_confidence(&corroborated) >= Analyzer::calculate_confidence(&high)
         );
+    }
+
+    #[test]
+    fn one_snapshot_cannot_claim_full_observation_coverage() {
+        let now = Utc::now();
+        let snapshot = ObservationSnapshot {
+            timestamp: now,
+            hostname: "web01".to_string(),
+            listening_services: Vec::new(),
+            network_connections: Vec::new(),
+            processes: Vec::new(),
+            cron_jobs: Vec::new(),
+            systemd_timers: Vec::new(),
+            dns_names: Vec::new(),
+            config_references: Vec::new(),
+            software: Vec::new(),
+            sampling_interval_seconds: Some(60),
+            privileges: "full".to_string(),
+            probe_statuses: ProbeStatuses::default(),
+        };
+
+        let coverage = Analyzer::build_observation_coverage(&[snapshot], now, 168);
+        assert_eq!(coverage.expected_samples, 10_080);
+        assert_eq!(coverage.successful_samples, 1);
+        assert!(coverage.coverage_percent < 1.0);
+        assert_eq!(coverage.evidence_quality, "LOW");
     }
 
     #[test]
@@ -950,6 +1108,8 @@ mod tests {
                 config_line: None,
             }],
             software: Vec::new(),
+            sampling_interval_seconds: None,
+            privileges: "full".to_string(),
             probe_statuses: ProbeStatuses::default(),
         };
 

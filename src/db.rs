@@ -404,6 +404,8 @@ mod tests {
             dns_names: vec![],
             config_references: vec![],
             software: vec![],
+            sampling_interval_seconds: None,
+            privileges: "full".to_string(),
             probe_statuses: ProbeStatuses::default(),
         };
 

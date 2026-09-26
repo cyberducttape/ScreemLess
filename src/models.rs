@@ -220,6 +220,8 @@ pub struct AnalysisResult {
     pub observation_window_hours: u32,
     pub total_snapshots: usize,
     pub observation_span: (DateTime<Utc>, DateTime<Utc>),
+    #[serde(default)]
+    pub coverage: ObservationCoverage,
     pub dependencies: Vec<Dependency>,
     pub inbound_dependencies: Vec<InboundDependency>,
     pub observed_processes: HashMap<String, ProcessActivity>,
@@ -229,6 +231,22 @@ pub struct AnalysisResult {
     pub probe_statuses: ProbeStatuses,
     #[serde(default)]
     pub inventory: SiteInventory,
+}
+
+/// Describes how much of the requested observation window was actually
+/// observed and which collection probes produced usable evidence.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ObservationCoverage {
+    pub requested_window_hours: u32,
+    pub actual_span_seconds: i64,
+    pub expected_samples: usize,
+    pub successful_samples: usize,
+    pub coverage_percent: f64,
+    pub last_observation: Option<DateTime<Utc>>,
+    pub probe_coverage: HashMap<String, f64>,
+    pub privileges: String,
+    pub evidence_quality: String,
+    pub remaining_unknowns: Vec<String>,
 }
 
 /// A server-side inventory derived from the same snapshots used for dependency analysis.
@@ -355,6 +373,14 @@ pub struct ObservationSnapshot {
     pub config_references: Vec<ConfigReference>,
     #[serde(default)]
     pub software: Vec<SoftwareInventory>,
+    #[serde(default)]
+    pub sampling_interval_seconds: Option<u64>,
+    #[serde(default = "unknown_privileges")]
+    pub privileges: String,
     #[serde(default = "ProbeStatuses::legacy_unknown")]
     pub probe_statuses: ProbeStatuses,
+}
+
+fn unknown_privileges() -> String {
+    "unknown".to_string()
 }

@@ -158,7 +158,8 @@ async fn observe(
 
     loop {
         match Collector::collect_snapshot().await {
-            Ok(snapshot) => {
+            Ok(mut snapshot) => {
+                snapshot.sampling_interval_seconds = Some(interval.as_secs().max(1));
                 db.store_snapshot(&snapshot)?;
                 db.prune_snapshots_before(
                     (chrono::Utc::now() - chrono::Duration::days(SNAPSHOT_RETENTION_DAYS))

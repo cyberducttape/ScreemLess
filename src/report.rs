@@ -41,6 +41,7 @@ impl<'a> Reporter<'a> {
         println!("SNAPSHOTS: {}\n", analysis.total_snapshots);
 
         self.print_probe_status(&analysis);
+        self.print_observation_coverage(&analysis);
 
         println!("DEPENDENCY GRAPH");
         println!("{}", GraphRenderer::render_ascii(&analysis, &hostname));
@@ -70,6 +71,7 @@ impl<'a> Reporter<'a> {
                 "observed_hours": Self::observed_hours(&analysis),
             },
             "snapshots": analysis.total_snapshots,
+            "observation_coverage": analysis.coverage,
             "dependencies": analysis.dependencies,
             "inbound_dependencies": analysis.inbound_dependencies,
             "inventory": analysis.inventory,
@@ -99,6 +101,7 @@ impl<'a> Reporter<'a> {
             Self::observed_hours(&analysis),
             analysis.observation_window_hours
         );
+        self.print_observation_coverage(&analysis);
 
         if analysis.total_snapshots == 0 {
             println!("No observations found. Run 'screamless observe' first.");
@@ -111,12 +114,15 @@ impl<'a> Reporter<'a> {
         self.print_decommission_risks(&analysis)?;
 
         println!("\n╔════════════════════════════════════════════════════╗");
-        let readiness_str = format!("READINESS: {}%", analysis.decommission_confidence);
+        let readiness_str = format!(
+            "DECOMMISSION EVIDENCE SCORE: {}%",
+            analysis.decommission_confidence
+        );
         println!("║ {} ║", readiness_str.center(48));
         println!("╚════════════════════════════════════════════════════╝\n");
 
         if analysis.decommission_confidence >= 80 {
-            println!("✓ HIGH READINESS SCORE — no blocking evidence observed.\n");
+            println!("✓ NO ACTIVE DEPENDENCIES DETECTED in the collected evidence.\n");
             println!(
                 "This is not proof of absence; validate with service owners before proceeding."
             );
@@ -129,6 +135,53 @@ impl<'a> Reporter<'a> {
         }
 
         Ok(())
+    }
+
+    fn print_observation_coverage(&self, analysis: &AnalysisResult) {
+        let coverage = &analysis.coverage;
+        println!("OBSERVATION COVERAGE");
+        println!(
+            "  Requested window: {} hours",
+            coverage.requested_window_hours
+        );
+        println!(
+            "  Actual span: {}",
+            Self::format_duration(coverage.actual_span_seconds)
+        );
+        println!(
+            "  Expected samples: {} | Successful samples: {} | Coverage: {:.2}%",
+            coverage.expected_samples, coverage.successful_samples, coverage.coverage_percent
+        );
+        if let Some(last) = coverage.last_observation {
+            println!(
+                "  Last observation: {}",
+                last.format("%Y-%m-%d %H:%M:%S UTC")
+            );
+        }
+        for (probe, percent) in &coverage.probe_coverage {
+            println!("  {}: {:.1}%", probe, percent);
+        }
+        println!("  Privileges: {}", coverage.privileges);
+        println!("  Evidence quality: {}", coverage.evidence_quality);
+        if !coverage.remaining_unknowns.is_empty() {
+            println!("  Remaining unknowns:");
+            for unknown in &coverage.remaining_unknowns {
+                println!("    - {}", unknown);
+            }
+        }
+        println!();
+    }
+
+    fn format_duration(seconds: i64) -> String {
+        let days = seconds / 86_400;
+        let hours = (seconds % 86_400) / 3_600;
+        let minutes = (seconds % 3_600) / 60;
+        let seconds = seconds % 60;
+        if days > 0 {
+            format!("{}d {}h {}m {}s", days, hours, minutes, seconds)
+        } else {
+            format!("{}h {}m {}s", hours, minutes, seconds)
+        }
     }
 
     fn observed_hours(analysis: &AnalysisResult) -> f64 {
