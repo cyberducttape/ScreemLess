@@ -152,7 +152,7 @@ impl ConfigScanner {
         let paths_searched = vec![
             "/etc/nginx",
             "/etc/apache2/sites-enabled",
-            "/etc/apache2/sites-available (disabled entries excluded)",
+            "/etc/apache2 (sites-available files only through enabled links)",
             "/etc/httpd/conf.d",
             "/etc/httpd/sites-enabled",
             "/etc/haproxy",
@@ -311,13 +311,8 @@ impl ConfigScanner {
 
     fn scan_apache(context: &mut ScanContext) -> Result<Vec<ConfigReference>> {
         let mut refs = Vec::new();
-        for dir in [
-            "/etc/apache2/sites-enabled",
-            "/etc/apache2/sites-available",
-            "/etc/httpd/conf.d",
-            "/etc/httpd/sites-enabled",
-        ] {
-            for path in Self::config_files_under(Path::new(dir))? {
+        for dir in Self::apache_config_roots(Path::new("/etc/apache2"), Path::new("/etc/httpd")) {
+            for path in Self::config_files_under(&dir)? {
                 let Some(content) = Self::read_config_file(&path, context) else {
                     continue;
                 };
@@ -325,6 +320,10 @@ impl ConfigScanner {
             }
         }
         Ok(refs)
+    }
+
+    fn apache_config_roots(apache2_root: &Path, httpd_root: &Path) -> [PathBuf; 2] {
+        [apache2_root.to_path_buf(), httpd_root.to_path_buf()]
     }
 
     fn parse_apache_config(path: &Path, content: &str) -> Result<Vec<ConfigReference>> {
@@ -1346,6 +1345,70 @@ mod tests {
 
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(outside).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apache_tree_excludes_disabled_sites_but_follows_enabled_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "screamless-apache-enabled-sites-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let apache2 = root.join("apache2");
+        let available = apache2.join("sites-available");
+        let enabled = apache2.join("sites-enabled");
+        let httpd = root.join("httpd");
+        let conf_d = httpd.join("conf.d");
+        fs::create_dir_all(&available).unwrap();
+        fs::create_dir_all(&enabled).unwrap();
+        fs::create_dir_all(&conf_d).unwrap();
+
+        let active_config = available.join("active.conf");
+        let disabled_config = available.join("disabled.conf");
+        let httpd_config = conf_d.join("example.conf");
+        fs::write(
+            &active_config,
+            "<VirtualHost *:80>\nServerName active.example\n</VirtualHost>",
+        )
+        .unwrap();
+        fs::write(
+            &disabled_config,
+            "<VirtualHost *:80>\nServerName disabled.example\n</VirtualHost>",
+        )
+        .unwrap();
+        fs::write(
+            &httpd_config,
+            "<VirtualHost *:80>\nServerName httpd.example\n</VirtualHost>",
+        )
+        .unwrap();
+        symlink(&active_config, enabled.join("active.conf")).unwrap();
+
+        let roots = ConfigScanner::apache_config_roots(&apache2, &httpd);
+        let mut hostnames = Vec::new();
+        for config_root in roots {
+            for path in ConfigScanner::config_files_under(&config_root).unwrap() {
+                let content = fs::read_to_string(path).unwrap();
+                hostnames.extend(
+                    ConfigScanner::parse_apache_config(&config_root, &content)
+                        .unwrap()
+                        .into_iter()
+                        .map(|reference| reference.hostname),
+                );
+            }
+        }
+
+        assert!(hostnames
+            .iter()
+            .any(|hostname| hostname == "active.example"));
+        assert!(hostnames.iter().any(|hostname| hostname == "httpd.example"));
+        assert!(!hostnames
+            .iter()
+            .any(|hostname| hostname == "disabled.example"));
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
