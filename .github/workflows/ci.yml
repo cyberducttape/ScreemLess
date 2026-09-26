@@ -61,9 +61,21 @@ jobs:
             collector::tests::software_inventory_never_executes_the_observed_executable
 
       - name: Audit dependencies
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: cargo-audit-${{ runner.os }}-0.22.2
+
+      - name: Install cargo-audit when cache is cold
         run: |
-          cargo install cargo-audit --locked --version 0.22.2
-          cargo audit
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.cargo/bin:$PATH"
+          if ! command -v cargo-audit >/dev/null 2>&1; then
+            cargo install cargo-audit --locked --version 0.22.2
+          fi
+
+      - name: Audit dependencies
+        run: cargo audit
 
       - name: Build release binary
         run: cargo build --locked --release
