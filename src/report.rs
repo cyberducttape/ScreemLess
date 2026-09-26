@@ -113,7 +113,7 @@ impl<'a> Reporter<'a> {
         let analysis = analyzer.analyze(&hostname, 168)?;
 
         println!("\n╭──────────────────────────────────────────────────╮");
-        println!("│   DECOMMISSION READINESS REPORT                  │");
+        println!("│   DECOMMISSION EVIDENCE REPORT                   │");
         println!("╰──────────────────────────────────────────────────╯\n");
 
         println!("Server: {}", hostname);
@@ -133,16 +133,8 @@ impl<'a> Reporter<'a> {
 
         self.print_probe_status(&analysis);
 
-        self.print_readiness_assessment(&analysis)?;
+        self.print_evidence_assessment(&analysis)?;
         self.print_decommission_risks(&analysis)?;
-
-        println!("\n╔════════════════════════════════════════════════════╗");
-        let readiness_str = format!(
-            "DECOMMISSION EVIDENCE SCORE: {}%",
-            analysis.decommission_confidence
-        );
-        println!("║ {} ║", readiness_str.center(48));
-        println!("╚════════════════════════════════════════════════════╝\n");
 
         let has_blocking_risks = analysis
             .risks
@@ -163,7 +155,7 @@ impl<'a> Reporter<'a> {
             );
         } else if exit_code == 2 {
             println!("⚠ CAUTION. Investigate remaining items before proceeding.\n");
-            println!("Activity or dependencies were detected; treat decommissioning as blocked.");
+            println!("Blocking evidence or risk indicators require review; do not treat this host as cleared.");
         } else {
             println!("? INSUFFICIENT EVIDENCE. Do not treat this host as cleared.\n");
             println!("Observation coverage or collection completeness is inadequate.");
@@ -183,6 +175,29 @@ impl<'a> Reporter<'a> {
             && evidence_quality == "HIGH"
             && coverage_percent.is_finite()
             && coverage_percent >= 90.0
+    }
+
+    fn evidence_is_sufficient(analysis: &AnalysisResult) -> bool {
+        Self::has_sufficient_evidence(
+            analysis.total_snapshots,
+            analysis.probe_statuses.all_complete(),
+            &analysis.coverage.evidence_quality,
+            analysis.coverage.coverage_percent,
+        )
+    }
+
+    fn absence_statement(subject: &str, evidence_sufficient: bool) -> String {
+        if evidence_sufficient {
+            format!(
+                "No {} observed in the collected evidence; this is not proof of absence.",
+                subject
+            )
+        } else {
+            format!(
+                "No {} observed, but collection evidence is insufficient to infer absence.",
+                subject
+            )
+        }
     }
 
     pub(crate) fn decommission_exit_code(
@@ -281,7 +296,13 @@ impl<'a> Reporter<'a> {
 
     fn print_outbound_dependencies(&self, analysis: &AnalysisResult) -> Result<()> {
         if analysis.dependencies.is_empty() {
-            println!("OUTBOUND DEPENDENCIES: None detected\n");
+            println!(
+                "OUTBOUND DEPENDENCIES: {}\n",
+                Self::absence_statement(
+                    "outbound dependencies",
+                    Self::evidence_is_sufficient(analysis)
+                )
+            );
             return Ok(());
         }
 
@@ -300,7 +321,7 @@ impl<'a> Reporter<'a> {
             println!("\n  {}:{}", display_name, dep.remote_port);
             println!("  Confidence: {}%", dep.confidence);
             println!(
-                "  Connections: {} (first: {}, last: {})",
+                "  Socket observations: {} (first: {}, last: {})",
                 dep.observation_count,
                 dep.first_seen.format("%H:%M:%S"),
                 dep.last_seen.format("%H:%M:%S")
@@ -373,7 +394,13 @@ impl<'a> Reporter<'a> {
 
     fn print_inbound_dependencies(&self, analysis: &AnalysisResult) -> Result<()> {
         if analysis.inbound_dependencies.is_empty() {
-            println!("INBOUND DEPENDENCIES: None detected\n");
+            println!(
+                "INBOUND DEPENDENCIES: {}\n",
+                Self::absence_statement(
+                    "inbound dependencies",
+                    Self::evidence_is_sufficient(analysis)
+                )
+            );
             return Ok(());
         }
 
@@ -427,7 +454,10 @@ impl<'a> Reporter<'a> {
 
     fn print_risks(&self, analysis: &AnalysisResult) -> Result<()> {
         if analysis.risks.is_empty() {
-            println!("RISKS: None identified\n");
+            println!(
+                "RISKS: {}\n",
+                Self::absence_statement("risk indicators", Self::evidence_is_sufficient(analysis))
+            );
             return Ok(());
         }
 
@@ -492,8 +522,9 @@ impl<'a> Reporter<'a> {
         println!();
     }
 
-    fn print_readiness_assessment(&self, analysis: &AnalysisResult) -> Result<()> {
+    fn print_evidence_assessment(&self, analysis: &AnalysisResult) -> Result<()> {
         let mut checks = Vec::new();
+        let evidence_sufficient = Self::evidence_is_sufficient(analysis);
 
         if !analysis.dependencies.is_empty() {
             let high_conf = analysis
@@ -503,17 +534,25 @@ impl<'a> Reporter<'a> {
                 .count();
             if high_conf > 0 {
                 checks.push(format!(
-                    "[FAIL] {} confirmed outbound dependencies",
+                    "[BLOCKER] {} high-confidence outbound dependencies",
                     high_conf
                 ));
             } else {
                 checks.push(format!(
-                    "[WARN] {} low-confidence outbound dependencies",
+                    "[REVIEW] {} low-confidence outbound dependencies",
                     analysis.dependencies.len()
                 ));
             }
         } else {
-            checks.push("[PASS] No outbound dependencies detected".to_string());
+            checks.push(format!(
+                "[{}] {}",
+                if evidence_sufficient {
+                    "EVIDENCE"
+                } else {
+                    "UNKNOWN"
+                },
+                Self::absence_statement("outbound dependencies", evidence_sufficient)
+            ));
         }
 
         if !analysis.inbound_dependencies.is_empty() {
@@ -523,13 +562,26 @@ impl<'a> Reporter<'a> {
                 .filter(|dependency| dependency.confidence >= 70)
                 .count();
             if confirmed > 0 {
-                checks.push(format!("[FAIL] {} confirmed inbound dependents", confirmed));
+                checks.push(format!(
+                    "[BLOCKER] {} high-confidence inbound dependents",
+                    confirmed
+                ));
             } else {
                 checks.push(format!(
-                    "[WARN] {} low-confidence inbound dependents",
+                    "[REVIEW] {} low-confidence inbound dependents",
                     analysis.inbound_dependencies.len()
                 ));
             }
+        } else {
+            checks.push(format!(
+                "[{}] {}",
+                if evidence_sufficient {
+                    "EVIDENCE"
+                } else {
+                    "UNKNOWN"
+                },
+                Self::absence_statement("inbound dependencies", evidence_sufficient)
+            ));
         }
 
         let critical_one_time = analysis
@@ -560,13 +612,21 @@ impl<'a> Reporter<'a> {
                 .count();
 
             if fails > 0 {
-                checks.push(format!("[FAIL] {} critical issues", fails));
+                checks.push(format!("[BLOCKER] {} critical issues", fails));
             }
             if warns > 0 {
-                checks.push(format!("[WARN] {} warnings", warns));
+                checks.push(format!("[REVIEW] {} warnings", warns));
             }
         } else {
-            checks.push("[PASS] No critical issues".to_string());
+            checks.push(format!(
+                "[{}] {}",
+                if evidence_sufficient {
+                    "EVIDENCE"
+                } else {
+                    "UNKNOWN"
+                },
+                Self::absence_statement("critical risk indicators", evidence_sufficient)
+            ));
         }
 
         for check in checks {
@@ -623,7 +683,13 @@ impl<'a> Reporter<'a> {
         }
 
         if !any_blocking && analysis.dependencies.is_empty() {
-            println!("  ✓ None - all systems clear");
+            println!(
+                "  {}",
+                Self::absence_statement(
+                    "high-confidence blocking dependencies",
+                    Self::evidence_is_sufficient(analysis)
+                )
+            );
         }
 
         println!();
@@ -642,23 +708,6 @@ impl<'a> Reporter<'a> {
 
     fn resolve_hostname(&self, hostname: &Option<String>) -> Result<String> {
         self.resolve_hostname_for_cli(hostname)
-    }
-}
-
-trait StringCenter {
-    fn center(&self, width: usize) -> String;
-}
-
-impl StringCenter for str {
-    fn center(&self, width: usize) -> String {
-        let len = self.len();
-        if len >= width {
-            self.to_string()
-        } else {
-            let left = (width - len) / 2;
-            let right = width - len - left;
-            format!("{}{}{}", " ".repeat(left), self, " ".repeat(right))
-        }
     }
 }
 
@@ -686,5 +735,15 @@ mod tests {
         assert_eq!(exit_code("HIGH", 100.0, 79, false), 2);
         assert_eq!(exit_code("HIGH", 100.0, 100, true), 2);
         assert_eq!(exit_code("HIGH", f64::NAN, 100, false), 4);
+    }
+
+    #[test]
+    fn absence_language_distinguishes_complete_and_incomplete_evidence() {
+        let complete = Reporter::absence_statement("dependencies", true);
+        assert!(complete.contains("not proof of absence"));
+
+        let incomplete = Reporter::absence_statement("dependencies", false);
+        assert!(incomplete.contains("insufficient to infer absence"));
+        assert!(!incomplete.contains("detected"));
     }
 }

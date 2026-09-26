@@ -271,7 +271,7 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
             color: #394150;
         }}
 
-        .readiness-status {{
+        .conclusion-status {{
             margin: 0;
             font-size: 14px;
             line-height: 1.5;
@@ -480,7 +480,7 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
 
         <div class="operational-conclusion {}">
             <h2>Decommission evidence conclusion</h2>
-            <p class="readiness-status">{}</p>
+            <p class="conclusion-status">{}</p>
         </div>
         <div class="coverage-summary">{}</div>
 

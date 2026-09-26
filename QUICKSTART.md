@@ -33,14 +33,14 @@ Shows what this server connects to and what connects to it.
 ```bash
 screamless decommission-check
 ```
-Gives a readiness score (0-100%).
+Shows the requested window, actual observation span, sample coverage, probe completeness, unknowns, and an evidence-gated conclusion. Incomplete evidence is reported as UNKNOWN; no result proves absence of dependencies.
 
 ## Real-World Scenarios
 
 ### "Can we shut down web-old-03?"
 ```bash
 screamless decommission-check --hostname web-old-03
-# Output: a readiness assessment; an empty result is not proof of no dependencies
+# Output: evidence and coverage details; incomplete evidence is UNKNOWN
 ```
 
 ### "Is it safe to restart db01 right now?"
@@ -85,12 +85,12 @@ screamless observe &
   or the observation window was inadequate.
 - A low or empty result is not proof that no dependency exists.
 
-### Readiness Score
-- **80-100%**: no current blocker was found in the available evidence
-- **50-79%**: caution; outstanding items require review
-- **Below 50%**: blocking issues were found
-- Any incomplete required probe produces an insufficient-evidence result and
-  should be reviewed before treating a change as safe.
+### Decommission evidence
+- **NO HIGH-CONFIDENCE ACTIVITY DETECTED** means the evidence passed the
+  current coverage gate; it is not proof of absence.
+- **CAUTION** means dependencies or risk indicators require investigation.
+- **INSUFFICIENT EVIDENCE** means the host has not been cleared; review the
+  reported unknowns and collect more observations.
 
 ### Impact Levels
 - **CRITICAL**: Will break immediately if this server goes down

@@ -142,7 +142,7 @@ screamless observe --duration 7d        # 7-day observation (default)
 # Analysis & Reports
 screamless report                       # Text report
 screamless report --format json         # Machine-readable output
-screamless decommission-check           # Readiness assessment
+screamless decommission-check           # Evidence and coverage assessment
 screamless dashboard --output rep.html  # Interactive HTML
 
 # Safety & Planning
@@ -156,7 +156,7 @@ screamless infrastructure --servers db01,web01,cache01    # Map all dependencies
 ```bash
 screamless observe --duration 7d
 screamless decommission-check
-# Output: a readiness assessment, or UNKNOWN when required evidence is incomplete
+# Output: an evidence assessment; incomplete collection is reported as UNKNOWN
 ```
 
 ### 2. **Before a Deployment**
@@ -292,20 +292,25 @@ A report is a starting point for validation, not proof that no dependency exists
 
 ```
 ╭──────────────────────────────────────────╮
-│  SCREAMLESS DECOMMISSION REPORT          │
+│  DECOMMISSION EVIDENCE REPORT            │
 ╰──────────────────────────────────────────╯
 
 Server: legacy-web-03
-Observation: 7 days (168 snapshots)
-Readiness: 92%
+Observation: 2 snapshots across 0.02 observed hours (requested window: 168 hours)
+
+OBSERVATION COVERAGE
+  Expected samples: 10080 | Successful samples: 2 | Coverage: <0.1%
+  Evidence quality: LOW
+  Remaining unknowns:
+    - observation window is not sufficiently covered
 
   ? INSUFFICIENT EVIDENCE
 
 OUTBOUND DEPENDENCIES:
-  None detected
+  No outbound dependencies observed, but collection evidence is insufficient to infer absence.
 
 INBOUND DEPENDENCIES:
-  None observed (this does not prove that no other servers depend on this)
+  No inbound dependencies observed, but collection evidence is insufficient to infer absence.
 
 RISKS:
   ⚠️ 47 scheduled jobs configured
