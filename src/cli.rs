@@ -175,6 +175,9 @@ async fn observe(
     );
 
     loop {
+        if start.elapsed() >= duration {
+            break;
+        }
         let collection_started = Instant::now();
         match Collector::collect_snapshot_with_state(&mut collection_state).await {
             Ok(mut snapshot) => {
@@ -217,7 +220,21 @@ async fn observe(
             break;
         }
 
-        time::sleep(interval).await;
+        let collection_duration = collection_started.elapsed();
+        let remaining_run_duration = duration.saturating_sub(start.elapsed());
+        let wait = sampling_wait(interval, collection_duration, remaining_run_duration);
+        if collection_duration >= interval {
+            warn!(
+                run_id = %run_id,
+                collection_ms = collection_duration.as_millis() as u64,
+                interval_ms = interval.as_millis() as u64,
+                event = "sampling_interval_overrun",
+                "collection exceeded the configured sampling interval"
+            );
+        }
+        if !wait.is_zero() {
+            time::sleep(wait).await;
+        }
     }
 
     println!("\nObservation complete. Run 'screamless report' to analyze.");
@@ -280,6 +297,16 @@ fn parse_duration(s: &str) -> Result<Duration> {
     }
 
     Ok(Duration::from_secs(seconds))
+}
+
+fn sampling_wait(
+    interval: Duration,
+    collection_duration: Duration,
+    remaining_run_duration: Duration,
+) -> Duration {
+    interval
+        .saturating_sub(collection_duration)
+        .min(remaining_run_duration)
 }
 
 fn dashboard(
@@ -663,7 +690,7 @@ fn format_duration(d: Duration) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_duration;
+    use super::{parse_duration, sampling_wait};
     use std::time::Duration;
 
     #[test]
@@ -676,5 +703,33 @@ mod tests {
     fn rejects_zero_and_overflowing_durations() {
         assert!(parse_duration("0s").is_err());
         assert!(parse_duration("999999999999999999999999d").is_err());
+    }
+
+    #[test]
+    fn sampling_wait_uses_start_to_start_cadence_and_respects_run_end() {
+        assert_eq!(
+            sampling_wait(
+                Duration::from_secs(60),
+                Duration::from_secs(5),
+                Duration::from_secs(120)
+            ),
+            Duration::from_secs(55)
+        );
+        assert_eq!(
+            sampling_wait(
+                Duration::from_secs(60),
+                Duration::from_secs(65),
+                Duration::from_secs(120)
+            ),
+            Duration::ZERO
+        );
+        assert_eq!(
+            sampling_wait(
+                Duration::from_secs(60),
+                Duration::from_secs(5),
+                Duration::from_secs(10)
+            ),
+            Duration::from_secs(10)
+        );
     }
 }
