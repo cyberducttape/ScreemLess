@@ -10,7 +10,8 @@ hardening while keeping the collector conservative about what it can prove.
 - Host identity inventory and fleet-scale dependency graph analysis
 - Reverse-proxy and software-version inventory without executing workload binaries
 - Observation coverage, configuration-scan audit data, and evidence-first dashboard
-- Versioned infrastructure JSON output and documented automation exit codes
+- Version 2.0 infrastructure JSON schema (ordered host array and explicit
+  listener-evidence statuses) with documented automation exit codes
 - Versioned release artifacts, checksums, SPDX SBOM, and systemd agent packaging
 
 ### Changed

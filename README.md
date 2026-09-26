@@ -132,6 +132,11 @@ activity is reported as host-level socket observations, not assigned to
 individual virtual hosts. It is not HTTP request or visitor analytics, and an
 observation is not a count of unique connection events.
 
+The `infrastructure --format json` integration output declares schema version
+`2.0`. Consumers should branch on `schema_version`; version 2.0 represents
+hosts as an ordered array and reports site listener evidence without claiming
+virtual-host health.
+
 ## Commands
 
 ```bash

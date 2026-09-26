@@ -458,7 +458,7 @@ fn infrastructure(db_path: &std::path::Path, servers: String, format: OutputForm
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
-                "schema_version": "1.0",
+                "schema_version": "2.0",
                 "generated_at": Utc::now().to_rfc3339(),
                 "collector_version": env!("CARGO_PKG_VERSION"),
                 "observation_window": {
