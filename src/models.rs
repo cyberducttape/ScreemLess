@@ -190,8 +190,13 @@ pub struct ServerDependencyChain {
     pub outbound_deps: Vec<Dependency>,
     pub inbound_deps: Vec<InboundDependency>,
     pub total_impact: u8,
-    #[serde(alias = "is_single_point_of_failure")]
-    pub is_high_fan_in: bool,
+    /// High fan-in is an observed dependency concentration, not proof of a SPOF.
+    #[serde(
+        rename = "is_high_fan_in_candidate",
+        alias = "is_high_fan_in",
+        alias = "is_single_point_of_failure"
+    )]
+    pub is_high_fan_in_candidate: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

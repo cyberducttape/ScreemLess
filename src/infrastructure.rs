@@ -20,8 +20,8 @@ impl InfrastructureMapper {
                 .cloned()
                 .unwrap_or_default();
 
-            let is_high_fan_in =
-                Self::is_critical_service(server_name, &outbound_deps, &inbound_deps);
+            let is_high_fan_in_candidate =
+                Self::is_high_fan_in_candidate(server_name, &outbound_deps, &inbound_deps);
             let total_impact = Self::calculate_total_impact(&inbound_deps);
 
             chains.insert(
@@ -31,7 +31,7 @@ impl InfrastructureMapper {
                     outbound_deps,
                     inbound_deps,
                     total_impact,
-                    is_high_fan_in,
+                    is_high_fan_in_candidate,
                 },
             );
         }
@@ -162,18 +162,18 @@ impl InfrastructureMapper {
     ) -> Vec<String> {
         chains
             .iter()
-            .filter(|(_, chain)| chain.is_high_fan_in)
+            .filter(|(_, chain)| chain.is_high_fan_in_candidate)
             .map(|(name, _)| name.clone())
             .collect()
     }
 
-    fn is_critical_service(
+    fn is_high_fan_in_candidate(
         _server: &str,
         _outbound: &[Dependency],
         inbound: &[InboundDependency],
     ) -> bool {
-        // This is only a high-fan-in heuristic. Redundancy and alternate paths
-        // are not collected, so it is not proof of a single point of failure.
+        // Redundancy, VIPs, replication, and alternate paths are not collected,
+        // so this intentionally does not claim a single point of failure.
         inbound.len() > 3
             && inbound.iter().any(|dep| {
                 dep.confidence >= 70

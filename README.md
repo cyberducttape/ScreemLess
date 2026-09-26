@@ -193,7 +193,7 @@ Confidence is a summary of available evidence and data quality; it is not a prob
 
 ### Impact Analysis
 - **Cascade detection**: "If I shut down, these servers lose access, those degrade"
-- **Single point of failure**: highlights observed inbound edges without claiming complete topology
+- **High-fan-in candidates**: highlights observed inbound concentration; redundancy, VIPs, replication, and alternate paths are not verified
 - **Cluster mapping**: "These 8 services always work together"
 
 ## What This Prototype Does Well

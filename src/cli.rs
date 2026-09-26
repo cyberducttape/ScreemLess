@@ -348,6 +348,7 @@ fn infrastructure(db_path: &std::path::Path, servers: String, format: String) ->
                 "servers_analyzed": server_analyses.len(),
                 "analyses": server_analyses,
                 "dependency_chains": chains,
+                "high_fan_in_candidates": high_fan_in,
                 "high_fan_in_services": high_fan_in,
                 "clusters": clusters,
                 "errors": [],
@@ -363,7 +364,7 @@ fn infrastructure(db_path: &std::path::Path, servers: String, format: String) ->
     println!("Servers analyzed: {}\n", server_analyses.len());
 
     if !high_fan_in.is_empty() {
-        println!("⚠️  HIGH-FAN-IN SERVICES (not proof of a single point of failure):");
+        println!("⚠️  HIGH-FAN-IN DEPENDENCY CANDIDATES (redundancy not verified):");
         for server in high_fan_in {
             println!("  - {} (multiple observed dependents)", server);
         }
