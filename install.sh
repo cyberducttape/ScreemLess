@@ -13,6 +13,11 @@ if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+
     echo "VERSION must be a semantic version (for example 1.1.0)" >&2
     exit 3
 fi
+if [[ ! "$INSTALL_DIR" =~ ^(/[[:alnum:]_.-]+)+/?$ ]]; then
+    echo "INSTALL_DIR must be an absolute path using only letters, numbers, '.', '_', and '-'" >&2
+    exit 3
+fi
+INSTALL_DIR="${INSTALL_DIR%/}"
 
 as_root() {
     if [[ "${EUID:-$(id -u)}" == 0 ]]; then
@@ -84,13 +89,20 @@ if [[ "$INSTALL_SERVICE" == 1 ]]; then
     if [[ "$FROM_SOURCE" == 1 ]]; then
         SERVICE_FILE="$BUILD_DIR/source/packaging/screamless-agent.service"
         SERVICE_ACTIVATION="$BUILD_DIR/source/packaging/service-activation.sh"
+        SERVICE_RENDERER="$BUILD_DIR/source/packaging/render-service-unit.sh"
     else
         SERVICE_FILE="$BUILD_DIR/screamless-${VERSION}/screamless-agent.service"
         SERVICE_ACTIVATION="$BUILD_DIR/screamless-${VERSION}/service-activation.sh"
+        SERVICE_RENDERER="$BUILD_DIR/screamless-${VERSION}/render-service-unit.sh"
     fi
-    if [[ ! -f "$SERVICE_FILE" || ! -f "$SERVICE_ACTIVATION" ]]; then
+    if [[ ! -f "$SERVICE_FILE" || ! -f "$SERVICE_ACTIVATION" || ! -f "$SERVICE_RENDERER" ]]; then
         echo "Agent service files are missing from the installation source" >&2
         exit 1
+    fi
+    if [[ "$INSTALL_DIR" != "/usr/local/bin" ]]; then
+        CUSTOM_SERVICE_FILE="$BUILD_DIR/screamless-agent-custom.service"
+        bash "$SERVICE_RENDERER" "$SERVICE_FILE" "$INSTALL_DIR/screamless" > "$CUSTOM_SERVICE_FILE"
+        SERVICE_FILE="$CUSTOM_SERVICE_FILE"
     fi
 
     as_root install -d -m 0750 "$DATA_DIR"
