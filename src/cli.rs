@@ -311,32 +311,28 @@ fn infrastructure(db_path: &std::path::Path, servers: String, format: String) ->
     let db = Database::new(db_path)?;
     let analyzer = Analyzer::new(&db);
 
-    let server_list: Vec<&str> = servers.split(',').map(|s| s.trim()).collect();
+    let server_list: Vec<String> = servers
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
     let mut server_analyses = HashMap::new();
-    let mut errors = Vec::new();
     let json_output = format.eq_ignore_ascii_case("json");
 
     if !json_output {
         println!("\nAnalyzing {} servers...\n", server_list.len());
     }
 
-    for server in server_list {
-        match analyzer.analyze(server, 168) {
-            Ok(analysis) => {
-                if !json_output {
-                    println!("  ✓ {}", server);
-                }
-                server_analyses.insert(
-                    server.to_string(),
-                    (analysis.clone(), analysis.inbound_dependencies.clone()),
-                );
+    let analyses = analyzer.analyze_many(&server_list, 168)?;
+    for server in &server_list {
+        if let Some(analysis) = analyses.get(server) {
+            if !json_output {
+                println!("  ✓ {}", server);
             }
-            Err(e) => {
-                errors.push(serde_json::json!({"server": server, "error": e.to_string()}));
-                if !json_output {
-                    eprintln!("  ✗ {}: {}", server, e);
-                }
-            }
+            server_analyses.insert(
+                server.clone(),
+                (analysis.clone(), analysis.inbound_dependencies.clone()),
+            );
         }
     }
 
@@ -353,7 +349,7 @@ fn infrastructure(db_path: &std::path::Path, servers: String, format: String) ->
                 "dependency_chains": chains,
                 "high_fan_in_services": high_fan_in,
                 "clusters": clusters,
-                "errors": errors,
+                "errors": [],
             }))?
         );
         return Ok(());
