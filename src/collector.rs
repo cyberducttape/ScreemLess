@@ -34,6 +34,9 @@ const SMALL_PROBE_TIMEOUT: StdDuration = StdDuration::from_secs(3);
 const INVENTORY_PROBE_TIMEOUT: StdDuration = StdDuration::from_secs(10);
 const SMALL_PROBE_OUTPUT_LIMIT: usize = 1024 * 1024;
 const SOCKET_PROBE_OUTPUT_LIMIT: usize = 16 * 1024 * 1024;
+const DNS_LOOKUP_TIMEOUT: StdDuration = StdDuration::from_secs(3);
+const DNS_LOOKUP_BATCH_SIZE: usize = 16;
+const DNS_LOOKUP_LIMIT: usize = 1024;
 
 /// State carried between observations so slow-changing inventory is refreshed
 /// hourly instead of being recollected on every network/process sample.
@@ -131,7 +134,7 @@ impl Collector {
                 Ok(timers) => state.systemd_timers = timers,
                 Err(error) => probe_statuses.systemd = ProbeStatus::failed(error.to_string()),
             }
-            match Self::collect_dns_names() {
+            match Self::collect_dns_names().await {
                 Ok((dns_names, dns_unavailable, config_references, config_scan_audit)) => {
                     state.dns_names = dns_names;
                     state.config_references = config_references;
@@ -141,7 +144,10 @@ impl Collector {
                     state.config_scan_audit = Some(config_scan_audit);
                     if dns_unavailable > 0 {
                         probe_statuses.dns = ProbeStatus::partial(
-                            format!("DNS resolution failed for {} names", dns_unavailable),
+                            format!(
+                                "DNS unavailable or not scanned for {} names",
+                                dns_unavailable
+                            ),
                             dns_unavailable,
                         );
                     }
@@ -996,7 +1002,8 @@ impl Collector {
         Ok(timers)
     }
 
-    fn collect_dns_names() -> Result<(Vec<DnsName>, usize, Vec<ConfigReference>, ConfigScanAudit)> {
+    async fn collect_dns_names(
+    ) -> Result<(Vec<DnsName>, usize, Vec<ConfigReference>, ConfigScanAudit)> {
         let cache = CONFIG_DNS_CACHE.get_or_init(|| Mutex::new(None));
         if let Ok(guard) = cache.lock() {
             if let Some((timestamp, names, unavailable, references, audit)) = guard.as_ref() {
@@ -1011,33 +1018,72 @@ impl Collector {
             }
         }
 
-        let mut names = Vec::new();
-        let mut unavailable = 0;
-
         let (config_refs, config_scan_audit) = ConfigScanner::scan_with_audit()?;
         let timestamp = Utc::now();
 
         let mut seen = std::collections::HashSet::new();
-
+        let mut hostnames = Vec::new();
         for config_ref in &config_refs {
-            if seen.insert(config_ref.hostname.clone()) {
-                use std::net::ToSocketAddrs;
-
-                let ip_addresses = match format!("{}:80", config_ref.hostname).to_socket_addrs() {
-                    Ok(addrs) => addrs.map(|addr| addr.ip().to_string()).collect(),
-                    Err(_) => vec![],
-                };
-                if ip_addresses.is_empty() {
-                    unavailable += 1;
-                }
-
-                names.push(DnsName {
-                    hostname: config_ref.hostname.clone(),
-                    ip_addresses,
-                    timestamp,
-                });
+            let key = config_ref.hostname.to_ascii_lowercase();
+            if seen.insert(key) {
+                hostnames.push(config_ref.hostname.clone());
             }
         }
+
+        let truncated = hostnames.len().saturating_sub(DNS_LOOKUP_LIMIT);
+        hostnames.truncate(DNS_LOOKUP_LIMIT);
+        let mut resolved = HashMap::<String, Vec<String>>::new();
+        let mut timed_out = false;
+        for batch in hostnames.chunks(DNS_LOOKUP_BATCH_SIZE) {
+            let mut tasks = tokio::task::JoinSet::new();
+            for hostname in batch {
+                let hostname = hostname.clone();
+                tasks.spawn_blocking(move || {
+                    let addresses = Self::resolve_hostname_addresses(&hostname);
+                    (hostname, addresses)
+                });
+            }
+
+            let mut pending = batch.len();
+            let batch_deadline = Instant::now() + DNS_LOOKUP_TIMEOUT;
+            while pending > 0 {
+                let remaining = batch_deadline.saturating_duration_since(Instant::now());
+                match tokio::time::timeout(remaining, tasks.join_next()).await {
+                    Ok(Some(Ok((hostname, Ok(addresses))))) => {
+                        resolved.insert(hostname, addresses);
+                        pending -= 1;
+                    }
+                    Ok(Some(Ok((hostname, Err(_))))) => {
+                        resolved.insert(hostname, Vec::new());
+                        pending -= 1;
+                    }
+                    Ok(Some(Err(_))) => pending -= 1,
+                    Ok(None) => break,
+                    Err(_) => {
+                        timed_out = true;
+                        tasks.abort_all();
+                        break;
+                    }
+                }
+            }
+            if timed_out {
+                break;
+            }
+        }
+
+        let mut names = Vec::with_capacity(hostnames.len());
+        for hostname in hostnames {
+            names.push(DnsName {
+                ip_addresses: resolved.remove(&hostname).unwrap_or_default(),
+                hostname,
+                timestamp,
+            });
+        }
+        let unavailable = names
+            .iter()
+            .filter(|name| name.ip_addresses.is_empty())
+            .count()
+            .saturating_add(truncated);
 
         if let Ok(mut guard) = cache.lock() {
             *guard = Some((
@@ -1049,6 +1095,13 @@ impl Collector {
             ));
         }
         Ok((names, unavailable, config_refs, config_scan_audit))
+    }
+
+    fn resolve_hostname_addresses(hostname: &str) -> io::Result<Vec<String>> {
+        use std::net::ToSocketAddrs;
+        (hostname, 80)
+            .to_socket_addrs()
+            .map(|addresses| addresses.map(|address| address.ip().to_string()).collect())
     }
 
     fn config_scan_probe_status(audit: &ConfigScanAudit) -> Option<ProbeStatus> {
@@ -1105,6 +1158,14 @@ mod tests {
             Collector::run_bounded_command(printf, &["12345"], Duration::from_secs(1), 4)
                 .unwrap_err();
         assert_eq!(oversized.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn resolves_ipv6_literals_without_adding_ambiguous_port_syntax() {
+        assert_eq!(
+            Collector::resolve_hostname_addresses("::1").unwrap(),
+            vec!["::1".to_string()]
+        );
     }
 
     #[test]
