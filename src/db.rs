@@ -12,7 +12,7 @@ impl Database {
     pub fn new<P: AsRef<Path>>(path: P) -> SqlResult<Self> {
         let path = path.as_ref();
         let conn = Connection::open(path)?;
-        let db = Database { conn };
+        let mut db = Database { conn };
         db.conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         db.conn.busy_timeout(std::time::Duration::from_secs(5))?;
         db.restrict_file_permissions(path)?;
@@ -30,8 +30,9 @@ impl Database {
         Ok(())
     }
 
-    fn init_schema(&self) -> SqlResult<()> {
-        self.conn.execute_batch(
+    fn init_schema(&mut self) -> SqlResult<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS snapshots (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -97,27 +98,25 @@ impl Database {
             "#,
         )?;
 
-        let version: i64 = self
-            .conn
-            .query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        let version: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         if version > SCHEMA_VERSION {
             return Err(rusqlite::Error::InvalidQuery);
         }
         if version < SCHEMA_VERSION {
             if version < 1 {
-                self.conn.execute_batch("PRAGMA user_version = 1;")?;
+                tx.execute_batch("PRAGMA user_version = 1;")?;
             }
             if version < 2 {
                 // Version 1 stored whole seconds. Migrate those keys before
                 // switching to milliseconds to prevent same-second overwrites.
-                self.conn.execute_batch(
+                tx.execute_batch(
                     "UPDATE snapshots SET timestamp = timestamp * 1000; PRAGMA user_version = 2;",
                 )?;
             }
             if version < 3 {
                 // Timer state can be unavailable when systemd does not expose
                 // enabled/active fields. Preserve that uncertainty as NULL.
-                self.conn.execute_batch(
+                tx.execute_batch(
                     "CREATE TABLE systemd_timers_new (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         snapshot_id INTEGER NOT NULL,
@@ -135,7 +134,7 @@ impl Database {
                 )?;
             }
         }
-        Ok(())
+        tx.commit()
     }
 
     pub fn store_snapshot(&mut self, snapshot: &ObservationSnapshot) -> SqlResult<()> {
@@ -371,6 +370,55 @@ mod tests {
             .unwrap();
         assert_eq!(timestamp, 1_700_000_000_000_i64);
         drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn failed_schema_migration_rolls_back_all_ddl_and_version_changes() {
+        let path = std::env::temp_dir().join(format!(
+            "screamless-db-failed-migration-{}.db",
+            std::process::id()
+        ));
+        let raw = rusqlite::Connection::open(&path).unwrap();
+        raw.execute_batch(
+            "CREATE TABLE systemd_timers (name TEXT NOT NULL, unit TEXT NOT NULL);
+             PRAGMA user_version = 2;",
+        )
+        .unwrap();
+        drop(raw);
+
+        assert!(Database::new(&path).is_err());
+
+        let raw = rusqlite::Connection::open(&path).unwrap();
+        let version: i64 = raw
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        let legacy_table_exists: i64 = raw
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'systemd_timers'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let temporary_table_exists: i64 = raw
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'systemd_timers_new'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let snapshots_table_exists: i64 = raw
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'snapshots'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, 2);
+        assert_eq!(legacy_table_exists, 1);
+        assert_eq!(temporary_table_exists, 0);
+        assert_eq!(snapshots_table_exists, 0);
+        drop(raw);
         let _ = std::fs::remove_file(path);
     }
 }
