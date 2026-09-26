@@ -201,10 +201,35 @@ fn report(db_path: &std::path::Path, hostname: Option<String>, format: String) -
 }
 
 fn decommission_check(db_path: &std::path::Path, hostname: Option<String>) -> Result<()> {
+    use crate::analysis::Analyzer;
     let db = Database::new(db_path)?;
     let reporter = Reporter::new(&db);
     reporter.decommission_check(&hostname)?;
-    Ok(())
+
+    let target = reporter.resolve_hostname_for_cli(&hostname)?;
+    let analysis = Analyzer::new(&db).analyze(&target, 168)?;
+    let exit_code = if analysis.total_snapshots == 0
+        || !analysis.probe_statuses.all_complete()
+        || analysis.coverage.evidence_quality == "LOW"
+    {
+        4
+    } else if !analysis.dependencies.is_empty()
+        || !analysis.inbound_dependencies.is_empty()
+        || analysis.decommission_confidence < 80
+    {
+        2
+    } else {
+        0
+    };
+
+    if exit_code == 0 {
+        Ok(())
+    } else {
+        Err(anyhow::Error::new(CliExit {
+            code: exit_code,
+            message: format!("Decommission evidence status: exit code {}", exit_code),
+        }))
+    }
 }
 
 fn parse_duration(s: &str) -> Result<Duration> {
@@ -519,17 +544,17 @@ fn preflight(
         _ => unreachable!("operation was validated before dispatch"),
     }
 
-    let exit_code = if safe {
+    let exit_code = if insufficient_evidence {
+        4
+    } else if safe {
         0
-    } else if insufficient_evidence {
-        2
     } else {
-        1
+        2
     };
     let status = match exit_code {
         0 => "safe",
-        1 => "unsafe",
-        2 => "insufficient_evidence",
+        2 => "blocked",
+        4 => "insufficient_evidence",
         _ => unreachable!(),
     };
 

@@ -150,6 +150,17 @@ screamless preflight --server nginx01 --operation update
 # Output: a safety result; incomplete evidence is non-zero and must be reviewed
 ```
 
+Automation exit codes are consistent across preflight and decommission checks:
+
+- `0`: evidence supports the operation
+- `1`: internal failure
+- `2`: evidence identifies an operation-specific blocker
+- `3`: invalid invocation
+- `4`: insufficient or unknown evidence
+
+Operation policy is specific to the requested action. A listening service is
+relevant to decommissioning but is not, by itself, evidence that a restart is unsafe.
+
 ### 3. **Incident Response**
 ```bash
 # Database went down — what was depending on it?

@@ -551,58 +551,63 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
             const width = graphElement.clientWidth;
             const height = graphElement.clientHeight;
             svg.setAttribute('viewBox', '0 0 ' + width + ' ' + height);
-            svg.replaceChildren();
             nodes.forEach(function (node, index) {{
                 if (!positions.has(node.id)) positions.set(node.id, graphPoint(index, nodes.length, width, height));
             }});
 
-            links.forEach(function (link) {{
-                const line = document.createElementNS(svgNamespace, 'line');
-                line.setAttribute('class', 'graph-link');
-                line.dataset.source = link.source;
-                line.dataset.target = link.target;
-                line.dataset.confidence = link.confidence;
-                svg.appendChild(line);
-            }});
-
-            nodes.forEach(function (node) {{
-                const group = document.createElementNS(svgNamespace, 'g');
-                const circle = document.createElementNS(svgNamespace, 'circle');
-                const label = document.createElementNS(svgNamespace, 'text');
-                circle.setAttribute('r', node.local ? '18' : '12');
-                circle.setAttribute('fill', node.local ? '#667eea' : '#764ba2');
-                label.textContent = node.id;
-                label.setAttribute('x', node.local ? '22' : '16');
-                label.setAttribute('y', '4');
-                label.setAttribute('font-size', '12');
-                label.setAttribute('fill', '#333');
-                group.appendChild(circle);
-                group.appendChild(label);
-                group.dataset.nodeId = node.id;
-                group.style.cursor = 'grab';
-                group.addEventListener('pointerdown', function (event) {{
-                    event.preventDefault();
-                    group.setPointerCapture(event.pointerId);
-                    group.style.cursor = 'grabbing';
-                    const move = function (moveEvent) {{
-                        const point = svg.createSVGPoint();
-                        point.x = moveEvent.clientX;
-                        point.y = moveEvent.clientY;
-                        const localPoint = point.matrixTransform(svg.getScreenCTM().inverse());
-                        positions.set(node.id, {{x: localPoint.x, y: localPoint.y}});
-                        renderGraph();
-                    }};
-                    const end = function () {{
-                        group.style.cursor = 'grab';
-                        group.removeEventListener('pointermove', move);
-                        group.removeEventListener('pointerup', end);
-                    }};
-                    group.addEventListener('pointermove', move);
-                    group.addEventListener('pointerup', end);
+            if (!svg.childElementCount) {{
+                links.forEach(function (link) {{
+                    const line = document.createElementNS(svgNamespace, 'line');
+                    line.setAttribute('class', 'graph-link');
+                    line.dataset.source = link.source;
+                    line.dataset.target = link.target;
+                    line.dataset.confidence = link.confidence;
+                    svg.appendChild(line);
                 }});
-                svg.appendChild(group);
-            }});
 
+                nodes.forEach(function (node) {{
+                    const group = document.createElementNS(svgNamespace, 'g');
+                    const circle = document.createElementNS(svgNamespace, 'circle');
+                    const label = document.createElementNS(svgNamespace, 'text');
+                    circle.setAttribute('r', node.local ? '18' : '12');
+                    circle.setAttribute('fill', node.local ? '#667eea' : '#764ba2');
+                    label.textContent = node.id;
+                    label.setAttribute('x', node.local ? '22' : '16');
+                    label.setAttribute('y', '4');
+                    label.setAttribute('font-size', '12');
+                    label.setAttribute('fill', '#333');
+                    group.appendChild(circle);
+                    group.appendChild(label);
+                    group.dataset.nodeId = node.id;
+                    group.style.cursor = 'grab';
+                    group.addEventListener('pointerdown', function (event) {{
+                        event.preventDefault();
+                        group.setPointerCapture(event.pointerId);
+                        group.style.cursor = 'grabbing';
+                        const move = function (moveEvent) {{
+                            const point = svg.createSVGPoint();
+                            point.x = moveEvent.clientX;
+                            point.y = moveEvent.clientY;
+                            const localPoint = point.matrixTransform(svg.getScreenCTM().inverse());
+                            positions.set(node.id, {{x: localPoint.x, y: localPoint.y}});
+                            updateGraphGeometry();
+                        }};
+                        const end = function () {{
+                            group.style.cursor = 'grab';
+                            group.removeEventListener('pointermove', move);
+                            group.removeEventListener('pointerup', end);
+                        }};
+                        group.addEventListener('pointermove', move);
+                        group.addEventListener('pointerup', end);
+                    }});
+                    svg.appendChild(group);
+                }});
+            }}
+
+            updateGraphGeometry();
+        }}
+
+        function updateGraphGeometry() {{
             Array.from(svg.querySelectorAll('line')).forEach(function (line) {{
                 const source = positions.get(line.dataset.source);
                 const target = positions.get(line.dataset.target);

@@ -564,7 +564,7 @@ impl<'a> Reporter<'a> {
         Ok(())
     }
 
-    fn resolve_hostname(&self, hostname: &Option<String>) -> Result<String> {
+    pub fn resolve_hostname_for_cli(&self, hostname: &Option<String>) -> Result<String> {
         if let Some(h) = hostname {
             Ok(h.clone())
         } else {
@@ -572,6 +572,10 @@ impl<'a> Reporter<'a> {
                 .map(|s| s.trim().to_string())
                 .or_else(|_| Ok("localhost".to_string()))
         }
+    }
+
+    fn resolve_hostname(&self, hostname: &Option<String>) -> Result<String> {
+        self.resolve_hostname_for_cli(hostname)
     }
 }
 
