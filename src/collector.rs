@@ -19,20 +19,56 @@ type ProcessAttribution = HashMap<u32, (String, u32, String)>;
 type ConfigDnsCache = Mutex<Option<(Instant, Vec<DnsName>, usize, Vec<ConfigReference>)>>;
 type ProcessInventory = (Vec<Process>, ProcessAttribution, Vec<SoftwareInventory>);
 
+const SLOW_REFRESH_INTERVAL: StdDuration = StdDuration::from_secs(60 * 60);
+
+/// State carried between observations so slow-changing inventory is refreshed
+/// hourly instead of being recollected on every network/process sample.
+#[derive(Default)]
+pub struct CollectionState {
+    last_slow_refresh: Option<Instant>,
+    software: Vec<SoftwareInventory>,
+    cron_jobs: Vec<CronJob>,
+    systemd_timers: Vec<SystemdTimer>,
+    dns_names: Vec<DnsName>,
+    config_references: Vec<ConfigReference>,
+    host_identity: HostIdentity,
+    slow_probe_statuses: ProbeStatuses,
+}
+
 impl Collector {
     pub async fn collect_snapshot() -> Result<ObservationSnapshot> {
+        let mut state = CollectionState::default();
+        Self::collect_snapshot_with_state(&mut state).await
+    }
+
+    pub async fn collect_snapshot_with_state(
+        state: &mut CollectionState,
+    ) -> Result<ObservationSnapshot> {
         let hostname = Self::get_hostname()?;
         let timestamp = Utc::now();
-        let mut probe_statuses = ProbeStatuses::default();
-
-        let (processes, pid_to_process, software) = match Self::collect_process_inventory() {
-            Ok(inventory) => inventory,
-            Err(error) => {
-                probe_statuses.process_attribution =
-                    ProbeStatus::partial(format!("process inventory unavailable: {}", error), 0);
-                (Vec::new(), HashMap::new(), Vec::new())
-            }
+        let refresh_slow = state
+            .last_slow_refresh
+            .map_or(true, |last| last.elapsed() >= SLOW_REFRESH_INTERVAL);
+        let mut probe_statuses = if refresh_slow {
+            ProbeStatuses::default()
+        } else {
+            state.slow_probe_statuses.clone()
         };
+
+        let (processes, pid_to_process, observed_software) =
+            match Self::collect_process_inventory(refresh_slow) {
+                Ok(inventory) => inventory,
+                Err(error) => {
+                    probe_statuses.process_attribution = ProbeStatus::partial(
+                        format!("process inventory unavailable: {}", error),
+                        0,
+                    );
+                    (Vec::new(), HashMap::new(), Vec::new())
+                }
+            };
+        if refresh_slow {
+            state.software = observed_software;
+        }
 
         let (listening_services, listening_unavailable) =
             match Self::collect_listening_services(&pid_to_process) {
@@ -61,48 +97,60 @@ impl Collector {
             );
         }
 
-        let (cron_jobs, cron_unavailable) = Self::collect_cron_jobs()?;
-        if cron_unavailable > 0 {
-            probe_statuses.cron = ProbeStatus::partial(
-                format!("{} cron paths could not be read", cron_unavailable),
-                cron_unavailable,
-            );
+        if refresh_slow {
+            match Self::collect_cron_jobs() {
+                Ok((cron_jobs, cron_unavailable)) => {
+                    state.cron_jobs = cron_jobs;
+                    if cron_unavailable > 0 {
+                        probe_statuses.cron = ProbeStatus::partial(
+                            format!("{} cron paths could not be read", cron_unavailable),
+                            cron_unavailable,
+                        );
+                    }
+                }
+                Err(error) => probe_statuses.cron = ProbeStatus::failed(error.to_string()),
+            }
         }
-        let systemd_timers = match Self::collect_systemd_timers() {
-            Ok(timers) => timers,
-            Err(error) => {
-                probe_statuses.systemd = ProbeStatus::failed(error.to_string());
-                Vec::new()
+        if refresh_slow {
+            match Self::collect_systemd_timers() {
+                Ok(timers) => state.systemd_timers = timers,
+                Err(error) => probe_statuses.systemd = ProbeStatus::failed(error.to_string()),
             }
-        };
-        let (dns_names, dns_unavailable, config_references) = match Self::collect_dns_names() {
-            Ok(result) => result,
-            Err(error) => {
-                probe_statuses.config_scan = ProbeStatus::failed(error.to_string());
-                probe_statuses.dns = ProbeStatus::failed(error.to_string());
-                (Vec::new(), 0, Vec::new())
+            match Self::collect_dns_names() {
+                Ok((dns_names, dns_unavailable, config_references)) => {
+                    state.dns_names = dns_names;
+                    state.config_references = config_references;
+                    if dns_unavailable > 0 {
+                        probe_statuses.dns = ProbeStatus::partial(
+                            format!("DNS resolution failed for {} names", dns_unavailable),
+                            dns_unavailable,
+                        );
+                    }
+                }
+                Err(error) => {
+                    probe_statuses.config_scan = ProbeStatus::failed(error.to_string());
+                    probe_statuses.dns = ProbeStatus::failed(error.to_string());
+                }
             }
-        };
-        if dns_unavailable > 0 && probe_statuses.dns.is_complete() {
-            probe_statuses.dns = ProbeStatus::partial(
-                format!("DNS resolution failed for {} names", dns_unavailable),
-                dns_unavailable,
-            );
+            state.slow_probe_statuses = probe_statuses.clone();
+            state.last_slow_refresh = Some(Instant::now());
         }
 
-        let host_identity = Self::collect_host_identity(&hostname);
+        if refresh_slow {
+            state.host_identity = Self::collect_host_identity(&hostname);
+        }
         Ok(ObservationSnapshot {
             timestamp,
             hostname,
-            host_identity,
+            host_identity: state.host_identity.clone(),
             listening_services,
             network_connections,
             processes,
-            cron_jobs,
-            systemd_timers,
-            dns_names,
-            config_references,
-            software,
+            cron_jobs: state.cron_jobs.clone(),
+            systemd_timers: state.systemd_timers.clone(),
+            dns_names: state.dns_names.clone(),
+            config_references: state.config_references.clone(),
+            software: state.software.clone(),
             sampling_interval_seconds: None,
             privileges: Self::current_privilege_level(),
             probe_statuses,
@@ -433,7 +481,7 @@ impl Collector {
             .unwrap_or(0)
     }
 
-    fn collect_process_inventory() -> Result<ProcessInventory> {
+    fn collect_process_inventory(include_software: bool) -> Result<ProcessInventory> {
         let mut processes = Vec::new();
         let mut pid_to_process = HashMap::new();
         let mut software_candidates = HashMap::<String, (u32, String)>::new();
@@ -460,7 +508,7 @@ impl Collector {
                     process.pid() as u32,
                     (process_name.clone(), process.pid() as u32, user),
                 );
-                if Self::is_known_software(&process_name) {
+                if include_software && Self::is_known_software(&process_name) {
                     if let Ok(executable) = fs::read_link(format!("/proc/{}/exe", process.pid())) {
                         software_candidates
                             .entry(Self::software_name(&process_name))

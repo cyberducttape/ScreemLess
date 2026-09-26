@@ -5,7 +5,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use tokio::time::{self, Duration};
 
-use crate::collector::Collector;
+use crate::collector::{CollectionState, Collector};
 use crate::db::Database;
 use crate::report::Reporter;
 
@@ -154,10 +154,11 @@ async fn observe(
     println!("Press Ctrl+C to stop early\n");
 
     let mut db = Database::new(db_path)?;
+    let mut collection_state = CollectionState::default();
     let start = std::time::Instant::now();
 
     loop {
-        match Collector::collect_snapshot().await {
+        match Collector::collect_snapshot_with_state(&mut collection_state).await {
             Ok(mut snapshot) => {
                 snapshot.sampling_interval_seconds = Some(interval.as_secs().max(1));
                 db.store_snapshot(&snapshot)?;
