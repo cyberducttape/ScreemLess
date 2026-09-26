@@ -10,6 +10,8 @@
   inventory counts, with explicit evidence-scope notes.
 - Include common PostgreSQL, MySQL-compatible, MariaDB, MongoDB, Redis,
   Memcached, and SQL Server processes in package-metadata software inventory.
+- Discover nested/versioned MySQL, MariaDB, and PostgreSQL server configs and
+  use each database's protocol default or explicitly configured listener port.
 - Preserve recognized software processes in inventory when `/proc/PID/exe`
   cannot be read, marking the version unavailable instead of omitting evidence.
 - Apply Nginx's default HTTP port to server blocks without `listen` directives

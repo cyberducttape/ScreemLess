@@ -22,6 +22,9 @@ const API_URL_REGEX: &str =
 const SEARCH_HOST_REGEX: &str =
     r#"(?mi)(?:ELASTICSEARCH|ELASTIC_URL|SEARCH_HOST)\s*[=:]\s*["']?([^\s;,"'\n}]+)"#;
 const STORAGE_ENDPOINT_REGEX: &str = r#"(?mi)(?:S3_ENDPOINT|S3_URL|AWS_S3_ENDPOINT|MINIO_ENDPOINT|OBJECT_STORAGE_URL)\s*[=:]\s*["']?([^\s;,"'\n}]+)"#;
+const POSTGRES_LISTEN_REGEX: &str = r"(?mi)^\s*listen_addresses\s*=\s*([^\n]+)";
+const DATABASE_PORT_REGEX: &str = r"(?mi)^\s*port\s*=\s*(\d+)\s*$";
+const DATABASE_BIND_REGEX: &str = r"(?mi)^\s*bind-address\s*=\s*([^\s\n]+)";
 const CONFIG_REGEX_PATTERNS: &[&str] = &[
     r"(?m)upstream\s+\w+\s*\{([^}]+)\}",
     r"(?m)server\s+([^\s;]+)(?::(\d+))?",
@@ -48,6 +51,9 @@ const CONFIG_REGEX_PATTERNS: &[&str] = &[
     STORAGE_ENDPOINT_REGEX,
     r"(?m)^([A-Z_]+)=(.*)$",
     r"(?m)bind-address\s*=\s*([^\s\n]+)",
+    POSTGRES_LISTEN_REGEX,
+    DATABASE_PORT_REGEX,
+    DATABASE_BIND_REGEX,
 ];
 const SCAN_ROOTS: &[&str] = &[
     "/etc/nginx",
@@ -235,9 +241,9 @@ impl ConfigScanner {
             "/root/.env",
             "/home/*/.env",
             "/opt/*/.env",
-            "/etc/mysql/my.cnf",
-            "/etc/postgresql/postgresql.conf",
-            "/etc/mariadb/my.cnf",
+            "/etc/mysql/**/*.cnf (recursive)",
+            "/etc/postgresql/**/postgresql.conf (recursive; versioned clusters)",
+            "/etc/mariadb/**/*.cnf (recursive)",
         ]
     }
 
@@ -1127,19 +1133,28 @@ impl ConfigScanner {
 
     fn scan_database_configs(context: &mut ScanContext) -> Result<Vec<ConfigReference>> {
         let mut refs = Vec::new();
-
-        let db_config_paths = vec![
-            "/etc/mysql/my.cnf",
-            "/etc/postgresql/postgresql.conf",
-            "/etc/mariadb/my.cnf",
-        ];
-
-        for path in db_config_paths {
-            if Path::new(path).exists() {
-                let Some(content) = Self::read_config_file(Path::new(path), context) else {
+        for root in [
+            Path::new("/etc/mysql"),
+            Path::new("/etc/postgresql"),
+            Path::new("/etc/mariadb"),
+        ] {
+            for path in Self::config_files_under(root)? {
+                let is_postgres = root == Path::new("/etc/postgresql");
+                let supported_file = if is_postgres {
+                    matches!(
+                        path.file_name().and_then(|name| name.to_str()),
+                        Some("postgresql.conf" | "postgresql.auto.conf")
+                    )
+                } else {
+                    path.extension().and_then(|extension| extension.to_str()) == Some("cnf")
+                };
+                if !supported_file {
+                    continue;
+                }
+                let Some(content) = Self::read_config_file(&path, context) else {
                     continue;
                 };
-                refs.extend(Self::parse_database_config(Path::new(path), &content)?);
+                refs.extend(Self::parse_database_config(&path, &content)?);
             }
         }
 
@@ -1149,17 +1164,57 @@ impl ConfigScanner {
     fn parse_database_config(path: &Path, content: &str) -> Result<Vec<ConfigReference>> {
         let content = Self::strip_comments(content, '#');
         let mut refs = Vec::new();
+        let is_postgres = path.starts_with("/etc/postgresql");
+        let default_port = if is_postgres { 5432 } else { 3306 };
+        let port_re = Self::compiled_regex(DATABASE_PORT_REGEX);
+        let port = port_re
+            .captures_iter(&content)
+            .filter_map(|capture| capture.get(1)?.as_str().parse::<u16>().ok())
+            .last()
+            .unwrap_or(default_port);
 
-        let bind_re = Self::compiled_regex(r"(?m)bind-address\s*=\s*([^\s\n]+)");
+        let address_re = if is_postgres {
+            Self::compiled_regex(POSTGRES_LISTEN_REGEX)
+        } else {
+            Self::compiled_regex(DATABASE_BIND_REGEX)
+        };
 
-        for caps in bind_re.captures_iter(&content) {
-            if let Some(addr) = caps.get(1) {
-                let addr_str = addr.as_str();
-                if addr_str != "127.0.0.1" && addr_str != "localhost" {
+        for capture in address_re.captures_iter(&content) {
+            let Some(value) = capture.get(1) else {
+                continue;
+            };
+            let value = value
+                .as_str()
+                .trim()
+                .trim_matches(|character| character == '\'' || character == '"');
+            let addresses = if is_postgres {
+                value.split(',').collect::<Vec<_>>()
+            } else {
+                vec![value]
+            };
+            for address in addresses {
+                let address = address.trim();
+                if address == "*" || address.eq_ignore_ascii_case("localhost") {
+                    continue;
+                }
+                let Some((hostname, _)) = Self::parse_endpoint(address, None) else {
+                    continue;
+                };
+                let Ok(ip) = hostname.parse::<std::net::IpAddr>() else {
                     refs.push(ConfigReference {
                         file_path: path.display().to_string(),
-                        hostname: addr_str.to_string(),
-                        port: Some(3306),
+                        hostname,
+                        port: Some(port),
+                        context: "Database bind address".to_string(),
+                        config_line: None,
+                    });
+                    continue;
+                };
+                if !ip.is_loopback() && !ip.is_unspecified() {
+                    refs.push(ConfigReference {
+                        file_path: path.display().to_string(),
+                        hostname: hostname.to_string(),
+                        port: Some(port),
                         context: "Database bind address".to_string(),
                         config_line: None,
                     });
@@ -1339,6 +1394,12 @@ mod tests {
             .iter()
             .any(|path| path.contains("/etc/apache2/** and /etc/httpd/**")));
         assert!(paths.iter().any(|path| path.contains("/etc/php/**/*.conf")));
+        assert!(paths
+            .iter()
+            .any(|path| path.contains("/etc/postgresql/**/postgresql.conf")));
+        assert!(paths
+            .iter()
+            .any(|path| path.contains("/etc/mysql/**/*.cnf")));
         assert!(paths.contains(&"/var/www/*/wp-config.php"));
         assert!(!paths.contains(&"/var/www/*"));
         assert!(!paths.contains(&"/opt/*"));
@@ -1809,5 +1870,48 @@ mod tests {
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].hostname, "db01.internal");
         assert_eq!(refs[0].port, Some(5432));
+    }
+
+    #[test]
+    fn postgres_server_config_uses_nested_cluster_path_and_configured_port() {
+        let refs = ConfigScanner::parse_database_config(
+            Path::new("/etc/postgresql/17/main/postgresql.conf"),
+            "listen_addresses = 'localhost, 192.0.2.44'\nport = 5433\n",
+        )
+        .unwrap();
+
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].hostname, "192.0.2.44");
+        assert_eq!(refs[0].port, Some(5433));
+        assert_eq!(refs[0].context, "Database bind address");
+    }
+
+    #[test]
+    fn wildcard_database_bind_is_not_misreported_as_a_host_dependency() {
+        let refs = ConfigScanner::parse_database_config(
+            Path::new("/etc/postgresql/17/main/postgresql.conf"),
+            "listen_addresses = '*'\n",
+        )
+        .unwrap();
+
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn mysql_server_config_uses_configured_port_and_default_remains_mysql() {
+        let refs = ConfigScanner::parse_database_config(
+            Path::new("/etc/mysql/conf.d/server.cnf"),
+            "[mysqld]\nbind-address = 192.0.2.45\nport = 3307\n",
+        )
+        .unwrap();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].port, Some(3307));
+
+        let default_refs = ConfigScanner::parse_database_config(
+            Path::new("/etc/mysql/my.cnf"),
+            "bind-address = 192.0.2.45\n",
+        )
+        .unwrap();
+        assert_eq!(default_refs[0].port, Some(3306));
     }
 }
