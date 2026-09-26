@@ -224,6 +224,22 @@ impl<'a> Reporter<'a> {
             "  Expected samples: {} | Successful samples: {} | Coverage: {:.2}%",
             coverage.expected_samples, coverage.successful_samples, coverage.coverage_percent
         );
+        println!(
+            "  Slow inventory refreshes: {} / {} expected ({:.1}%)",
+            coverage.slow_inventory_refreshes,
+            coverage.expected_slow_inventory_refreshes,
+            coverage.slow_inventory_coverage_percent
+        );
+        if let Some(last_refresh) = coverage.last_slow_inventory_refresh {
+            println!(
+                "  Last slow-inventory refresh: {} ({} seconds ago)",
+                last_refresh.format("%Y-%m-%d %H:%M:%S UTC"),
+                coverage
+                    .slow_inventory_age_seconds
+                    .unwrap_or_default()
+                    .max(0)
+            );
+        }
         if let Some(last) = coverage.last_observation {
             println!(
                 "  Last observation: {}",

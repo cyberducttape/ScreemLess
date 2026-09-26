@@ -886,10 +886,23 @@ impl<'a> Analyzer<'a> {
             }
         }
 
-        let config_refs = snapshots
+        let mut unique_config_refs = std::collections::BTreeMap::new();
+        for reference in snapshots
             .iter()
-            .flat_map(|snapshot| snapshot.config_references.iter().cloned())
-            .collect::<Vec<_>>();
+            .flat_map(|snapshot| snapshot.config_references.iter())
+        {
+            let key = (
+                reference.file_path.clone(),
+                reference.hostname.to_ascii_lowercase(),
+                reference.port,
+                reference.context.clone(),
+                reference.config_line.clone(),
+            );
+            unique_config_refs
+                .entry(key)
+                .or_insert_with(|| reference.clone());
+        }
+        let config_refs = unique_config_refs.into_values().collect::<Vec<_>>();
         let ip_to_hostname = Self::build_ip_to_hostname_map(snapshots);
 
         let mut dependencies = Vec::new();
@@ -1371,10 +1384,13 @@ impl<'a> Analyzer<'a> {
     ) -> ObservationCoverage {
         let requested_seconds = i64::from(requested_window_hours.max(1)) * 3600;
         let window_start = now - Duration::seconds(requested_seconds);
-        let timestamps = snapshots
+        let window_snapshots = snapshots
+            .iter()
+            .filter(|snapshot| snapshot.timestamp >= window_start && snapshot.timestamp <= now)
+            .collect::<Vec<_>>();
+        let timestamps = window_snapshots
             .iter()
             .map(|snapshot| snapshot.timestamp)
-            .filter(|timestamp| *timestamp >= window_start && *timestamp <= now)
             .collect::<Vec<_>>();
         let first_observation = timestamps.iter().min().copied();
         let last_observation = timestamps.iter().max().copied();
@@ -1399,6 +1415,26 @@ impl<'a> Analyzer<'a> {
             ((actual_span_seconds as f64 / requested_seconds as f64) * 100.0).min(100.0);
         let coverage_percent = sample_coverage.min(span_coverage);
 
+        let slow_inventory_samples = window_snapshots
+            .iter()
+            .copied()
+            .filter(|snapshot| snapshot.includes_slow_inventory())
+            .collect::<Vec<_>>();
+        let expected_slow_inventory_refreshes = ((requested_seconds as f64
+            / SLOW_INVENTORY_REFRESH_INTERVAL_SECONDS as f64)
+            .ceil() as usize)
+            .max(1);
+        let slow_inventory_refreshes = slow_inventory_samples.len();
+        let slow_inventory_coverage_percent =
+            ((slow_inventory_refreshes as f64 / expected_slow_inventory_refreshes as f64) * 100.0)
+                .min(100.0);
+        let last_slow_inventory_refresh = slow_inventory_samples
+            .iter()
+            .map(|snapshot| snapshot.timestamp)
+            .max();
+        let slow_inventory_age_seconds =
+            last_slow_inventory_refresh.map(|last| (now - last).num_seconds());
+
         let probe_names = [
             "network_sockets",
             "process_attribution",
@@ -1410,22 +1446,32 @@ impl<'a> Analyzer<'a> {
         let mut probe_coverage = HashMap::new();
         let mut remaining_unknowns = Vec::new();
         for name in probe_names {
-            let complete = snapshots
+            let slow_probe = matches!(name, "dns" | "config_scan" | "cron" | "systemd");
+            let probe_samples = if slow_probe {
+                &slow_inventory_samples
+            } else {
+                &window_snapshots
+            };
+            let complete = probe_samples
                 .iter()
                 .filter(|snapshot| Self::probe_status(snapshot, name).is_complete())
                 .count();
-            let percent = if snapshots.is_empty() {
+            let percent = if probe_samples.is_empty() {
                 0.0
             } else {
-                complete as f64 * 100.0 / snapshots.len() as f64
+                complete as f64 * 100.0 / probe_samples.len() as f64
             };
             probe_coverage.insert(name.to_string(), percent);
             if percent < 100.0 {
-                let detail = snapshots
+                let detail = probe_samples
                     .iter()
                     .filter_map(|snapshot| Self::probe_status(snapshot, name).details.as_deref())
                     .next()
-                    .unwrap_or("probe was incomplete");
+                    .unwrap_or(if slow_probe {
+                        "no complete slow-inventory refresh was observed"
+                    } else {
+                        "probe was incomplete"
+                    });
                 remaining_unknowns.push(format!("{}: {}", name, detail));
             }
         }
@@ -1448,6 +1494,31 @@ impl<'a> Analyzer<'a> {
             false
         };
 
+        let slow_inventory_fresh = if let Some(age_seconds) = slow_inventory_age_seconds {
+            if age_seconds < 0 {
+                remaining_unknowns
+                    .push("slow inventory refresh timestamp is in the future".to_string());
+                false
+            } else if age_seconds > SLOW_INVENTORY_REFRESH_INTERVAL_SECONDS * 2 {
+                remaining_unknowns.push(format!(
+                    "slow inventory was last refreshed {} seconds ago",
+                    age_seconds
+                ));
+                false
+            } else {
+                true
+            }
+        } else {
+            remaining_unknowns.push("no slow-inventory refresh was observed".to_string());
+            false
+        };
+        if slow_inventory_coverage_percent < 90.0 {
+            remaining_unknowns.push(format!(
+                "slow inventory refreshed {} of {} expected times",
+                slow_inventory_refreshes, expected_slow_inventory_refreshes
+            ));
+        }
+
         let privileges = if !snapshots.is_empty()
             && snapshots
                 .iter()
@@ -1467,11 +1538,18 @@ impl<'a> Analyzer<'a> {
         }
         let evidence_quality = if coverage_percent >= 90.0
             && probe_coverage.values().all(|percent| *percent >= 99.0)
+            && slow_inventory_coverage_percent >= 90.0
             && privileges == "full"
             && last_observation_fresh
+            && slow_inventory_fresh
         {
             "HIGH"
-        } else if coverage_percent >= 50.0 && !snapshots.is_empty() && last_observation_fresh {
+        } else if coverage_percent >= 50.0
+            && slow_inventory_coverage_percent >= 50.0
+            && !window_snapshots.is_empty()
+            && last_observation_fresh
+            && slow_inventory_fresh
+        {
             "MEDIUM"
         } else {
             "LOW"
@@ -1484,6 +1562,11 @@ impl<'a> Analyzer<'a> {
             successful_samples,
             coverage_percent,
             last_observation,
+            expected_slow_inventory_refreshes,
+            slow_inventory_refreshes,
+            slow_inventory_coverage_percent,
+            last_slow_inventory_refresh,
+            slow_inventory_age_seconds,
             probe_coverage,
             privileges,
             evidence_quality: evidence_quality.to_string(),
@@ -1558,6 +1641,7 @@ mod tests {
             processes: Vec::new(),
             cron_jobs: Vec::new(),
             systemd_timers: Vec::new(),
+            slow_inventory_refreshed: None,
             dns_names: Vec::new(),
             config_references: Vec::new(),
             config_scan_audit: None,
@@ -1686,6 +1770,35 @@ mod tests {
     }
 
     #[test]
+    fn sparse_inventory_refreshes_are_visible_in_coverage() {
+        let now = Utc::now();
+        let window_start = now - chrono::Duration::hours(168);
+        let mut snapshots = (0..10_080)
+            .map(|minute| {
+                let mut snapshot =
+                    test_snapshot(window_start + chrono::Duration::minutes(i64::from(minute)));
+                snapshot.slow_inventory_refreshed = Some(minute == 0);
+                snapshot
+            })
+            .collect::<Vec<_>>();
+
+        let sparse_coverage = Analyzer::build_observation_coverage(&snapshots, now, 168);
+        assert_eq!(sparse_coverage.expected_slow_inventory_refreshes, 168);
+        assert_eq!(sparse_coverage.slow_inventory_refreshes, 1);
+        assert!(sparse_coverage.slow_inventory_coverage_percent < 1.0);
+        assert_eq!(sparse_coverage.probe_coverage["dns"], 100.0);
+        assert_eq!(sparse_coverage.evidence_quality, "LOW");
+
+        for (minute, snapshot) in snapshots.iter_mut().enumerate() {
+            snapshot.slow_inventory_refreshed = Some(minute % 60 == 0);
+        }
+        let hourly_coverage = Analyzer::build_observation_coverage(&snapshots, now, 168);
+        assert_eq!(hourly_coverage.slow_inventory_refreshes, 168);
+        assert_eq!(hourly_coverage.slow_inventory_coverage_percent, 100.0);
+        assert_eq!(hourly_coverage.evidence_quality, "HIGH");
+    }
+
+    #[test]
     fn sparse_manual_snapshots_do_not_define_their_own_expected_coverage() {
         let now = Utc::now();
         let make_snapshot = |timestamp| ObservationSnapshot {
@@ -1700,6 +1813,7 @@ mod tests {
             processes: Vec::new(),
             cron_jobs: Vec::new(),
             systemd_timers: Vec::new(),
+            slow_inventory_refreshed: None,
             dns_names: Vec::new(),
             config_references: Vec::new(),
             config_scan_audit: None,
@@ -1805,6 +1919,7 @@ mod tests {
             processes: Vec::new(),
             cron_jobs: Vec::new(),
             systemd_timers: Vec::new(),
+            slow_inventory_refreshed: None,
             dns_names: vec![DnsName {
                 hostname: "db01".to_string(),
                 ip_addresses: vec!["10.20.30.40".to_string()],
@@ -1829,6 +1944,7 @@ mod tests {
             processes: Vec::new(),
             cron_jobs: Vec::new(),
             systemd_timers: Vec::new(),
+            slow_inventory_refreshed: None,
             dns_names: Vec::new(),
             config_references: Vec::new(),
             config_scan_audit: None,
@@ -1946,6 +2062,7 @@ mod tests {
             }],
             cron_jobs: Vec::new(),
             systemd_timers: Vec::new(),
+            slow_inventory_refreshed: None,
             dns_names: Vec::new(),
             config_references: vec![ConfigReference {
                 file_path: "/etc/nginx/sites-enabled/example".to_string(),
@@ -1961,7 +2078,20 @@ mod tests {
             probe_statuses: ProbeStatuses::default(),
         };
 
-        let inventory = Analyzer::build_inventory(std::slice::from_ref(&snapshot), &[]);
+        let mut refresh_snapshot = snapshot.clone();
+        refresh_snapshot.slow_inventory_refreshed = Some(true);
+        let mut cached_sample = snapshot.clone();
+        cached_sample.timestamp += chrono::Duration::minutes(1);
+        cached_sample.slow_inventory_refreshed = Some(false);
+        cached_sample.host_identity = HostIdentity::default();
+        cached_sample.network_connections.clear();
+        cached_sample.cron_jobs.clear();
+        cached_sample.systemd_timers.clear();
+        cached_sample.dns_names.clear();
+        cached_sample.config_references.clear();
+        cached_sample.config_scan_audit = None;
+        cached_sample.software.clear();
+        let inventory = Analyzer::build_inventory(&[refresh_snapshot, cached_sample], &[]);
         assert_eq!(inventory.websites.len(), 1);
         assert_eq!(inventory.websites[0].name, "example.com");
         assert_eq!(inventory.websites[0].status, "active");

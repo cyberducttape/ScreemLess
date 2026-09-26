@@ -91,6 +91,11 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
         .map(|last| (Utc::now() - last).num_seconds().max(0))
         .map(format_freshness)
         .unwrap_or_else(|| "unknown".to_string());
+    let slow_inventory_freshness = analysis
+        .coverage
+        .slow_inventory_age_seconds
+        .map(|age| format_freshness(age.max(0)))
+        .unwrap_or_else(|| "unknown".to_string());
     let evidence_rows = [
         ("Network", "network_sockets"),
         ("Process attribution", "process_attribution"),
@@ -118,11 +123,15 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
     .collect::<Vec<_>>()
     .join("");
     let coverage_summary = format!(
-        "Evidence quality: {} · Observation coverage: {:.2}% · {} successful / {} expected samples · Privileges: {}",
+        "Evidence quality: {} · Observation coverage: {:.2}% · {} successful / {} expected samples · Slow inventory: {:.1}% ({}/{} refreshes), last refreshed {} ago · Privileges: {}",
         escape_html(&analysis.coverage.evidence_quality),
         analysis.coverage.coverage_percent,
         analysis.coverage.successful_samples,
         analysis.coverage.expected_samples,
+        analysis.coverage.slow_inventory_coverage_percent,
+        analysis.coverage.slow_inventory_refreshes,
+        analysis.coverage.expected_slow_inventory_refreshes,
+        escape_html(&slow_inventory_freshness),
         escape_html(&analysis.coverage.privileges)
     );
     let inventory_json = safe_json_for_script(&analysis.inventory)?;

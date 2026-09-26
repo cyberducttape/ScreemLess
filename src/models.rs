@@ -2,6 +2,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+pub const SLOW_INVENTORY_REFRESH_INTERVAL_SECONDS: i64 = 60 * 60;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ProbeState {
     #[serde(rename = "COMPLETE")]
@@ -273,6 +275,16 @@ pub struct ObservationCoverage {
     pub successful_samples: usize,
     pub coverage_percent: f64,
     pub last_observation: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub expected_slow_inventory_refreshes: usize,
+    #[serde(default)]
+    pub slow_inventory_refreshes: usize,
+    #[serde(default)]
+    pub slow_inventory_coverage_percent: f64,
+    #[serde(default)]
+    pub last_slow_inventory_refresh: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub slow_inventory_age_seconds: Option<i64>,
     pub probe_coverage: HashMap<String, f64>,
     pub privileges: String,
     pub evidence_quality: String,
@@ -401,6 +413,11 @@ pub struct ObservationSnapshot {
     pub processes: Vec<Process>,
     pub cron_jobs: Vec<CronJob>,
     pub systemd_timers: Vec<SystemdTimer>,
+    /// `Some(false)` means slow inventory is intentionally omitted from this
+    /// sample; `Some(true)` means the collector attempted a refresh. `None`
+    /// is reserved for legacy/manual snapshots with inline inventory data.
+    #[serde(default)]
+    pub slow_inventory_refreshed: Option<bool>,
     pub dns_names: Vec<DnsName>,
     #[serde(default)]
     pub config_references: Vec<ConfigReference>,
@@ -414,6 +431,14 @@ pub struct ObservationSnapshot {
     pub privileges: String,
     #[serde(default = "ProbeStatuses::legacy_unknown")]
     pub probe_statuses: ProbeStatuses,
+}
+
+impl ObservationSnapshot {
+    /// Legacy snapshots stored cached inventory on every sample. New snapshots
+    /// use an explicit refresh marker and omit those fields between refreshes.
+    pub fn includes_slow_inventory(&self) -> bool {
+        self.slow_inventory_refreshed.unwrap_or(true)
+    }
 }
 
 /// Stable local identity and address inventory used to correlate raw socket

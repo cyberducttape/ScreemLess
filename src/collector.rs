@@ -29,7 +29,8 @@ type ConfigDnsCache = Mutex<
 >;
 type ProcessInventory = (Vec<Process>, ProcessAttribution, Vec<SoftwareInventory>);
 
-const SLOW_REFRESH_INTERVAL: StdDuration = StdDuration::from_secs(60 * 60);
+const SLOW_REFRESH_INTERVAL: StdDuration =
+    StdDuration::from_secs(SLOW_INVENTORY_REFRESH_INTERVAL_SECONDS as u64);
 const SLOW_REFRESH_RETRY_INTERVAL: StdDuration = StdDuration::from_secs(5 * 60);
 const SMALL_PROBE_TIMEOUT: StdDuration = StdDuration::from_secs(3);
 const INVENTORY_PROBE_TIMEOUT: StdDuration = StdDuration::from_secs(10);
@@ -170,16 +171,45 @@ impl Collector {
         Ok(ObservationSnapshot {
             timestamp,
             hostname,
-            host_identity: state.host_identity.clone(),
+            host_identity: if refresh_slow {
+                state.host_identity.clone()
+            } else {
+                HostIdentity::default()
+            },
             listening_services,
             network_connections,
             processes,
-            cron_jobs: state.cron_jobs.clone(),
-            systemd_timers: state.systemd_timers.clone(),
-            dns_names: state.dns_names.clone(),
-            config_references: state.config_references.clone(),
-            config_scan_audit: state.config_scan_audit.clone(),
-            software: state.software.clone(),
+            cron_jobs: if refresh_slow {
+                state.cron_jobs.clone()
+            } else {
+                Vec::new()
+            },
+            systemd_timers: if refresh_slow {
+                state.systemd_timers.clone()
+            } else {
+                Vec::new()
+            },
+            slow_inventory_refreshed: Some(refresh_slow),
+            dns_names: if refresh_slow {
+                state.dns_names.clone()
+            } else {
+                Vec::new()
+            },
+            config_references: if refresh_slow {
+                state.config_references.clone()
+            } else {
+                Vec::new()
+            },
+            config_scan_audit: if refresh_slow {
+                state.config_scan_audit.clone()
+            } else {
+                None
+            },
+            software: if refresh_slow {
+                state.software.clone()
+            } else {
+                Vec::new()
+            },
             sampling_interval_seconds: None,
             privileges: Self::current_privilege_level(),
             probe_statuses,
