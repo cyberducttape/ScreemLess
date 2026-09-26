@@ -5,6 +5,9 @@
 - Render configured website evidence per site in the dashboard, distinguishing
   observed listeners from unknown/unmatched state and labeling socket activity
   as observations rather than request counts.
+- Show the observed users, inferred database/cache and storage endpoints,
+  process stack, and config-backed load-balancer candidates behind the dashboard
+  inventory counts, with explicit evidence-scope notes.
 - Apply Nginx's default HTTP port to server blocks without `listen` directives
   so virtual hosts sharing the implicit listener are not treated as independent.
 - Count inaccessible `/proc` process entries as incomplete attribution while

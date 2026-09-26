@@ -199,6 +199,51 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
             website_rows
         )
     };
+    let render_inventory_list = |items: &[String], empty: &str| {
+        if items.is_empty() {
+            format!("<p class='muted'>{}</p>", escape_html(empty))
+        } else {
+            format!(
+                "<ul class='inventory-list'>{}</ul>",
+                items
+                    .iter()
+                    .map(|item| format!("<li>{}</li>", escape_html(item)))
+                    .collect::<Vec<_>>()
+                    .join("")
+            )
+        }
+    };
+    let render_connection_list = |items: &[crate::models::InventoryConnection], empty: &str| {
+        if items.is_empty() {
+            format!("<p class='muted'>{}</p>", escape_html(empty))
+        } else {
+            format!(
+                "<ul class='inventory-list'>{}</ul>",
+                items
+                    .iter()
+                    .map(|item| {
+                        format!(
+                            "<li><b>{}:{}</b> · {} · {} socket observations <small>{}</small></li>",
+                            escape_html(&item.target),
+                            item.port,
+                            escape_html(&item.protocol),
+                            item.usage_observations,
+                            escape_html(&item.evidence),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("")
+            )
+        }
+    };
+    let inventory_details = format!(
+        "<div class='inventory-details'><section><h4>Observed runtime users</h4>{}</section><section><h4>Database/cache endpoints</h4>{}</section><section><h4>Storage endpoints</h4>{}</section><section><h4>Observed process stack</h4>{}</section><section><h4>Load-balancer candidates</h4>{}</section></div><p class='muted'>Database and storage endpoints are inferred from outbound socket/config evidence, not authoritative service catalogs. The process stack is host-level; it is not attributed to individual websites.</p>",
+        render_inventory_list(&analysis.inventory.users, "No runtime users observed."),
+        render_connection_list(&analysis.inventory.databases, "No database/cache endpoints inferred."),
+        render_connection_list(&analysis.inventory.storage_connections, "No storage endpoints inferred."),
+        render_inventory_list(&analysis.inventory.tech_stack, "No recognized application processes observed."),
+        render_inventory_list(&analysis.inventory.load_balancers, "No config-backed load-balancer candidates observed."),
+    );
     let software_html =
         if analysis.inventory.software.is_empty() {
             "<p class='muted'>No versioned software observations available</p>".to_string()
@@ -372,6 +417,12 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
         .site-table th, .site-table td {{ padding: 10px; text-align: left; vertical-align: top; border-bottom: 1px solid #e1e5eb; }}
         .site-table th {{ color: #475467; background: #f8f9fb; white-space: nowrap; }}
         .muted {{ color: #667085; font-size: 12px; line-height: 1.5; }}
+        .inventory-details {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; margin-top: 18px; }}
+        .inventory-details section {{ background: #fff; border: 1px solid #e1e5eb; border-radius: 6px; padding: 12px; min-width: 0; }}
+        .inventory-details h4 {{ margin: 0 0 8px; color: #475467; }}
+        .inventory-list {{ margin: 0; padding-left: 18px; overflow-wrap: anywhere; font-size: 13px; }}
+        .inventory-list li {{ margin: 6px 0; }}
+        .inventory-list small {{ display: block; color: #667085; }}
 
         .graph-container {{
             background: white;
@@ -593,6 +644,7 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
             {}
             <h3 style="margin-top: 20px; color: #555;">Configured Website Evidence</h3>
             {}
+            {}
             <h3 style="margin-top: 20px; color: #555;">Detected Software Versions</h3>
             <div class="software-list">{}</div>
         </div>
@@ -769,6 +821,7 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
         risks_html,
         inventory_cards,
         website_inventory,
+        inventory_details,
         software_html,
         safe_json_for_script(&hostname)?,
         deps_json,
@@ -837,6 +890,23 @@ mod tests {
             content_paths: vec!["/srv/site</td><script>alert(1)</script>".to_string()],
             tech_stack: vec!["nginx<bad>".to_string()],
         });
+        analysis.inventory.users = vec!["app<&>".to_string()];
+        analysis.inventory.databases = vec![InventoryConnection {
+            target: "db<prod>".to_string(),
+            port: 5432,
+            protocol: "tcp".to_string(),
+            usage_observations: 7,
+            evidence: "observed outbound connection".to_string(),
+        }];
+        analysis.inventory.storage_connections = vec![InventoryConnection {
+            target: "storage01".to_string(),
+            port: 2049,
+            protocol: "tcp".to_string(),
+            usage_observations: 2,
+            evidence: "observed outbound connection".to_string(),
+        }];
+        analysis.inventory.tech_stack = vec!["python".to_string()];
+        analysis.inventory.load_balancers = vec!["nginx".to_string()];
 
         let html = render_dashboard("db<01", &analysis).unwrap();
         assert!(html.contains("<title>Screamless: db&lt;01</title>"));
@@ -853,6 +923,15 @@ mod tests {
         assert!(html.contains("nginx&lt;bad&gt;"));
         assert!(html.contains("Activity values are socket observations, not HTTP requests"));
         assert!(html.contains("does not identify application runtimes behind a proxy"));
+        assert!(html.contains("Observed runtime users"));
+        assert!(html.contains("app&lt;&amp;&gt;"));
+        assert!(html.contains("Database/cache endpoints"));
+        assert!(html.contains("db&lt;prod&gt;:5432"));
+        assert!(html.contains("7 socket observations"));
+        assert!(html.contains("Storage endpoints"));
+        assert!(html.contains("storage01:2049"));
+        assert!(html.contains("Observed process stack"));
+        assert!(html.contains("Load-balancer candidates"));
         assert!(html.contains(
             "0 listener observed · 0 shared/unattributed · 0 no listener seen · 1 unknown · not vhost health"
         ));
