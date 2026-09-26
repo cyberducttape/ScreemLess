@@ -30,6 +30,7 @@ type ConfigDnsCache = Mutex<
 type ProcessInventory = (Vec<Process>, ProcessAttribution, Vec<SoftwareInventory>);
 
 const SLOW_REFRESH_INTERVAL: StdDuration = StdDuration::from_secs(60 * 60);
+const SLOW_REFRESH_RETRY_INTERVAL: StdDuration = StdDuration::from_secs(5 * 60);
 const SMALL_PROBE_TIMEOUT: StdDuration = StdDuration::from_secs(3);
 const INVENTORY_PROBE_TIMEOUT: StdDuration = StdDuration::from_secs(10);
 const SMALL_PROBE_OUTPUT_LIMIT: usize = 1024 * 1024;
@@ -64,9 +65,10 @@ impl Collector {
     ) -> Result<ObservationSnapshot> {
         let hostname = Self::get_hostname()?;
         let timestamp = Utc::now();
+        let slow_refresh_interval = Self::slow_refresh_interval(&state.slow_probe_statuses);
         let refresh_slow = state
             .last_slow_refresh
-            .map_or(true, |last| last.elapsed() >= SLOW_REFRESH_INTERVAL);
+            .map_or(true, |last| last.elapsed() >= slow_refresh_interval);
         let mut probe_statuses = if refresh_slow {
             ProbeStatuses::default()
         } else {
@@ -215,6 +217,19 @@ impl Collector {
             "full".to_string()
         } else {
             "restricted".to_string()
+        }
+    }
+
+    fn slow_refresh_interval(statuses: &ProbeStatuses) -> StdDuration {
+        if statuses.process_attribution.is_complete()
+            && statuses.cron.is_complete()
+            && statuses.systemd.is_complete()
+            && statuses.config_scan.is_complete()
+            && statuses.dns.is_complete()
+        {
+            SLOW_REFRESH_INTERVAL
+        } else {
+            SLOW_REFRESH_RETRY_INTERVAL
         }
     }
 
@@ -1126,8 +1141,34 @@ impl Collector {
 #[cfg(test)]
 mod tests {
     use super::Collector;
-    use crate::models::ConfigScanAudit;
+    use crate::models::{ConfigScanAudit, ProbeStatuses};
     use std::time::Duration;
+
+    #[test]
+    fn incomplete_slow_inventory_retries_before_hourly_refresh() {
+        assert_eq!(
+            Collector::slow_refresh_interval(&ProbeStatuses::default()),
+            Duration::from_secs(60 * 60)
+        );
+
+        let statuses = ProbeStatuses {
+            systemd: crate::models::ProbeStatus::failed("systemctl unavailable"),
+            ..ProbeStatuses::default()
+        };
+        assert_eq!(
+            Collector::slow_refresh_interval(&statuses),
+            Duration::from_secs(5 * 60)
+        );
+
+        let statuses = ProbeStatuses {
+            process_attribution: crate::models::ProbeStatus::partial("limited", 1),
+            ..ProbeStatuses::default()
+        };
+        assert_eq!(
+            Collector::slow_refresh_interval(&statuses),
+            Duration::from_secs(5 * 60)
+        );
+    }
 
     #[test]
     fn host_utility_resolution_accepts_only_root_owned_system_binaries() {
