@@ -150,7 +150,7 @@ impl<'a> Analyzer<'a> {
                     status: "inactive".to_string(),
                     ports: Vec::new(),
                     availability_observations: 0,
-                    inbound_connection_observations: 0,
+                    listener_activity_observations: 0,
                     content_paths: Vec::new(),
                     tech_stack: Vec::new(),
                 });
@@ -212,7 +212,7 @@ impl<'a> Analyzer<'a> {
                     // A socket port cannot identify which virtual host received
                     // the request. Do not duplicate traffic across sites sharing
                     // that port; only attribute it when the port is unambiguous.
-                    site.inbound_connection_observations += inbound_connections
+                    site.listener_activity_observations += inbound_connections
                         .iter()
                         .filter(|connection| {
                             site_port_owners.get(&connection.local_port) == Some(&1)
@@ -238,12 +238,12 @@ impl<'a> Analyzer<'a> {
                             status: "inactive".to_string(),
                             ports: Vec::new(),
                             availability_observations: 0,
-                            inbound_connection_observations: 0,
+                            listener_activity_observations: 0,
                             content_paths: Vec::new(),
                             tech_stack: Vec::new(),
                         });
                     entry.availability_observations += 1;
-                    entry.inbound_connection_observations += inbound_connections
+                    entry.listener_activity_observations += inbound_connections
                         .iter()
                         .filter(|connection| connection.local_port == service.0)
                         .count();
@@ -1269,7 +1269,7 @@ mod tests {
             probe_statuses: ProbeStatuses::default(),
         };
 
-        let inventory = Analyzer::build_inventory(&[snapshot], &[]);
+        let inventory = Analyzer::build_inventory(std::slice::from_ref(&snapshot), &[]);
         assert_eq!(inventory.websites.len(), 1);
         assert_eq!(inventory.websites[0].name, "example.com");
         assert_eq!(inventory.websites[0].status, "active");
@@ -1277,7 +1277,24 @@ mod tests {
             inventory.websites[0].content_paths,
             vec!["/srv/example/public"]
         );
-        assert_eq!(inventory.websites[0].inbound_connection_observations, 1);
+        assert_eq!(inventory.websites[0].listener_activity_observations, 1);
         assert!(inventory.users.contains(&"www-data".to_string()));
+
+        let mut shared_port_snapshot = snapshot.clone();
+        shared_port_snapshot
+            .config_references
+            .push(ConfigReference {
+                file_path: "/etc/nginx/sites-enabled/second".to_string(),
+                hostname: "second.example.com".to_string(),
+                port: None,
+                context: "nginx site; root=/srv/second/public; ports=443".to_string(),
+                config_line: None,
+            });
+        let shared_port_inventory = Analyzer::build_inventory(&[shared_port_snapshot], &[]);
+        assert_eq!(shared_port_inventory.websites.len(), 2);
+        assert!(shared_port_inventory
+            .websites
+            .iter()
+            .all(|site| site.listener_activity_observations == 0));
     }
 }

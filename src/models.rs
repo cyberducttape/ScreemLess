@@ -283,7 +283,8 @@ pub struct WebsiteInventory {
     #[serde(alias = "usage_observations")]
     pub availability_observations: usize,
     #[serde(default)]
-    pub inbound_connection_observations: usize,
+    #[serde(alias = "inbound_connection_observations")]
+    pub listener_activity_observations: usize,
     pub content_paths: Vec<String>,
     pub tech_stack: Vec<String>,
 }
