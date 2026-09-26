@@ -1008,8 +1008,6 @@ impl Collector {
     }
 
     fn collect_systemd_timers() -> Result<Vec<SystemdTimer>> {
-        let mut timers = Vec::new();
-
         let systemctl = Self::trusted_command_path("systemctl")
             .ok_or_else(|| anyhow!("No trusted systemctl utility found"))?;
         let output = Self::run_bounded_command(
@@ -1020,32 +1018,52 @@ impl Collector {
         )
         .context("Failed to run systemctl list-timers")?;
 
-        if output.status.success() {
-            let json = serde_json::from_slice::<serde_json::Value>(&output.stdout)
-                .context("systemd returned invalid JSON")?;
-            let timers_array = json
-                .as_array()
-                .or_else(|| json.get("timers").and_then(|t| t.as_array()))
-                .ok_or_else(|| anyhow!("systemd JSON did not contain a timer list"))?;
-            for timer_obj in timers_array {
-                if let Some(unit) = timer_obj.get("unit").and_then(|u| u.as_str()) {
-                    let active = timer_obj
-                        .get("active")
-                        .and_then(|a| a.as_str())
-                        .map(|a| a == "active");
-                    timers.push(SystemdTimer {
-                        name: unit.replace(".timer", ""),
-                        unit: unit.to_string(),
-                        enabled: None,
-                        active,
-                    });
-                }
-            }
-        } else {
+        if !output.status.success() {
             return Err(anyhow!("systemctl list-timers exited unsuccessfully"));
         }
 
-        Ok(timers)
+        Self::parse_systemd_timers_json(&output.stdout)
+            .context("Failed to parse systemd timer inventory")
+    }
+
+    fn parse_systemd_timers_json(bytes: &[u8]) -> Result<Vec<SystemdTimer>> {
+        let json = serde_json::from_slice::<serde_json::Value>(bytes)
+            .context("systemd returned invalid JSON")?;
+        let timers_array = json
+            .as_array()
+            .or_else(|| json.get("timers").and_then(|t| t.as_array()))
+            .ok_or_else(|| anyhow!("systemd JSON did not contain a timer list"))?;
+
+        timers_array
+            .iter()
+            .enumerate()
+            .map(|(index, timer_obj)| {
+                if !timer_obj.is_object() {
+                    return Err(anyhow!("timer entry {index} was not an object"));
+                }
+                let unit = timer_obj
+                    .get("unit")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|unit| !unit.trim().is_empty())
+                    .ok_or_else(|| anyhow!("timer entry {index} had no valid unit"))?;
+                let name = unit
+                    .strip_suffix(".timer")
+                    .filter(|name| !name.is_empty())
+                    .ok_or_else(|| anyhow!("timer entry {index} had an invalid unit name"))?;
+                let active = match timer_obj.get("active").and_then(serde_json::Value::as_str) {
+                    Some("active") => Some(true),
+                    Some("inactive") => Some(false),
+                    _ => None,
+                };
+
+                Ok(SystemdTimer {
+                    name: name.to_string(),
+                    unit: unit.to_string(),
+                    enabled: None,
+                    active,
+                })
+            })
+            .collect()
     }
 
     async fn collect_dns_names(
@@ -1179,6 +1197,25 @@ mod tests {
     use super::Collector;
     use crate::models::{ConfigScanAudit, ProbeStatuses};
     use std::time::Duration;
+
+    #[test]
+    fn systemd_timer_inventory_preserves_unknown_state_and_rejects_bad_rows() {
+        let timers = Collector::parse_systemd_timers_json(
+            br#"[{"unit":"backup.timer","active":"active"},{"unit":"rotate.timer","active":"inactive"},{"unit":"unknown.timer","active":"activating"}]"#,
+        )
+        .unwrap();
+        assert_eq!(timers.len(), 3);
+        assert_eq!(timers[0].name, "backup");
+        assert_eq!(timers[0].active, Some(true));
+        assert_eq!(timers[1].active, Some(false));
+        assert_eq!(timers[2].active, None);
+        assert!(timers.iter().all(|timer| timer.enabled.is_none()));
+
+        assert!(Collector::parse_systemd_timers_json(br#"[{"active":"active"}]"#).is_err());
+        assert!(Collector::parse_systemd_timers_json(br#"[{"unit":5}]"#).is_err());
+        assert!(Collector::parse_systemd_timers_json(br#"[{"unit":"backup.service"}]"#).is_err());
+        assert!(Collector::parse_systemd_timers_json(b"not json").is_err());
+    }
 
     #[test]
     fn incomplete_slow_inventory_retries_before_hourly_refresh() {
