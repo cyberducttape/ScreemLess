@@ -53,7 +53,7 @@ pub enum Command {
 
         /// Output format (text, json)
         #[arg(short, long, default_value = "text")]
-        format: String,
+        format: OutputFormat,
     },
 
     /// Check decommission readiness
@@ -242,13 +242,13 @@ async fn observe(
     Ok(())
 }
 
-fn report(db_path: &std::path::Path, hostname: Option<String>, format: String) -> Result<()> {
+fn report(db_path: &std::path::Path, hostname: Option<String>, format: OutputFormat) -> Result<()> {
     let db = Database::new(db_path)?;
     let reporter = Reporter::new(&db);
 
-    match format.as_str() {
-        "json" => reporter.report_json(&hostname)?,
-        _ => reporter.report_text(&hostname)?,
+    match format {
+        OutputFormat::Json => reporter.report_json(&hostname)?,
+        OutputFormat::Text => reporter.report_text(&hostname)?,
     }
 
     Ok(())
@@ -673,7 +673,8 @@ fn format_duration(d: Duration) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{operation_impact_warnings, parse_duration, sampling_wait};
+    use super::{operation_impact_warnings, parse_duration, sampling_wait, Args};
+    use clap::Parser;
     use std::time::Duration;
 
     #[test]
@@ -686,6 +687,12 @@ mod tests {
     fn rejects_zero_and_overflowing_durations() {
         assert!(parse_duration("0s").is_err());
         assert!(parse_duration("999999999999999999999999d").is_err());
+    }
+
+    #[test]
+    fn report_format_is_a_validated_enum() {
+        assert!(Args::try_parse_from(["screamless", "report", "--format", "json"]).is_ok());
+        assert!(Args::try_parse_from(["screamless", "report", "--format", "yaml"]).is_err());
     }
 
     #[test]
