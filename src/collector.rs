@@ -1222,6 +1222,46 @@ mod tests {
         assert!(Collector::trusted_command_path("hostname;id").is_none());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn software_inventory_never_executes_the_observed_executable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if std::env::var_os("SCREAMLESS_REQUIRE_ROOT_TEST").is_some() {
+            // The dedicated CI invocation runs this regression under root to
+            // exercise the exact privilege boundary the collector protects.
+            assert_eq!(unsafe { libc::geteuid() }, 0);
+        }
+
+        let test_dir = std::env::temp_dir().join(format!(
+            "screamless-untrusted-software-probe-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&test_dir).unwrap();
+        let executable = test_dir.join("nginx");
+        let marker = test_dir.join("executed");
+        let marker_literal = marker.to_string_lossy().replace('\'', "'\\''");
+        std::fs::write(
+            &executable,
+            format!("#!/bin/sh\nprintf executed > '{}'\n", marker_literal),
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let inventory = Collector::collect_software_version(
+            "nginx".to_string(),
+            123,
+            executable.display().to_string(),
+        );
+
+        assert_eq!(inventory.version, None);
+        assert!(
+            !marker.exists(),
+            "inventory collection executed an observed workload binary"
+        );
+        std::fs::remove_dir_all(test_dir).unwrap();
+    }
+
     #[test]
     fn bounded_utility_runner_rejects_deadlines_and_excess_output() {
         let sleep = Collector::trusted_command_path("sleep").unwrap();

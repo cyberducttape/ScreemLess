@@ -32,6 +32,21 @@ jobs:
       - name: Run tests
         run: cargo test --locked --all-targets
 
+      - name: Verify workload version probes are safe under root
+        run: |
+          set -euo pipefail
+          test_binary=
+          for candidate in target/debug/deps/screamless-*; do
+            if [[ -x "$candidate" && ! -d "$candidate" ]]; then
+              test_binary="$candidate"
+              break
+            fi
+          done
+          test -n "$test_binary"
+          sudo -n env SCREAMLESS_REQUIRE_ROOT_TEST=1 \
+            "$test_binary" --exact \
+            collector::tests::software_inventory_never_executes_the_observed_executable
+
       - name: Audit dependencies
         uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
         with:
