@@ -853,7 +853,7 @@ impl Collector {
     fn collect_process_inventory(include_software: bool) -> Result<ProcessInventory> {
         let mut processes = Vec::new();
         let mut pid_to_process = HashMap::new();
-        let mut software_candidates = HashMap::<String, (u32, String)>::new();
+        let mut software_candidates = HashMap::<String, (u32, Option<String>)>::new();
         let mut unavailable = 0;
 
         for proc_entry in procfs::process::all_processes()? {
@@ -896,10 +896,14 @@ impl Collector {
                 (process_name.clone(), process.pid() as u32, user),
             );
             if include_software && Self::is_known_software(&process_name) {
-                if let Ok(executable) = fs::read_link(format!("/proc/{}/exe", process.pid())) {
-                    software_candidates
-                        .entry(Self::software_name(&process_name))
-                        .or_insert((process.pid() as u32, executable.display().to_string()));
+                let executable = fs::read_link(format!("/proc/{}/exe", process.pid()))
+                    .ok()
+                    .map(|path| path.display().to_string());
+                let candidate = software_candidates
+                    .entry(Self::software_name(&process_name))
+                    .or_insert((process.pid() as u32, None));
+                if executable.is_some() && candidate.1.is_none() {
+                    *candidate = (process.pid() as u32, executable);
                 }
             }
         }
@@ -958,22 +962,32 @@ impl Collector {
         }
     }
 
-    fn collect_software_version(name: String, pid: u32, executable: String) -> SoftwareInventory {
-        let executable_path = Path::new(&executable);
-        let (version, metadata_source) = Self::package_version(executable_path)
+    fn collect_software_version(
+        name: String,
+        pid: u32,
+        executable: Option<String>,
+    ) -> SoftwareInventory {
+        let (version, metadata_source) = executable
+            .as_deref()
+            .map(Path::new)
+            .and_then(Self::package_version)
             .map(|(version, source)| (Some(version), Some(source)))
             .unwrap_or((None, None));
-        let evidence = match metadata_source {
-            Some(source) => format!("{} for process {}", source, pid),
-            None => format!(
-                "observed process {}; trusted package metadata unavailable",
-                pid
-            ),
+        let evidence = if executable.is_none() {
+            format!("observed process {}; executable path unavailable", pid)
+        } else {
+            match metadata_source {
+                Some(source) => format!("{} for process {}", source, pid),
+                None => format!(
+                    "observed process {}; trusted package metadata unavailable",
+                    pid
+                ),
+            }
         };
         SoftwareInventory {
             name,
             version,
-            executable: Some(executable),
+            executable,
             evidence,
             observations: 1,
         }
@@ -1523,7 +1537,7 @@ mod tests {
         let inventory = Collector::collect_software_version(
             "nginx".to_string(),
             123,
-            executable.display().to_string(),
+            Some(executable.display().to_string()),
         );
 
         assert_eq!(inventory.version, None);
@@ -1532,6 +1546,16 @@ mod tests {
             "inventory collection executed an observed workload binary"
         );
         std::fs::remove_dir_all(test_dir).unwrap();
+    }
+
+    #[test]
+    fn software_inventory_keeps_process_when_executable_path_is_unavailable() {
+        let inventory = Collector::collect_software_version("postgresql".to_string(), 42, None);
+
+        assert_eq!(inventory.name, "postgresql");
+        assert_eq!(inventory.version, None);
+        assert_eq!(inventory.executable, None);
+        assert!(inventory.evidence.contains("executable path unavailable"));
     }
 
     #[test]

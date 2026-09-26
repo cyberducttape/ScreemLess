@@ -10,6 +10,8 @@
   inventory counts, with explicit evidence-scope notes.
 - Include common PostgreSQL, MySQL-compatible, MariaDB, MongoDB, Redis,
   Memcached, and SQL Server processes in package-metadata software inventory.
+- Preserve recognized software processes in inventory when `/proc/PID/exe`
+  cannot be read, marking the version unavailable instead of omitting evidence.
 - Apply Nginx's default HTTP port to server blocks without `listen` directives
   so virtual hosts sharing the implicit listener are not treated as independent.
 - Count inaccessible `/proc` process entries as incomplete attribution while
