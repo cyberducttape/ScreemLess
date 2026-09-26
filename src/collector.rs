@@ -924,7 +924,9 @@ impl Collector {
         let name = process_name.to_ascii_lowercase();
         match name.as_str() {
             "node" | "nodejs" | "python" | "python3" | "gunicorn" | "uwsgi" | "caddy"
-            | "traefik" | "nginx" | "apache2" | "httpd" | "haproxy" | "php" => true,
+            | "traefik" | "nginx" | "apache2" | "httpd" | "haproxy" | "php" | "postgres"
+            | "mysqld" | "mariadbd" | "mongod" | "mongos" | "redis-server" | "memcached"
+            | "sqlservr" => true,
             _ => name.starts_with("python3.") || name.starts_with("php-fpm"),
         }
     }
@@ -939,6 +941,18 @@ impl Collector {
             "node".to_string()
         } else if name == "apache2" || name == "httpd" {
             "apache".to_string()
+        } else if name == "postgres" {
+            "postgresql".to_string()
+        } else if name == "mysqld" {
+            "mysql-compatible database".to_string()
+        } else if name == "mariadbd" {
+            "mariadb".to_string()
+        } else if name == "mongod" || name == "mongos" {
+            "mongodb".to_string()
+        } else if name == "redis-server" {
+            "redis".to_string()
+        } else if name == "sqlservr" {
+            "sql-server".to_string()
         } else {
             name
         }
@@ -1442,6 +1456,26 @@ mod tests {
         assert_eq!(status.unavailable, 5);
         assert!(status.details.unwrap().contains("2 entry/entries"));
         assert!(Collector::process_attribution_status(0, 0, None).is_none());
+    }
+
+    #[test]
+    fn software_inventory_recognizes_common_database_server_processes() {
+        for process in [
+            "postgres",
+            "mysqld",
+            "mariadbd",
+            "mongod",
+            "mongos",
+            "redis-server",
+            "memcached",
+            "sqlservr",
+        ] {
+            assert!(Collector::is_known_software(process), "{process}");
+        }
+        assert_eq!(Collector::software_name("postgres"), "postgresql");
+        assert_eq!(Collector::software_name("mariadbd"), "mariadb");
+        assert_eq!(Collector::software_name("mongod"), "mongodb");
+        assert_eq!(Collector::software_name("redis-server"), "redis");
     }
 
     #[test]

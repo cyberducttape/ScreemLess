@@ -8,6 +8,8 @@
 - Show the observed users, inferred database/cache and storage endpoints,
   process stack, and config-backed load-balancer candidates behind the dashboard
   inventory counts, with explicit evidence-scope notes.
+- Include common PostgreSQL, MySQL-compatible, MariaDB, MongoDB, Redis,
+  Memcached, and SQL Server processes in package-metadata software inventory.
 - Apply Nginx's default HTTP port to server blocks without `listen` directives
   so virtual hosts sharing the implicit listener are not treated as independent.
 - Count inaccessible `/proc` process entries as incomplete attribution while
