@@ -87,6 +87,41 @@ jobs:
           sudo install -m 0755 target/release/screamless /usr/local/bin/screamless
           systemd-analyze verify packaging/screamless-agent.service
 
+  dashboard-browser:
+    name: Dashboard drag interaction (Chromium and Firefox)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # stable
+        with:
+          toolchain: 1.96.0
+
+      - name: Install browser-test dependencies
+        run: npm ci
+
+      - name: Audit browser-test dependencies
+        run: npm audit --audit-level=high
+
+      - name: Install Chromium and Firefox
+        run: npx playwright install --with-deps chromium firefox
+
+      - name: Build dashboard CLI
+        run: cargo build --locked --bin screamless
+
+      - name: Exercise graph drag in both browsers
+        run: SCREAMLESS_BIN=target/debug/screamless npm run test:browser
+
   msrv:
     name: MSRV (Rust 1.70)
     runs-on: ubuntu-24.04

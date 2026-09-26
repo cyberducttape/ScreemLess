@@ -347,6 +347,11 @@ Pull requests are expected to pass formatting, Clippy with warnings denied,
 all tests, and a locked release build. Generated databases and dashboards are
 written with owner-only permissions and dashboard writes are atomic.
 
+The dashboard drag interaction also has Chromium and Firefox browser tests.
+Run them locally with `npm ci`, `npx playwright install chromium firefox`,
+`cargo build --locked --bin screamless`, and
+`SCREAMLESS_BIN=target/debug/screamless npm run test:browser`.
+
 ## License
 
 MIT
