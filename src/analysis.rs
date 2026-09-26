@@ -45,30 +45,29 @@ impl<'a> Analyzer<'a> {
     ) -> Result<HashMap<String, AnalysisResult>> {
         let since = Utc::now() - Duration::hours(hours as i64);
         let all_snapshots = self.db.get_all_snapshots_since(since.timestamp_millis())?;
+        let (inbound_graph, ambiguous_endpoints) =
+            Self::build_inbound_dependency_graph(&all_snapshots);
         let mut by_host = HashMap::<String, Vec<ObservationSnapshot>>::new();
-        for snapshot in &all_snapshots {
+        for snapshot in all_snapshots {
             by_host
                 .entry(snapshot.hostname.clone())
                 .or_default()
-                .push(snapshot.clone());
+                .push(snapshot);
         }
-        let (inbound_graph, ambiguous_endpoints) =
-            Self::build_inbound_dependency_graph(&all_snapshots);
 
-        hostnames
-            .iter()
-            .map(|hostname| {
-                let snapshots = by_host.get(hostname).cloned().unwrap_or_default();
-                self.analyze_from_snapshots(
-                    hostname,
-                    hours,
-                    snapshots,
-                    &inbound_graph,
-                    &ambiguous_endpoints,
-                )
-                .map(|analysis| (hostname.clone(), analysis))
-            })
-            .collect()
+        let mut analyses = HashMap::with_capacity(hostnames.len());
+        for hostname in hostnames {
+            let snapshots = by_host.remove(hostname).unwrap_or_default();
+            let analysis = self.analyze_from_snapshots(
+                hostname,
+                hours,
+                snapshots,
+                &inbound_graph,
+                &ambiguous_endpoints,
+            )?;
+            analyses.insert(hostname.clone(), analysis);
+        }
+        Ok(analyses)
     }
 
     fn analyze_from_snapshots(
