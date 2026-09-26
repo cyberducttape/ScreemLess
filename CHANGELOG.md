@@ -14,6 +14,8 @@
   configs and use each database's protocol default or configured listener port.
 - Read MySQL/MariaDB bind and port settings only from server option groups, not
   client-only groups.
+- Keep database server listener settings from falsely corroborating outbound
+  dependency edges.
 - Preserve recognized software processes in inventory when `/proc/PID/exe`
   cannot be read, marking the version unavailable instead of omitting evidence.
 - Apply Nginx's default HTTP port to server blocks without `listen` directives

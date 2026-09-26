@@ -967,6 +967,9 @@ impl<'a> Analyzer<'a> {
         for reference in snapshots
             .iter()
             .flat_map(|snapshot| snapshot.config_references.iter())
+            // Server bind settings describe local listeners, not dependencies
+            // consumed by this host. They must not corroborate outbound edges.
+            .filter(|reference| reference.context != "Database bind address")
         {
             let key = (
                 reference.file_path.clone(),
@@ -1781,6 +1784,40 @@ mod tests {
             privileges: "full".to_string(),
             probe_statuses: ProbeStatuses::default(),
         }
+    }
+
+    #[test]
+    fn database_listener_config_does_not_corroborate_outbound_dependencies() {
+        let mut snapshot = test_snapshot(Utc::now());
+        snapshot.network_connections.push(NetworkConnection {
+            local_addr: "10.0.0.1".to_string(),
+            local_port: 45000,
+            remote_addr: "192.0.2.45".to_string(),
+            remote_port: 3306,
+            protocol: "tcp".to_string(),
+            state: "ESTABLISHED".to_string(),
+            pid: 7,
+            process_name: "worker".to_string(),
+        });
+        snapshot.config_references.push(ConfigReference {
+            file_path: "/etc/mysql/my.cnf".to_string(),
+            hostname: "192.0.2.45".to_string(),
+            port: Some(3306),
+            context: "Database bind address".to_string(),
+            config_line: None,
+        });
+
+        let db = Database::new(":memory:").unwrap();
+        let dependencies = Analyzer::new(&db)
+            .infer_dependencies(&[snapshot], &std::collections::HashMap::new())
+            .unwrap();
+
+        assert_eq!(dependencies.len(), 1);
+        assert!(dependencies[0].config_references.is_empty());
+        assert!(!dependencies[0]
+            .evidence
+            .iter()
+            .any(|evidence| evidence.description.contains("config files")));
     }
 
     #[test]
