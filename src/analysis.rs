@@ -1026,18 +1026,35 @@ impl<'a> Analyzer<'a> {
         now: DateTime<Utc>,
         requested_window_hours: u32,
     ) -> ObservationCoverage {
-        let actual_span_seconds = snapshots
-            .first()
-            .zip(snapshots.last())
-            .map(|(first, last)| (last.timestamp - first.timestamp).num_seconds().max(0))
+        let requested_seconds = i64::from(requested_window_hours.max(1)) * 3600;
+        let window_start = now - Duration::seconds(requested_seconds);
+        let timestamps = snapshots
+            .iter()
+            .map(|snapshot| snapshot.timestamp)
+            .filter(|timestamp| *timestamp >= window_start && *timestamp <= now)
+            .collect::<Vec<_>>();
+        let first_observation = timestamps.iter().min().copied();
+        let last_observation = timestamps.iter().max().copied();
+        let actual_span_seconds = first_observation
+            .zip(last_observation)
+            .map(|(first, last)| (last - first).num_seconds().max(0))
             .unwrap_or(0);
         let interval_seconds = Self::estimated_interval_seconds(snapshots);
-        let requested_seconds = i64::from(requested_window_hours.max(1)) * 3600;
         let expected_samples =
             ((requested_seconds as f64 / interval_seconds as f64).ceil() as usize).max(1);
-        let successful_samples = snapshots.len();
-        let coverage_percent =
+        let mut occupied_buckets = HashSet::new();
+        for timestamp in &timestamps {
+            let offset_seconds = (*timestamp - window_start).num_seconds().max(0);
+            let bucket =
+                (offset_seconds / interval_seconds).min(expected_samples.saturating_sub(1) as i64);
+            occupied_buckets.insert(bucket);
+        }
+        let successful_samples = occupied_buckets.len();
+        let sample_coverage =
             ((successful_samples as f64 / expected_samples as f64) * 100.0).min(100.0);
+        let span_coverage =
+            ((actual_span_seconds as f64 / requested_seconds as f64) * 100.0).min(100.0);
+        let coverage_percent = sample_coverage.min(span_coverage);
 
         let probe_names = [
             "network_sockets",
@@ -1072,8 +1089,8 @@ impl<'a> Analyzer<'a> {
         if coverage_percent < 90.0 {
             remaining_unknowns.push("observation window is not sufficiently covered".to_string());
         }
-        let last_observation_fresh = if let Some(last) = snapshots.last() {
-            let age_seconds = (now - last.timestamp).num_seconds();
+        let last_observation_fresh = if let Some(last) = last_observation {
+            let age_seconds = (now - last).num_seconds();
             if age_seconds < 0 {
                 remaining_unknowns.push("last observation timestamp is in the future".to_string());
                 false
@@ -1123,7 +1140,7 @@ impl<'a> Analyzer<'a> {
             expected_samples,
             successful_samples,
             coverage_percent,
-            last_observation: snapshots.last().map(|snapshot| snapshot.timestamp),
+            last_observation,
             probe_coverage,
             privileges,
             evidence_quality: evidence_quality.to_string(),
@@ -1278,6 +1295,34 @@ mod tests {
             .remaining_unknowns
             .iter()
             .any(|unknown| unknown.contains("last observation is")));
+    }
+
+    #[test]
+    fn clustered_samples_cannot_substitute_for_temporal_coverage() {
+        let now = Utc::now();
+        let snapshots = (0..60)
+            .map(|_| test_snapshot(now - chrono::Duration::minutes(30)))
+            .collect::<Vec<_>>();
+
+        let coverage = Analyzer::build_observation_coverage(&snapshots, now, 1);
+        assert_eq!(coverage.expected_samples, 60);
+        assert_eq!(coverage.successful_samples, 1);
+        assert!(coverage.coverage_percent < 2.0);
+        assert_eq!(coverage.evidence_quality, "LOW");
+    }
+
+    #[test]
+    fn full_window_samples_receive_full_temporal_coverage() {
+        let now = Utc::now();
+        let snapshots = (0..=60)
+            .map(|minute| test_snapshot(now - chrono::Duration::minutes(60 - minute)))
+            .collect::<Vec<_>>();
+
+        let coverage = Analyzer::build_observation_coverage(&snapshots, now, 1);
+        assert_eq!(coverage.expected_samples, 60);
+        assert_eq!(coverage.successful_samples, 60);
+        assert_eq!(coverage.coverage_percent, 100.0);
+        assert_eq!(coverage.evidence_quality, "HIGH");
     }
 
     #[test]
