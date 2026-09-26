@@ -333,12 +333,18 @@ impl Collector {
         timeout: StdDuration,
         output_limit: usize,
     ) -> io::Result<Output> {
-        let mut child = Command::new(executable)
+        let mut command = Command::new(executable);
+        command
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
+            .stderr(Stdio::piped());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        let mut child = command.spawn()?;
         let stdout = child.stdout.take().ok_or_else(|| {
             io::Error::new(io::ErrorKind::Other, "child stdout pipe was not created")
         })?;
@@ -354,13 +360,13 @@ impl Collector {
                 Ok(Some(status)) => break (status, false),
                 Ok(None) => {}
                 Err(error) => {
-                    let _ = child.kill();
+                    let _ = Self::kill_command_process_group(&mut child);
                     let _ = child.wait();
                     return Err(error);
                 }
             }
             if started.elapsed() >= timeout {
-                if let Err(error) = child.kill() {
+                if let Err(error) = Self::kill_command_process_group(&mut child) {
                     let _ = child.wait();
                     return Err(error);
                 }
@@ -368,6 +374,11 @@ impl Collector {
             }
             thread::sleep(StdDuration::from_millis(10));
         };
+
+        // A utility may exit after spawning descendants that inherited its
+        // output pipes. They belong to this bounded invocation; terminate the
+        // process group before joining readers so they cannot hang collection.
+        let _ = Self::kill_command_process_group(&mut child);
 
         let (stdout, stdout_truncated) = stdout_reader
             .join()
@@ -394,6 +405,28 @@ impl Collector {
             stdout,
             stderr,
         })
+    }
+
+    fn kill_command_process_group(child: &mut std::process::Child) -> io::Result<()> {
+        #[cfg(unix)]
+        {
+            let process_group = -(child.id() as libc::pid_t);
+            // SAFETY: kill is called with the process group created for this
+            // child by CommandExt::process_group(0); no memory is accessed.
+            let result = unsafe { libc::kill(process_group, libc::SIGKILL) };
+            if result == 0 {
+                return Ok(());
+            }
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::NotFound {
+                return Ok(());
+            }
+            return Err(error);
+        }
+        #[cfg(not(unix))]
+        {
+            child.kill()
+        }
     }
 
     fn read_limited<R: Read>(mut reader: R, limit: usize) -> io::Result<(Vec<u8>, bool)> {
@@ -1312,6 +1345,26 @@ mod tests {
             Collector::run_bounded_command(printf, &["12345"], Duration::from_secs(1), 4)
                 .unwrap_err();
         assert_eq!(oversized.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_utility_runner_terminates_descendants_holding_output_pipes() {
+        let shell = Collector::trusted_command_path("sh").unwrap();
+        let started = std::time::Instant::now();
+        let output = Collector::run_bounded_command(
+            shell,
+            &["-c", "sleep 30 & exit 0"],
+            Duration::from_secs(2),
+            1024,
+        )
+        .unwrap();
+
+        assert!(output.status.success());
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "command runner waited for a descendant to close inherited pipes"
+        );
     }
 
     #[test]
