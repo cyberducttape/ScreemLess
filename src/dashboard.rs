@@ -29,7 +29,6 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
     let deps_json = safe_json_for_script(&analysis.dependencies)?;
     let risks_json = safe_json_for_script(&analysis.risks)?;
     let hostname_html = escape_html(hostname);
-    let readiness = analysis.decommission_confidence;
     let blocking_risks = analysis.risks.iter().any(|risk| {
         matches!(
             risk.severity,
@@ -44,18 +43,18 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
         analysis.decommission_confidence,
         blocking_risks,
     );
-    let (readiness_class, readiness_status) = match decommission_status {
+    let (conclusion_class, operational_conclusion) = match decommission_status {
         0 => (
-            "ready",
-            "NO HIGH-CONFIDENCE ACTIVITY DETECTED in collected evidence — this is not proof of absence; validate with service owners.",
+            "conclusion-clear",
+            "No high-confidence activity detected in the collected evidence. This is not proof of absence; validate with service owners before acting.",
         ),
         2 => (
-            "caution",
-            "ACTIVITY OR BLOCKING RISKS DETECTED — decommissioning is blocked pending investigation.",
+            "conclusion-blocked",
+            "Activity or blocking risks detected. Treat decommissioning as blocked pending investigation.",
         ),
         _ => (
-            "not-ready",
-            "INSUFFICIENT EVIDENCE — do not interpret this score as clearance.",
+            "conclusion-unknown",
+            "Insufficient evidence to assess decommissioning. Do not interpret missing observations as clearance.",
         ),
     };
 
@@ -259,42 +258,31 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
             opacity: 0.9;
         }}
 
-        .readiness-banner {{
-            background: white;
-            padding: 20px;
-            text-align: center;
-            border-bottom: 3px solid #ddd;
+        .operational-conclusion {{
+            margin: 0 30px;
+            padding: 16px 20px;
+            border-left: 4px solid #8792a2;
+            background: #fff;
         }}
 
-        .readiness-score {{
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            width: 120px;
-            height: 120px;
-            border-radius: 50%;
-            font-size: 48px;
-            font-weight: bold;
-            color: white;
-            margin: 0 auto 10px;
-        }}
-
-        .readiness-score.ready {{
-            background: #4CAF50;
-        }}
-
-        .readiness-score.caution {{
-            background: #FF9800;
-        }}
-
-        .readiness-score.not-ready {{
-            background: #F44336;
+        .operational-conclusion h2 {{
+            margin: 0 0 6px;
+            font-size: 15px;
+            color: #394150;
         }}
 
         .readiness-status {{
-            font-size: 18px;
-            font-weight: 600;
-            color: #333;
+            margin: 0;
+            font-size: 14px;
+            line-height: 1.5;
+        }}
+
+        .conclusion-clear {{ border-color: #37845b; }}
+        .conclusion-blocked {{ border-color: #c27b21; }}
+        .conclusion-unknown {{ border-color: #bd4545; }}
+
+        @media (max-width: 600px) {{
+            .operational-conclusion {{ margin: 0 15px; }}
         }}
 
         .main-content {{
@@ -490,11 +478,9 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
             {}
         </div>
 
-        <div class="readiness-banner">
-            <div class="readiness-score {}">{}</div>
-            <div class="readiness-status">
-                {}
-            </div>
+        <div class="operational-conclusion {}">
+            <h2>Decommission evidence conclusion</h2>
+            <p class="readiness-status">{}</p>
         </div>
         <div class="coverage-summary">{}</div>
 
@@ -696,9 +682,8 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
         analysis.coverage.coverage_percent,
         escape_html(&analysis.coverage.evidence_quality),
         evidence_rows,
-        readiness_class,
-        readiness,
-        readiness_status,
+        conclusion_class,
+        operational_conclusion,
         coverage_summary,
         deps_html,
         total_deps,
@@ -768,8 +753,9 @@ mod tests {
         let html = render_dashboard("db<01", &analysis).unwrap();
         assert!(html.contains("<title>Screamless: db&lt;01</title>"));
         assert!(html.contains("<p>Server: <strong>db&lt;01</strong></p>"));
-        assert!(html.contains("<div class=\"readiness-score caution\">85</div>"));
-        assert!(html.contains("ACTIVITY OR BLOCKING RISKS DETECTED"));
+        assert!(html.contains("<div class=\"operational-conclusion conclusion-blocked\">"));
+        assert!(html.contains("Activity or blocking risks detected"));
+        assert!(!html.contains("readiness-score"));
         assert!(html.contains("Systemd timers"));
         assert!(html.contains("const dependencies = [{"));
         assert!(html.contains("const risks = [{"));
@@ -784,7 +770,9 @@ mod tests {
         analysis.coverage.evidence_quality = "LOW".to_string();
         analysis.decommission_confidence = 100;
         let low_evidence_html = render_dashboard("db01", &analysis).unwrap();
-        assert!(low_evidence_html.contains("<div class=\"readiness-score not-ready\">100</div>"));
-        assert!(low_evidence_html.contains("INSUFFICIENT EVIDENCE"));
+        assert!(
+            low_evidence_html.contains("<div class=\"operational-conclusion conclusion-unknown\">")
+        );
+        assert!(low_evidence_html.contains("Insufficient evidence to assess decommissioning"));
     }
 }
