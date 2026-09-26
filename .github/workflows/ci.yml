@@ -31,9 +31,11 @@ jobs:
           bash -n install.sh tests/service_activation.sh
           bash -n packaging/render-service-unit.sh
           bash -n packaging/validate-service-install-dir.sh
+          bash -n packaging/verify-release-version.sh tests/release_metadata.sh
           sh -n packaging/postinstall.sh packaging/service-activation.sh
           bash tests/service_activation.sh
           bash tests/installer_service_path.sh
+          bash tests/release_metadata.sh
 
       - name: Run Clippy
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
