@@ -728,12 +728,9 @@ impl ConfigScanner {
                 let canonical = path
                     .canonicalize()
                     .with_context(|| format!("Unable to resolve config path {}", path.display()))?;
-                let disabled = path
-                    .components()
-                    .chain(canonical.components())
-                    .any(|component| {
-                        component.as_os_str() == std::ffi::OsStr::new("sites-available")
-                    });
+                let disabled = path.components().any(|component| {
+                    component.as_os_str() == std::ffi::OsStr::new("sites-available")
+                });
                 if canonical.starts_with(boundary) && canonical.is_file() && !disabled {
                     files.push(canonical);
                 }
@@ -952,6 +949,7 @@ impl ConfigScanner {
 #[cfg(test)]
 mod tests {
     use super::ConfigScanner;
+    use std::fs;
     use std::path::Path;
 
     #[test]
@@ -1074,6 +1072,40 @@ mod tests {
                 && reference.port == Some(8080)
                 && reference.context == "caddy reverse_proxy"
         }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nginx_tree_includes_enabled_sites_but_excludes_disabled_and_external_files() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "screamless-nginx-symlink-test-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let available = root.join("sites-available");
+        let enabled = root.join("sites-enabled");
+        let outside = root.with_extension("outside");
+        fs::create_dir_all(&available).unwrap();
+        fs::create_dir_all(&enabled).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let active_config = available.join("active.conf");
+        let disabled_config = available.join("disabled.conf");
+        let external_config = outside.join("external.conf");
+        fs::write(&active_config, "server {}").unwrap();
+        fs::write(&disabled_config, "server {}").unwrap();
+        fs::write(&external_config, "server {}").unwrap();
+        symlink(&active_config, enabled.join("active.conf")).unwrap();
+        symlink(&external_config, enabled.join("external.conf")).unwrap();
+
+        let files = ConfigScanner::config_files_under(&root).unwrap();
+        assert!(files.contains(&active_config.canonicalize().unwrap()));
+        assert!(!files.contains(&disabled_config.canonicalize().unwrap()));
+        assert!(!files.contains(&external_config.canonicalize().unwrap()));
+
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(outside).unwrap();
     }
 
     #[test]
