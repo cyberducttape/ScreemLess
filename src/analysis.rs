@@ -1452,9 +1452,20 @@ impl<'a> Analyzer<'a> {
             .ceil() as usize)
             .max(1);
         let slow_inventory_refreshes = slow_inventory_samples.len();
-        let slow_inventory_coverage_percent =
-            ((slow_inventory_refreshes as f64 / expected_slow_inventory_refreshes as f64) * 100.0)
-                .min(100.0);
+        let slow_inventory_covered_intervals = slow_inventory_samples
+            .iter()
+            .map(|snapshot| {
+                let offset_seconds = (snapshot.timestamp - window_start).num_seconds().max(0);
+                (offset_seconds / SLOW_INVENTORY_REFRESH_INTERVAL_SECONDS)
+                    .min(expected_slow_inventory_refreshes.saturating_sub(1) as i64)
+                    as usize
+            })
+            .collect::<HashSet<_>>()
+            .len();
+        let slow_inventory_coverage_percent = ((slow_inventory_covered_intervals as f64
+            / expected_slow_inventory_refreshes as f64)
+            * 100.0)
+            .min(100.0);
         let last_slow_inventory_refresh = slow_inventory_samples
             .iter()
             .map(|snapshot| snapshot.timestamp)
@@ -1541,8 +1552,8 @@ impl<'a> Analyzer<'a> {
         };
         if slow_inventory_coverage_percent < 90.0 {
             remaining_unknowns.push(format!(
-                "slow inventory refreshed {} of {} expected times",
-                slow_inventory_refreshes, expected_slow_inventory_refreshes
+                "slow inventory covered {} of {} expected hourly intervals",
+                slow_inventory_covered_intervals, expected_slow_inventory_refreshes
             ));
         }
 
@@ -1590,6 +1601,7 @@ impl<'a> Analyzer<'a> {
             coverage_percent,
             last_observation,
             expected_slow_inventory_refreshes,
+            slow_inventory_covered_intervals,
             slow_inventory_refreshes,
             slow_inventory_coverage_percent,
             last_slow_inventory_refresh,
@@ -1816,6 +1828,7 @@ mod tests {
         let sparse_coverage = Analyzer::build_observation_coverage(&snapshots, now, 168);
         assert_eq!(sparse_coverage.expected_slow_inventory_refreshes, 168);
         assert_eq!(sparse_coverage.slow_inventory_refreshes, 1);
+        assert_eq!(sparse_coverage.slow_inventory_covered_intervals, 1);
         assert!(sparse_coverage.slow_inventory_coverage_percent < 1.0);
         assert_eq!(sparse_coverage.probe_coverage["dns"], 100.0);
         assert_eq!(sparse_coverage.evidence_quality, "LOW");
@@ -1825,8 +1838,28 @@ mod tests {
         }
         let hourly_coverage = Analyzer::build_observation_coverage(&snapshots, now, 168);
         assert_eq!(hourly_coverage.slow_inventory_refreshes, 168);
+        assert_eq!(hourly_coverage.slow_inventory_covered_intervals, 168);
         assert_eq!(hourly_coverage.slow_inventory_coverage_percent, 100.0);
         assert_eq!(hourly_coverage.evidence_quality, "HIGH");
+    }
+
+    #[test]
+    fn clustered_slow_inventory_refreshes_cannot_claim_weeklong_coverage() {
+        let now = Utc::now();
+        let snapshots = (0..168)
+            .map(|minute| {
+                let mut snapshot =
+                    test_snapshot(now - chrono::Duration::minutes(i64::from(167 - minute)));
+                snapshot.slow_inventory_refreshed = Some(true);
+                snapshot
+            })
+            .collect::<Vec<_>>();
+
+        let coverage = Analyzer::build_observation_coverage(&snapshots, now, 168);
+        assert_eq!(coverage.slow_inventory_refreshes, 168);
+        assert_eq!(coverage.slow_inventory_covered_intervals, 3);
+        assert!(coverage.slow_inventory_coverage_percent < 2.0);
+        assert_eq!(coverage.evidence_quality, "LOW");
     }
 
     #[test]

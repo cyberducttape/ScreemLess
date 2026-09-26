@@ -240,10 +240,11 @@ impl<'a> Reporter<'a> {
             coverage.expected_samples, coverage.successful_samples, coverage.coverage_percent
         );
         println!(
-            "  Slow inventory refreshes: {} / {} expected ({:.1}%)",
-            coverage.slow_inventory_refreshes,
+            "  Slow inventory: {} / {} hourly intervals covered ({:.1}%; {} refreshes observed)",
+            coverage.slow_inventory_covered_intervals,
             coverage.expected_slow_inventory_refreshes,
-            coverage.slow_inventory_coverage_percent
+            coverage.slow_inventory_coverage_percent,
+            coverage.slow_inventory_refreshes,
         );
         if let Some(last_refresh) = coverage.last_slow_inventory_refresh {
             println!(

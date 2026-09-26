@@ -278,6 +278,8 @@ pub struct ObservationCoverage {
     #[serde(default)]
     pub expected_slow_inventory_refreshes: usize,
     #[serde(default)]
+    pub slow_inventory_covered_intervals: usize,
+    #[serde(default)]
     pub slow_inventory_refreshes: usize,
     #[serde(default)]
     pub slow_inventory_coverage_percent: f64,

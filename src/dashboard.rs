@@ -122,14 +122,15 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
     .collect::<Vec<_>>()
     .join("");
     let coverage_summary = format!(
-        "Evidence quality: {} · Observation coverage: {:.2}% · {} successful / {} expected samples · Slow inventory: {:.1}% ({}/{} refreshes), last refreshed {} ago · Privileges: {}",
+        "Evidence quality: {} · Observation coverage: {:.2}% · {} successful / {} expected samples · Slow inventory: {:.1}% ({}/{} hourly intervals covered; {} refreshes), last refreshed {} ago · Privileges: {}",
         escape_html(&analysis.coverage.evidence_quality),
         analysis.coverage.coverage_percent,
         analysis.coverage.successful_samples,
         analysis.coverage.expected_samples,
         analysis.coverage.slow_inventory_coverage_percent,
-        analysis.coverage.slow_inventory_refreshes,
+        analysis.coverage.slow_inventory_covered_intervals,
         analysis.coverage.expected_slow_inventory_refreshes,
+        analysis.coverage.slow_inventory_refreshes,
         escape_html(&slow_inventory_freshness),
         escape_html(&analysis.coverage.privileges)
     );
