@@ -2,9 +2,11 @@ use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use std::collections::HashMap;
 use std::fs;
+use std::io::{self, Read};
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::sync::{Mutex, OnceLock};
+use std::thread;
 use std::time::{Duration as StdDuration, Instant};
 
 use crate::config_scanner::ConfigScanner;
@@ -28,6 +30,10 @@ type ConfigDnsCache = Mutex<
 type ProcessInventory = (Vec<Process>, ProcessAttribution, Vec<SoftwareInventory>);
 
 const SLOW_REFRESH_INTERVAL: StdDuration = StdDuration::from_secs(60 * 60);
+const SMALL_PROBE_TIMEOUT: StdDuration = StdDuration::from_secs(3);
+const INVENTORY_PROBE_TIMEOUT: StdDuration = StdDuration::from_secs(10);
+const SMALL_PROBE_OUTPUT_LIMIT: usize = 1024 * 1024;
+const SOCKET_PROBE_OUTPUT_LIMIT: usize = 16 * 1024 * 1024;
 
 /// State carried between observations so slow-changing inventory is refreshed
 /// hourly instead of being recollected on every network/process sample.
@@ -177,10 +183,14 @@ impl Collector {
             .or_else(|_| {
                 let executable = Self::trusted_command_path("hostname")
                     .ok_or_else(|| anyhow!("No trusted hostname utility found"))?;
-                Command::new(executable)
-                    .output()
-                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                    .context("Failed to get hostname")
+                Self::run_bounded_command(
+                    executable,
+                    &[],
+                    SMALL_PROBE_TIMEOUT,
+                    SMALL_PROBE_OUTPUT_LIMIT,
+                )
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .context("Failed to get hostname")
             })
             .context("Could not determine hostname")
     }
@@ -251,12 +261,104 @@ impl Collector {
 
     fn command_text(command: &str, args: &[&str]) -> Option<String> {
         let executable = Self::trusted_command_path(command)?;
-        let output = Command::new(executable).args(args).output().ok()?;
+        let output = Self::run_bounded_command(
+            executable,
+            args,
+            SMALL_PROBE_TIMEOUT,
+            SMALL_PROBE_OUTPUT_LIMIT,
+        )
+        .ok()?;
         if !output.status.success() {
             return None;
         }
         let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
         (!value.is_empty()).then_some(value)
+    }
+
+    fn run_bounded_command(
+        executable: std::path::PathBuf,
+        args: &[&str],
+        timeout: StdDuration,
+        output_limit: usize,
+    ) -> io::Result<Output> {
+        let mut child = Command::new(executable)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::Other, "child stdout pipe was not created")
+        })?;
+        let stderr = child.stderr.take().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::Other, "child stderr pipe was not created")
+        })?;
+        let stdout_reader = thread::spawn(move || Self::read_limited(stdout, output_limit));
+        let stderr_reader = thread::spawn(move || Self::read_limited(stderr, output_limit));
+
+        let started = Instant::now();
+        let (status, timed_out) = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break (status, false),
+                Ok(None) => {}
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(error);
+                }
+            }
+            if started.elapsed() >= timeout {
+                if let Err(error) = child.kill() {
+                    let _ = child.wait();
+                    return Err(error);
+                }
+                break (child.wait()?, true);
+            }
+            thread::sleep(StdDuration::from_millis(10));
+        };
+
+        let (stdout, stdout_truncated) = stdout_reader
+            .join()
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "stdout reader thread panicked"))??;
+        let (stderr, stderr_truncated) = stderr_reader
+            .join()
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "stderr reader thread panicked"))??;
+
+        if timed_out {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "trusted utility exceeded its execution deadline",
+            ));
+        }
+        if stdout_truncated || stderr_truncated {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "trusted utility output exceeded the configured size limit",
+            ));
+        }
+
+        Ok(Output {
+            status,
+            stdout,
+            stderr,
+        })
+    }
+
+    fn read_limited<R: Read>(mut reader: R, limit: usize) -> io::Result<(Vec<u8>, bool)> {
+        let mut output = Vec::with_capacity(limit.min(8192));
+        let mut buffer = [0; 8192];
+        let mut truncated = false;
+        loop {
+            let read = reader.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            let remaining = limit.saturating_sub(output.len());
+            let retained = read.min(remaining);
+            output.extend_from_slice(&buffer[..retained]);
+            truncated |= retained != read;
+        }
+        Ok((output, truncated))
     }
 
     fn trusted_command_path(command: &str) -> Option<std::path::PathBuf> {
@@ -441,7 +543,12 @@ impl Collector {
 
     fn run_socket_probe(args: &[&str]) -> Result<Output> {
         if let Some(ss) = Self::trusted_command_path("ss") {
-            if let Ok(output) = Command::new(ss).args(args).output() {
+            if let Ok(output) = Self::run_bounded_command(
+                ss,
+                args,
+                INVENTORY_PROBE_TIMEOUT,
+                SOCKET_PROBE_OUTPUT_LIMIT,
+            ) {
                 if output.status.success() {
                     return Ok(output);
                 }
@@ -450,10 +557,13 @@ impl Collector {
 
         let netstat = Self::trusted_command_path("netstat")
             .ok_or_else(|| anyhow!("No trusted ss or netstat utility found"))?;
-        let netstat = Command::new(netstat)
-            .args(args)
-            .output()
-            .context("Failed to execute trusted ss and netstat utilities")?;
+        let netstat = Self::run_bounded_command(
+            netstat,
+            args,
+            INVENTORY_PROBE_TIMEOUT,
+            SOCKET_PROBE_OUTPUT_LIMIT,
+        )
+        .context("Failed to execute trusted ss and netstat utilities")?;
         if netstat.status.success() {
             Ok(netstat)
         } else {
@@ -656,10 +766,14 @@ impl Collector {
 
     fn dpkg_version(executable: &Path) -> Option<String> {
         let executable = executable.to_str()?;
-        let ownership = Command::new("/usr/bin/dpkg-query")
-            .args(["-S", executable])
-            .output()
-            .ok()?;
+        let dpkg_query = Self::trusted_command_path("dpkg-query")?;
+        let ownership = Self::run_bounded_command(
+            dpkg_query.clone(),
+            &["-S", executable],
+            SMALL_PROBE_TIMEOUT,
+            SMALL_PROBE_OUTPUT_LIMIT,
+        )
+        .ok()?;
         if !ownership.status.success() {
             return None;
         }
@@ -670,19 +784,26 @@ impl Collector {
                 line.split_once(':')
                     .map(|(package, _)| package.trim().to_string())
             })?;
-        let version = Command::new("/usr/bin/dpkg-query")
-            .args(["-W", "-f=${Version}", &package])
-            .output()
-            .ok()?;
+        let version = Self::run_bounded_command(
+            dpkg_query,
+            &["-W", "-f=${Version}", package.as_str()],
+            SMALL_PROBE_TIMEOUT,
+            SMALL_PROBE_OUTPUT_LIMIT,
+        )
+        .ok()?;
         Self::metadata_text(&version.stdout, version.status.success())
     }
 
     fn rpm_version(executable: &Path) -> Option<String> {
         let executable = executable.to_str()?;
-        let output = Command::new("/usr/bin/rpm")
-            .args(["-qf", "--qf", "%{NAME}-%{VERSION}-%{RELEASE}", executable])
-            .output()
-            .ok()?;
+        let rpm = Self::trusted_command_path("rpm")?;
+        let output = Self::run_bounded_command(
+            rpm,
+            &["-qf", "--qf", "%{NAME}-%{VERSION}-%{RELEASE}", executable],
+            SMALL_PROBE_TIMEOUT,
+            SMALL_PROBE_OUTPUT_LIMIT,
+        )
+        .ok()?;
         Self::metadata_text(&output.stdout, output.status.success())
     }
 
@@ -839,10 +960,13 @@ impl Collector {
 
         let systemctl = Self::trusted_command_path("systemctl")
             .ok_or_else(|| anyhow!("No trusted systemctl utility found"))?;
-        let output = Command::new(systemctl)
-            .args(["list-timers", "--all", "--output=json"])
-            .output()
-            .context("Failed to run systemctl list-timers")?;
+        let output = Self::run_bounded_command(
+            systemctl,
+            &["list-timers", "--all", "--output=json"],
+            INVENTORY_PROBE_TIMEOUT,
+            SOCKET_PROBE_OUTPUT_LIMIT,
+        )
+        .context("Failed to run systemctl list-timers")?;
 
         if output.status.success() {
             let json = serde_json::from_slice::<serde_json::Value>(&output.stdout)
@@ -950,6 +1074,7 @@ impl Collector {
 mod tests {
     use super::Collector;
     use crate::models::ConfigScanAudit;
+    use std::time::Duration;
 
     #[test]
     fn host_utility_resolution_accepts_only_root_owned_system_binaries() {
@@ -965,6 +1090,21 @@ mod tests {
         }
         assert!(Collector::trusted_command_path("../hostname").is_none());
         assert!(Collector::trusted_command_path("hostname;id").is_none());
+    }
+
+    #[test]
+    fn bounded_utility_runner_rejects_deadlines_and_excess_output() {
+        let sleep = Collector::trusted_command_path("sleep").unwrap();
+        let timeout =
+            Collector::run_bounded_command(sleep, &["2"], Duration::from_millis(30), 1024)
+                .unwrap_err();
+        assert_eq!(timeout.kind(), std::io::ErrorKind::TimedOut);
+
+        let printf = Collector::trusted_command_path("printf").unwrap();
+        let oversized =
+            Collector::run_bounded_command(printf, &["12345"], Duration::from_secs(1), 4)
+                .unwrap_err();
+        assert_eq!(oversized.kind(), std::io::ErrorKind::InvalidData);
     }
 
     #[test]
