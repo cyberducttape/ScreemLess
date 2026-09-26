@@ -464,21 +464,11 @@ impl ConfigScanner {
         }
 
         if value.contains("://") {
-            let parsed = url::Url::parse(value).ok()?;
-            let hostname = parsed
-                .host_str()?
-                .trim_matches(|character| character == '[' || character == ']')
-                .to_string();
-            if !Self::is_valid_hostname(&hostname) && hostname.parse::<std::net::IpAddr>().is_err()
-            {
-                return None;
-            }
+            let (scheme, hostname, port) = Self::parse_url_endpoint(value)?;
             return Some((
                 hostname,
-                parsed
-                    .port()
-                    .or(default_port)
-                    .or_else(|| Self::default_port_for_scheme(parsed.scheme())),
+                port.or(default_port)
+                    .or_else(|| Self::default_port_for_scheme(&scheme)),
             ));
         }
 
@@ -504,6 +494,44 @@ impl ConfigScanner {
 
         (Self::is_valid_hostname(hostname) || hostname.parse::<std::net::IpAddr>().is_ok())
             .then(|| (hostname.to_string(), port))
+    }
+
+    fn parse_url_endpoint(value: &str) -> Option<(String, String, Option<u16>)> {
+        let (scheme, remainder) = value.split_once("://")?;
+        let mut scheme_chars = scheme.chars();
+        if !scheme_chars.next()?.is_ascii_alphabetic()
+            || !scheme_chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
+        {
+            return None;
+        }
+
+        let authority = remainder.split(['/', '?', '#']).next()?;
+        if authority.is_empty() || authority.chars().any(char::is_whitespace) {
+            return None;
+        }
+        let host_port = authority.rsplit('@').next()?;
+        let (hostname, port) = if let Some(bracketed) = host_port.strip_prefix('[') {
+            let closing = bracketed.find(']')?;
+            let hostname = &bracketed[..closing];
+            let suffix = &bracketed[closing + 1..];
+            let port = if suffix.is_empty() {
+                None
+            } else {
+                Some(suffix.strip_prefix(':')?.parse::<u16>().ok()?)
+            };
+            (hostname, port)
+        } else if let Some((hostname, port)) = host_port.rsplit_once(':') {
+            if hostname.contains(':') {
+                return None;
+            }
+            (hostname, Some(port.parse::<u16>().ok()?))
+        } else {
+            (host_port, None)
+        };
+
+        let valid_host =
+            Self::is_valid_hostname(hostname) || hostname.parse::<std::net::IpAddr>().is_ok();
+        valid_host.then(|| (scheme.to_ascii_lowercase(), hostname.to_string(), port))
     }
 
     fn default_port_for_key(key: &str) -> Option<u16> {
@@ -765,31 +793,18 @@ impl ConfigScanner {
                         });
                     }
                 } else if Self::is_url_env_key(key_str) {
-                    if let Ok(parsed) = url::Url::parse(val_str) {
-                        if let Some(hostname) = parsed.host_str() {
-                            if Self::is_valid_hostname(hostname) {
-                                let port = parsed
-                                    .port()
-                                    .or_else(|| Self::default_port_for_scheme(parsed.scheme()));
-                                refs.push(ConfigReference {
-                                    file_path: path.display().to_string(),
-                                    hostname: hostname.to_string(),
-                                    port,
-                                    context: format!(
-                                        "Environment URL: {} (scheme={})",
-                                        key_str,
-                                        parsed.scheme()
-                                    ),
-                                    config_line: Some(format!(
-                                        "setting={} scheme={} host={} port={:?}",
-                                        key_str,
-                                        parsed.scheme(),
-                                        hostname,
-                                        port
-                                    )),
-                                });
-                            }
-                        }
+                    if let Some((scheme, hostname, port)) = Self::parse_url_endpoint(val_str) {
+                        let port = port.or_else(|| Self::default_port_for_scheme(&scheme));
+                        refs.push(ConfigReference {
+                            file_path: path.display().to_string(),
+                            hostname: hostname.clone(),
+                            port,
+                            context: format!("Environment URL: {} (scheme={})", key_str, scheme),
+                            config_line: Some(format!(
+                                "setting={} scheme={} host={} port={:?}",
+                                key_str, scheme, hostname, port
+                            )),
+                        });
                     }
                 }
             }
@@ -1102,6 +1117,18 @@ mod tests {
         );
         assert_eq!(
             ConfigScanner::parse_endpoint("/var/run/postgresql/.s.PGSQL.5432", None),
+            None
+        );
+        assert_eq!(
+            ConfigScanner::parse_endpoint("https://user:secret@[2001:db8::2]:8443/path", None),
+            Some(("2001:db8::2".to_string(), Some(8443)))
+        );
+        assert_eq!(
+            ConfigScanner::parse_endpoint("http://example.internal/path", None),
+            Some(("example.internal".to_string(), Some(80)))
+        );
+        assert_eq!(
+            ConfigScanner::parse_endpoint("http://example.internal:invalid", None),
             None
         );
     }

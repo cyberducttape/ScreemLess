@@ -10,16 +10,15 @@ repository = "https://github.com/cyberducttape/ScreemLess"
 homepage = "https://github.com/cyberducttape/ScreemLess"
 
 [dependencies]
-clap = { version = "4", features = ["derive"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+clap = { version = "=4.4.18", features = ["derive"] }
+serde = { version = "=1.0.215", features = ["derive"] }
+serde_json = "=1.0.133"
 rusqlite = { version = "0.31", features = ["bundled", "chrono"] }
 procfs = "0.15"
 chrono = { version = "=0.4.38", default-features = false, features = ["clock", "serde"] }
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "time"] }
+tokio = { version = "=1.44.2", default-features = false, features = ["macros", "rt-multi-thread", "time"] }
 regex = "1"
 glob = "0.3"
-url = "2"

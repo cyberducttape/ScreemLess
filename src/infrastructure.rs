@@ -232,16 +232,13 @@ impl InfrastructureMapper {
             }
         }
 
-        affected_servers.sort_by(|a, b| {
-            use crate::models::ImpactLevel;
-            match (&b.1, &a.1) {
-                (ImpactLevel::Critical, ImpactLevel::Critical) => a.0.cmp(&b.0),
-                (ImpactLevel::Critical, _) => std::cmp::Ordering::Greater,
-                (_, ImpactLevel::Critical) => std::cmp::Ordering::Less,
-                (ImpactLevel::High, ImpactLevel::High) => a.0.cmp(&b.0),
-                (ImpactLevel::High, _) => std::cmp::Ordering::Greater,
-                _ => a.0.cmp(&b.0),
-            }
+        affected_servers.sort_by(|a, b| match (&b.1, &a.1) {
+            (ImpactLevel::Critical, ImpactLevel::Critical) => a.0.cmp(&b.0),
+            (ImpactLevel::Critical, _) => std::cmp::Ordering::Greater,
+            (_, ImpactLevel::Critical) => std::cmp::Ordering::Less,
+            (ImpactLevel::High, ImpactLevel::High) => a.0.cmp(&b.0),
+            (ImpactLevel::High, _) => std::cmp::Ordering::Greater,
+            _ => a.0.cmp(&b.0),
         });
 
         ShutdownImpact {
