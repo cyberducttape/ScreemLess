@@ -1,6 +1,6 @@
 use anyhow::Result;
 use chrono::{DateTime, Duration, Utc};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::db::Database;
 use crate::models::*;
@@ -24,8 +24,15 @@ impl<'a> Analyzer<'a> {
             .db
             .get_snapshots_since(hostname, since.timestamp_millis())?;
         let all_snapshots = self.db.get_all_snapshots_since(since.timestamp_millis())?;
-        let inbound_graph = Self::build_inbound_dependency_graph(&all_snapshots);
-        self.analyze_from_snapshots(hostname, hours, snapshots, &inbound_graph)
+        let (inbound_graph, ambiguous_endpoints) =
+            Self::build_inbound_dependency_graph(&all_snapshots);
+        self.analyze_from_snapshots(
+            hostname,
+            hours,
+            snapshots,
+            &inbound_graph,
+            &ambiguous_endpoints,
+        )
     }
 
     /// Analyzes several servers from one deserialized observation window. This
@@ -45,14 +52,21 @@ impl<'a> Analyzer<'a> {
                 .or_default()
                 .push(snapshot.clone());
         }
-        let inbound_graph = Self::build_inbound_dependency_graph(&all_snapshots);
+        let (inbound_graph, ambiguous_endpoints) =
+            Self::build_inbound_dependency_graph(&all_snapshots);
 
         hostnames
             .iter()
             .map(|hostname| {
                 let snapshots = by_host.get(hostname).cloned().unwrap_or_default();
-                self.analyze_from_snapshots(hostname, hours, snapshots, &inbound_graph)
-                    .map(|analysis| (hostname.clone(), analysis))
+                self.analyze_from_snapshots(
+                    hostname,
+                    hours,
+                    snapshots,
+                    &inbound_graph,
+                    &ambiguous_endpoints,
+                )
+                .map(|analysis| (hostname.clone(), analysis))
             })
             .collect()
     }
@@ -63,8 +77,15 @@ impl<'a> Analyzer<'a> {
         hours: u32,
         snapshots: Vec<ObservationSnapshot>,
         inbound_graph: &HashMap<String, Vec<InboundDependency>>,
+        ambiguous_endpoints: &HashMap<String, BTreeSet<String>>,
     ) -> Result<AnalysisResult> {
         let now = Utc::now();
+        let unresolved_for_host = ambiguous_endpoints
+            .get(&hostname.to_ascii_lowercase())
+            .cloned()
+            .unwrap_or_default();
+        let mut coverage = Self::build_observation_coverage(&snapshots, now, hours);
+        Self::apply_unresolved_endpoint_evidence(&mut coverage, &unresolved_for_host);
 
         if snapshots.is_empty() {
             return Ok(AnalysisResult {
@@ -72,7 +93,7 @@ impl<'a> Analyzer<'a> {
                 total_snapshots: 0,
                 observation_span: (now, now),
                 host_identity: HostIdentity::default(),
-                coverage: Self::build_observation_coverage(&[], now, hours),
+                coverage,
                 dependencies: Vec::new(),
                 inbound_dependencies: Vec::new(),
                 observed_processes: HashMap::new(),
@@ -91,7 +112,6 @@ impl<'a> Analyzer<'a> {
 
         let first_snap = snapshots.first().unwrap();
         let last_snap = snapshots.last().unwrap();
-        let coverage = Self::build_observation_coverage(&snapshots, now, hours);
         let host_identity = Self::merge_host_identity(&snapshots, hostname);
 
         let dependencies = self.infer_dependencies(&snapshots)?;
@@ -151,7 +171,6 @@ impl<'a> Analyzer<'a> {
         snapshots: &[ObservationSnapshot],
         dependencies: &[Dependency],
     ) -> SiteInventory {
-        use std::collections::BTreeSet;
         let is_web_process = |name: &str| {
             let normalized = name.to_ascii_lowercase();
             matches!(
@@ -445,7 +464,10 @@ impl<'a> Analyzer<'a> {
 
     fn build_inbound_dependency_graph(
         snapshots: &[ObservationSnapshot],
-    ) -> HashMap<String, Vec<InboundDependency>> {
+    ) -> (
+        HashMap<String, Vec<InboundDependency>>,
+        HashMap<String, BTreeSet<String>>,
+    ) {
         #[derive(Default)]
         struct SourceEvidence {
             count: usize,
@@ -509,6 +531,7 @@ impl<'a> Analyzer<'a> {
         }
 
         let mut graph: HashMap<String, HashMap<String, SourceEvidence>> = HashMap::new();
+        let mut ambiguous_endpoints = HashMap::<String, BTreeSet<String>>::new();
 
         for snapshot in snapshots {
             let source = snapshot.hostname.clone();
@@ -517,6 +540,23 @@ impl<'a> Analyzer<'a> {
                 let Some(targets) = endpoint_targets.get(&remote) else {
                     continue;
                 };
+                if targets.len() > 1 {
+                    let candidates = targets.iter().cloned().collect::<BTreeSet<_>>();
+                    let candidate_list = candidates.iter().cloned().collect::<Vec<_>>().join(", ");
+                    let note = format!(
+                        "{} observed {}:{} but the destination maps to multiple hosts ({})",
+                        source, connection.remote_addr, connection.remote_port, candidate_list
+                    );
+                    for target in &candidates {
+                        if !source.eq_ignore_ascii_case(target) {
+                            ambiguous_endpoints
+                                .entry(target.clone())
+                                .or_default()
+                                .insert(note.clone());
+                        }
+                    }
+                    continue;
+                }
                 for target in targets {
                     if source.eq_ignore_ascii_case(target) {
                         continue;
@@ -538,7 +578,7 @@ impl<'a> Analyzer<'a> {
             }
         }
 
-        graph
+        let inbound_graph = graph
             .into_iter()
             .map(|(target, sources)| {
                 let mut inbound = sources
@@ -601,7 +641,8 @@ impl<'a> Analyzer<'a> {
                 inbound.sort_by_key(|item| std::cmp::Reverse(item.confidence));
                 (target, inbound)
             })
-            .collect()
+            .collect();
+        (inbound_graph, ambiguous_endpoints)
     }
 
     fn infer_dependencies(&self, snapshots: &[ObservationSnapshot]) -> Result<Vec<Dependency>> {
@@ -628,7 +669,7 @@ impl<'a> Analyzer<'a> {
             .iter()
             .flat_map(|snapshot| snapshot.config_references.iter().cloned())
             .collect::<Vec<_>>();
-        let ip_to_hostname = self.build_ip_to_hostname_map(snapshots);
+        let ip_to_hostname = Self::build_ip_to_hostname_map(snapshots);
 
         let mut dependencies = Vec::new();
 
@@ -926,24 +967,52 @@ impl<'a> Analyzer<'a> {
         score.min(cap)
     }
 
-    fn build_ip_to_hostname_map(
-        &self,
-        snapshots: &[ObservationSnapshot],
-    ) -> HashMap<String, String> {
-        let mut map = HashMap::new();
+    fn build_ip_to_hostname_map(snapshots: &[ObservationSnapshot]) -> HashMap<String, String> {
+        let mut aliases = HashMap::<String, String>::new();
+        let mut owners = HashMap::<String, HashSet<String>>::new();
 
         for snapshot in snapshots {
-            for ip in Self::identity_addresses(&snapshot.host_identity) {
-                map.insert(ip, snapshot.host_identity.hostname.clone());
+            let canonical = snapshot.hostname.to_ascii_lowercase();
+            for name in [
+                snapshot.host_identity.hostname.as_str(),
+                snapshot.host_identity.fqdn.as_deref().unwrap_or_default(),
+                snapshot.host_identity.short_hostname.as_str(),
+            ]
+            .into_iter()
+            .chain(
+                snapshot
+                    .host_identity
+                    .dns_aliases
+                    .iter()
+                    .map(String::as_str),
+            )
+            .filter(|name| !name.is_empty())
+            {
+                aliases.insert(name.to_ascii_lowercase(), canonical.clone());
             }
+            aliases.insert(canonical.clone(), canonical.clone());
+
+            for ip in Self::identity_addresses(&snapshot.host_identity) {
+                owners.entry(ip).or_default().insert(canonical.clone());
+            }
+        }
+
+        for snapshot in snapshots {
             for dns in &snapshot.dns_names {
+                let name = dns.hostname.to_ascii_lowercase();
+                let owner = aliases.get(&name).cloned().unwrap_or(name);
                 for ip in &dns.ip_addresses {
-                    map.insert(ip.clone(), dns.hostname.clone());
+                    owners.entry(ip.clone()).or_default().insert(owner.clone());
                 }
             }
         }
 
-        map
+        owners
+            .into_iter()
+            .filter_map(|(ip, hosts)| {
+                (hosts.len() == 1).then(|| (ip, hosts.into_iter().next().unwrap()))
+            })
+            .collect()
     }
 
     fn identity_matches(identity: &HostIdentity, target: &str) -> bool {
@@ -1201,6 +1270,19 @@ impl<'a> Analyzer<'a> {
         }
     }
 
+    fn apply_unresolved_endpoint_evidence(
+        coverage: &mut ObservationCoverage,
+        unresolved: &BTreeSet<String>,
+    ) {
+        if unresolved.is_empty() {
+            return;
+        }
+        coverage
+            .remaining_unknowns
+            .extend(unresolved.iter().cloned());
+        coverage.evidence_quality = "LOW".to_string();
+    }
+
     fn probe_status<'snapshot>(
         snapshot: &'snapshot ObservationSnapshot,
         name: &str,
@@ -1415,6 +1497,49 @@ mod tests {
         assert_eq!(coverage.successful_samples, 2);
         assert!(coverage.coverage_percent < 1.0);
         assert_eq!(coverage.evidence_quality, "LOW");
+    }
+
+    #[test]
+    fn ambiguous_shared_addresses_are_unknowns_not_fanout_dependencies() {
+        let now = Utc::now();
+        let mut source = test_snapshot(now);
+        source.hostname = "web01".to_string();
+        source.host_identity.hostname = "web01".to_string();
+        source.network_connections.push(NetworkConnection {
+            local_addr: "10.0.0.10".to_string(),
+            local_port: 45000,
+            remote_addr: "10.0.0.20".to_string(),
+            remote_port: 5432,
+            protocol: "tcp".to_string(),
+            state: "ESTABLISHED".to_string(),
+            pid: 10,
+            process_name: "app".to_string(),
+        });
+        let mut db01 = test_snapshot(now);
+        db01.hostname = "db01".to_string();
+        db01.host_identity.hostname = "db01".to_string();
+        db01.host_identity.ipv4_addresses = vec!["10.0.0.20".to_string()];
+        let mut db02 = test_snapshot(now);
+        db02.hostname = "db02".to_string();
+        db02.host_identity.hostname = "db02".to_string();
+        db02.host_identity.ipv4_addresses = vec!["10.0.0.20".to_string()];
+
+        let (graph, ambiguous) = Analyzer::build_inbound_dependency_graph(&[source, db01, db02]);
+        assert!(!graph.contains_key("db01"));
+        assert!(!graph.contains_key("db02"));
+        assert!(ambiguous["db01"]
+            .iter()
+            .any(|note| note.contains("db01, db02")));
+        assert!(ambiguous.contains_key("db02"));
+
+        let mut coverage = ObservationCoverage {
+            coverage_percent: 100.0,
+            evidence_quality: "HIGH".to_string(),
+            ..ObservationCoverage::default()
+        };
+        Analyzer::apply_unresolved_endpoint_evidence(&mut coverage, &ambiguous["db01"]);
+        assert_eq!(coverage.evidence_quality, "LOW");
+        assert!(!coverage.remaining_unknowns.is_empty());
     }
 
     #[test]

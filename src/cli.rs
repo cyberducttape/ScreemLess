@@ -514,8 +514,10 @@ fn preflight(
 
     let mut safe = true;
     let mut warnings = Vec::new();
-    let insufficient_evidence =
-        analysis.total_snapshots == 0 || !analysis.probe_statuses.all_complete();
+    let insufficient_evidence = analysis.total_snapshots == 0
+        || !analysis.probe_statuses.all_complete()
+        || analysis.coverage.evidence_quality != "HIGH"
+        || analysis.coverage.coverage_percent < 90.0;
 
     if analysis.total_snapshots == 0 {
         warnings.push("No observations are available for this server".to_string());
@@ -524,6 +526,12 @@ fn preflight(
         warnings.push(
             "Required observation probes are incomplete; safety cannot be established".to_string(),
         );
+        safe = false;
+    } else if insufficient_evidence {
+        warnings.push(
+            "Observation coverage, evidence quality, or endpoint attribution is insufficient to establish safety".to_string(),
+        );
+        warnings.extend(analysis.coverage.remaining_unknowns.iter().take(3).cloned());
         safe = false;
     }
 
