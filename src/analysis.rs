@@ -449,6 +449,7 @@ impl<'a> Analyzer<'a> {
         #[derive(Default)]
         struct SourceEvidence {
             count: usize,
+            sample_times: HashSet<DateTime<Utc>>,
             ports: HashSet<u16>,
             processes: HashSet<String>,
             complete: bool,
@@ -529,6 +530,7 @@ impl<'a> Analyzer<'a> {
                             ..SourceEvidence::default()
                         });
                     evidence.count += 1;
+                    evidence.sample_times.insert(snapshot.timestamp);
                     evidence.ports.insert(connection.remote_port);
                     evidence.processes.insert(connection.process_name.clone());
                     evidence.complete &= snapshot.probe_statuses.network_sockets.is_complete();
@@ -542,7 +544,18 @@ impl<'a> Analyzer<'a> {
                 let mut inbound = sources
                     .into_iter()
                     .map(|(source, evidence)| {
-                        let confidence = (55 + evidence.count.min(9) * 5).min(100) as u8;
+                        let sample_span_seconds = evidence
+                            .sample_times
+                            .iter()
+                            .min()
+                            .zip(evidence.sample_times.iter().max())
+                            .map(|(first, last)| (*last - *first).num_seconds())
+                            .unwrap_or(0);
+                        let confidence = Self::cap_temporal_confidence(
+                            (55 + evidence.sample_times.len().min(9) * 5) as u8,
+                            evidence.sample_times.len(),
+                            sample_span_seconds,
+                        );
                         let confidence = if evidence.complete {
                             confidence
                         } else {
@@ -572,8 +585,8 @@ impl<'a> Analyzer<'a> {
                                     EvidenceLevel::Med
                                 },
                                 description: format!(
-                                    "Observed outbound TCP traffic to this server on port(s) {} ({} observation(s), process(es): {})",
-                                    port_list, evidence.count, process_list
+                                    "Observed outbound TCP traffic to this server on port(s) {} ({} socket observation(s) across {} polling sample(s) over {}s, process(es): {})",
+                                    port_list, evidence.count, evidence.sample_times.len(), sample_span_seconds, process_list
                                 ),
                             }],
                             detection_methods: vec!["central_outbound_observation".to_string()],
@@ -621,6 +634,17 @@ impl<'a> Analyzer<'a> {
 
         for ((remote_addr, remote_port, protocol), observations) in remote_hosts {
             let observation_count = observations.len();
+            let sample_times = observations
+                .iter()
+                .map(|(timestamp, _)| *timestamp)
+                .collect::<HashSet<_>>();
+            let sample_count = sample_times.len();
+            let sample_span_seconds = sample_times
+                .iter()
+                .min()
+                .zip(sample_times.iter().max())
+                .map(|(first, last)| (*last - *first).num_seconds())
+                .unwrap_or(0);
 
             let mut all_processes = HashSet::new();
             for (_ts, procs) in &observations {
@@ -632,20 +656,29 @@ impl<'a> Analyzer<'a> {
 
             let mut evidence = Vec::new();
 
-            if observation_count > 100 {
+            if sample_count > 100 {
                 evidence.push(Evidence {
                     level: EvidenceLevel::High,
-                    description: format!("{} socket observations", observation_count),
+                    description: format!(
+                        "{} socket observations across {} polling samples over {}s",
+                        observation_count, sample_count, sample_span_seconds
+                    ),
                 });
-            } else if observation_count > 10 {
+            } else if sample_count > 10 {
                 evidence.push(Evidence {
                     level: EvidenceLevel::Med,
-                    description: format!("{} socket observations", observation_count),
+                    description: format!(
+                        "{} socket observations across {} polling samples over {}s",
+                        observation_count, sample_count, sample_span_seconds
+                    ),
                 });
             } else {
                 evidence.push(Evidence {
                     level: EvidenceLevel::Low,
-                    description: format!("{} socket observations", observation_count),
+                    description: format!(
+                        "{} socket observations across {} polling samples over {}s",
+                        observation_count, sample_count, sample_span_seconds
+                    ),
                 });
             }
 
@@ -687,7 +720,8 @@ impl<'a> Analyzer<'a> {
                 });
             }
 
-            let confidence = Self::calculate_confidence(&evidence);
+            let confidence =
+                Self::calculate_confidence(&evidence, sample_count, sample_span_seconds);
 
             dependencies.push(Dependency {
                 remote_addr,
@@ -851,7 +885,11 @@ impl<'a> Analyzer<'a> {
         Ok(risks)
     }
 
-    fn calculate_confidence(evidence: &[Evidence]) -> u8 {
+    fn calculate_confidence(
+        evidence: &[Evidence],
+        sample_count: usize,
+        sample_span_seconds: i64,
+    ) -> u8 {
         if evidence.is_empty() {
             return 0;
         }
@@ -870,7 +908,22 @@ impl<'a> Analyzer<'a> {
             .collect::<HashSet<_>>()
             .len() as u16;
         let frequency = (evidence.len().min(5) as u16) * 4;
-        (strongest * 20 + diversity * 10 + frequency).min(100) as u8
+        let score = (strongest * 20 + diversity * 10 + frequency).min(100) as u8;
+        Self::cap_temporal_confidence(score, sample_count, sample_span_seconds)
+    }
+
+    fn cap_temporal_confidence(score: u8, sample_count: usize, sample_span_seconds: i64) -> u8 {
+        // Concurrent sockets and rapid repolls are not independent temporal
+        // corroboration. Strong confidence requires repeated samples spread
+        // across at least five minutes.
+        let cap = match sample_count {
+            0 => 0,
+            1 => 59,
+            2..=5 => 69,
+            _ if sample_span_seconds >= 300 => 100,
+            _ => 69,
+        };
+        score.min(cap)
     }
 
     fn build_ip_to_hostname_map(
@@ -1264,8 +1317,12 @@ mod tests {
         });
 
         assert!(
-            Analyzer::calculate_confidence(&corroborated) >= Analyzer::calculate_confidence(&high)
+            Analyzer::calculate_confidence(&corroborated, 6, 300)
+                >= Analyzer::calculate_confidence(&high, 6, 300)
         );
+        assert!(Analyzer::calculate_confidence(&corroborated, 1, 0) <= 59);
+        assert!(Analyzer::calculate_confidence(&corroborated, 2, 60) <= 69);
+        assert!(Analyzer::calculate_confidence(&corroborated, 6, 60) <= 69);
     }
 
     #[test]
@@ -1368,24 +1425,26 @@ mod tests {
         ));
         let mut db = Database::new(&path).unwrap();
         let now = Utc::now();
+        let source_time = now - chrono::Duration::minutes(5);
+        let connection = NetworkConnection {
+            local_addr: "10.20.30.10".to_string(),
+            local_port: 51000,
+            remote_addr: "10.20.30.40".to_string(),
+            remote_port: 5432,
+            protocol: "tcp".to_string(),
+            state: "ESTABLISHED".to_string(),
+            pid: 1,
+            process_name: "app".to_string(),
+        };
         let source = ObservationSnapshot {
-            timestamp: now,
+            timestamp: source_time,
             hostname: "web01".to_string(),
             host_identity: HostIdentity {
                 hostname: "web01".to_string(),
                 ..HostIdentity::default()
             },
             listening_services: Vec::new(),
-            network_connections: vec![NetworkConnection {
-                local_addr: "10.20.30.10".to_string(),
-                local_port: 51000,
-                remote_addr: "10.20.30.40".to_string(),
-                remote_port: 5432,
-                protocol: "tcp".to_string(),
-                state: "ESTABLISHED".to_string(),
-                pid: 1,
-                process_name: "app".to_string(),
-            }],
+            network_connections: vec![connection.clone(), connection.clone(), connection],
             processes: Vec::new(),
             cron_jobs: Vec::new(),
             systemd_timers: Vec::new(),
@@ -1398,7 +1457,7 @@ mod tests {
             probe_statuses: ProbeStatuses::default(),
         };
         let target = ObservationSnapshot {
-            timestamp: now + chrono::Duration::seconds(1),
+            timestamp: now,
             hostname: "db01".to_string(),
             host_identity: HostIdentity {
                 hostname: "db01".to_string(),
@@ -1427,6 +1486,22 @@ mod tests {
         let inbound = &analyses["db01"].inbound_dependencies;
         assert_eq!(inbound.len(), 1);
         assert_eq!(inbound[0].source_hostname.as_deref(), Some("web01"));
+        assert!(inbound[0].confidence <= 59);
+
+        for minute in 1..=5 {
+            let mut repeated_sample = source.clone();
+            repeated_sample.timestamp = source_time + chrono::Duration::minutes(i64::from(minute));
+            db.store_snapshot(&repeated_sample).unwrap();
+        }
+        let analyses = Analyzer::new(&db)
+            .analyze_many(&["db01".to_string()], 1)
+            .unwrap();
+        let inbound = &analyses["db01"].inbound_dependencies;
+        assert_eq!(inbound.len(), 1);
+        assert!(inbound[0].confidence >= 70);
+        assert!(inbound[0].evidence[0]
+            .description
+            .contains("6 polling sample(s)"));
         drop(db);
         let _ = std::fs::remove_file(path);
     }
