@@ -1,5 +1,6 @@
 use crate::models::AnalysisResult;
 use anyhow::Result;
+use chrono::Utc;
 use serde::Serialize;
 
 fn escape_html(value: &str) -> String {
@@ -51,6 +52,55 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
         .filter(|d| d.confidence >= 70)
         .count();
     let total_deps = analysis.dependencies.len();
+    let inbound_count = analysis.inbound_dependencies.len();
+    let listener_count = analysis
+        .inventory
+        .websites
+        .iter()
+        .map(|site| site.ports.len())
+        .sum::<usize>();
+    let unknown_count = analysis.coverage.remaining_unknowns.len()
+        + if analysis.probe_statuses.network_sockets.is_complete() {
+            0
+        } else {
+            1
+        }
+        + if analysis.probe_statuses.config_scan.is_complete() {
+            0
+        } else {
+            1
+        };
+    let observed_duration = format_duration(analysis.coverage.actual_span_seconds);
+    let freshness = analysis
+        .coverage
+        .last_observation
+        .map(|last| (Utc::now() - last).num_seconds().max(0))
+        .map(format_freshness)
+        .unwrap_or_else(|| "unknown".to_string());
+    let evidence_rows = [
+        ("Network", "network_sockets"),
+        ("Processes", "process_attribution"),
+        ("Configuration", "config_scan"),
+        ("DNS", "dns"),
+        ("Scheduled jobs", "cron"),
+    ]
+    .into_iter()
+    .map(|(label, key)| {
+        let percent = analysis.coverage.probe_coverage.get(key).copied().unwrap_or(0.0);
+        let status = match key {
+            "network_sockets" => &analysis.probe_statuses.network_sockets.state,
+            "process_attribution" => &analysis.probe_statuses.process_attribution.state,
+            "config_scan" => &analysis.probe_statuses.config_scan.state,
+            "dns" => &analysis.probe_statuses.dns.state,
+            _ => &analysis.probe_statuses.cron.state,
+        };
+        format!(
+            "<div class='evidence-row'><b>{}</b><span class='evidence-status'>{:?}</span><div class='evidence-meter'><i style='width: {:.1}%'></i></div><strong>{:.1}%</strong></div>",
+            label, status, percent, percent
+        )
+    })
+    .collect::<Vec<_>>()
+    .join("");
     let coverage_summary = format!(
         "Evidence quality: {} · Observation coverage: {:.2}% · {} successful / {} expected samples · Privileges: {}",
         escape_html(&analysis.coverage.evidence_quality),
@@ -86,21 +136,43 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
     let deps_html = if total_deps == 0 {
         "<p style='color: #999; font-size: 12px;'>No outbound dependencies detected</p>".to_string()
     } else {
-        analysis.dependencies.iter().take(10).map(|dep| {
+        analysis.dependencies.iter().take(10).enumerate().map(|(index, dep)| {
             let display_addr = if let Some(ref h) = dep.hostname {
                 format!("{} ({})", h, dep.remote_addr)
             } else {
                 dep.remote_addr.clone()
             };
             format!(
-                "<div class='dependency'><div class='dep-host'>{}:{} <span class='dep-confidence'>{}%</span></div><div class='dep-process'>{}</div></div>",
+                "<div class='dependency' data-dependency-index='{}' tabindex='0' role='button'><div class='dep-host'>{}:{} <span class='dep-confidence'>{}%</span></div><div class='dep-process'>{}</div><div class='dep-observations'>{} socket observations · click for evidence</div></div>",
+                index,
                 escape_html(&display_addr),
                 dep.remote_port,
                 dep.confidence,
-                escape_html(&dep.processes.join(", "))
+                escape_html(&dep.processes.join(", ")),
+                dep.observation_count
             )
         }).collect::<Vec<_>>().join("")
     };
+
+    fn format_duration(seconds: i64) -> String {
+        if seconds >= 86_400 {
+            format!("{:.1}d", seconds as f64 / 86_400.0)
+        } else if seconds >= 3_600 {
+            format!("{:.1}h", seconds as f64 / 3_600.0)
+        } else {
+            format!("{}m", seconds / 60)
+        }
+    }
+
+    fn format_freshness(seconds: i64) -> String {
+        if seconds < 60 {
+            format!("{} sec", seconds)
+        } else if seconds < 3_600 {
+            format!("{} min", seconds / 60)
+        } else {
+            format!("{}h", seconds / 3_600)
+        }
+    }
 
     let risks_html = if analysis.risks.is_empty() {
         "<p style='color: #999; font-size: 12px;'>No risks identified</p>".to_string()
@@ -319,6 +391,25 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
         .software-item span {{ color: #667eea; font-size: 16px; font-weight: bold; margin: 4px 0; }}
         .software-item small, .muted {{ color: #888; font-size: 11px; }}
 
+        .evidence-hero {{ padding: 22px 30px; background: #111827; color: white; }}
+        .evidence-hero h2 {{ font-size: 24px; margin-bottom: 6px; }}
+        .evidence-meta {{ color: #cbd5e1; font-size: 13px; margin-bottom: 18px; }}
+        .evidence-stats {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }}
+        .evidence-stat {{ background: #1f2937; border-radius: 6px; padding: 12px; }}
+        .evidence-stat b {{ display: block; font-size: 22px; color: #fff; }}
+        .evidence-stat small {{ color: #cbd5e1; }}
+        .evidence-quality {{ margin: 20px 30px; padding: 18px; background: #f8f9ff; border-radius: 8px; }}
+        .evidence-quality h2 {{ margin-bottom: 12px; color: #333; }}
+        .quality-score {{ color: #667eea; font-size: 24px; font-weight: bold; float: right; }}
+        .evidence-row {{ display: grid; grid-template-columns: 130px 90px 1fr 60px; gap: 10px; align-items: center; margin: 9px 0; font-size: 12px; }}
+        .evidence-status {{ color: #555; }}
+        .evidence-meter {{ height: 8px; background: #e5e7eb; border-radius: 8px; overflow: hidden; }}
+        .evidence-meter i {{ display: block; height: 100%; background: #4CAF50; }}
+        .dep-observations {{ color: #888; font-size: 11px; margin-top: 5px; }}
+        .dependency-detail {{ background: #111827; color: #e5e7eb; border-radius: 6px; padding: 14px; margin-top: 12px; font-size: 12px; }}
+        .dependency-detail h3 {{ color: white; margin-bottom: 8px; }}
+        .dependency-detail div {{ margin: 4px 0; }}
+
         .stat-box {{
             background: white;
             padding: 12px;
@@ -357,6 +448,23 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
             <p>Server: <strong>{}</strong></p>
         </header>
 
+        <div class="evidence-hero">
+            <h2>{}</h2>
+            <div class="evidence-meta">Observed {} · {:.1}% collection coverage · Fresh {}</div>
+            <div class="evidence-stats">
+                <div class="evidence-stat"><b>{}</b><small>inbound dependencies</small></div>
+                <div class="evidence-stat"><b>{}</b><small>outbound dependencies</small></div>
+                <div class="evidence-stat"><b>{}</b><small>configured listeners</small></div>
+                <div class="evidence-stat"><b>{}</b><small>unknowns</small></div>
+            </div>
+        </div>
+
+        <div class="evidence-quality">
+            <span class="quality-score">{:.1}%</span>
+            <h2>Evidence Quality: {}</h2>
+            {}
+        </div>
+
         <div class="readiness-banner">
             <div class="readiness-score {}">{}</div>
             <div class="readiness-status">
@@ -381,6 +489,7 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
                     <div id="dependencies">
                         {}
                     </div>
+                    <div class="dependency-detail" id="dependency-detail">Select a dependency to inspect its evidence.</div>
                     <div class="stats">
                         <div class="stat-box">
                             <div class="stat-value">{}</div>
@@ -510,6 +619,35 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
             }});
         }}
 
+        function showDependency(index) {{
+            const dependency = dependencies[index];
+            const detail = document.getElementById('dependency-detail');
+            detail.replaceChildren();
+            const title = document.createElement('h3');
+            title.textContent = (dependency.hostname || dependency.remote_addr) + ':' + dependency.remote_port;
+            detail.appendChild(title);
+            const rows = [
+                ['First observed', dependency.first_seen],
+                ['Last observed', dependency.last_seen],
+                ['Socket observations', String(dependency.observation_count) + ' (polling evidence; not connect events)'],
+                ['Process', (dependency.processes || []).join(', ') || 'unknown'],
+                ['Configuration', (dependency.config_references || []).map(function (ref) {{ return ref.file_path; }}).join(', ') || 'none found'],
+                ['Confidence', String(dependency.confidence) + '%']
+            ];
+            rows.forEach(function (row) {{
+                const line = document.createElement('div');
+                line.textContent = row[0] + ': ' + row[1];
+                detail.appendChild(line);
+            }});
+        }}
+        Array.from(document.querySelectorAll('[data-dependency-index]')).forEach(function (card) {{
+            const select = function () {{ showDependency(Number(card.dataset.dependencyIndex)); }};
+            card.addEventListener('click', select);
+            card.addEventListener('keydown', function (event) {{
+                if (event.key === 'Enter' || event.key === ' ') select();
+            }});
+        }});
+
         renderGraph();
         window.addEventListener('resize', renderGraph);
     </script>
@@ -517,6 +655,17 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
 </html>"#,
         hostname_html,
         hostname_html,
+        hostname_html,
+        observed_duration,
+        analysis.coverage.coverage_percent,
+        freshness,
+        inbound_count,
+        total_deps,
+        listener_count,
+        unknown_count,
+        analysis.coverage.coverage_percent,
+        escape_html(&analysis.coverage.evidence_quality),
+        evidence_rows,
         readiness_class,
         readiness,
         readiness_status,
