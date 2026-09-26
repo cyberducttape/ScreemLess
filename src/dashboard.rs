@@ -56,6 +56,24 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
         "<div class='inventory-grid'><div><b>Websites</b><span>{}</span><small>{} active / {} inactive</small></div><div><b>Availability coverage</b><span>{}</span><small>snapshots with a web listener</small></div><div><b>Inbound connection observations</b><span>{}</span><small>not HTTP request analytics</small></div><div><b>Users</b><span>{}</span><small>observed runtime users</small></div><div><b>Databases</b><span>{}</span><small>inferred connections</small></div><div><b>Site content</b><span>{}</span><small>configured document roots</small></div><div><b>Storage</b><span>{}</span><small>inferred connections</small></div><div><b>Tech stack</b><span>{}</span><small>recognized application processes</small></div><div><b>Load balancers</b><span>{}</span><small>config-backed candidates</small></div></div>",
         analysis.inventory.websites.len(), analysis.inventory.websites.iter().filter(|s| s.status == "active").count(), analysis.inventory.websites.iter().filter(|s| s.status == "inactive").count(),
         analysis.inventory.websites.iter().map(|s| s.availability_observations).sum::<usize>(), analysis.inventory.websites.iter().map(|s| s.inbound_connection_observations).sum::<usize>(), analysis.inventory.users.len(), analysis.inventory.databases.len(), analysis.inventory.websites.iter().map(|s| s.content_paths.len()).sum::<usize>(), analysis.inventory.storage_connections.len(), analysis.inventory.tech_stack.len(), analysis.inventory.load_balancers.len());
+    let software_html =
+        if analysis.inventory.software.is_empty() {
+            "<p class='muted'>No versioned software observations available</p>".to_string()
+        } else {
+            analysis
+                .inventory
+                .software
+                .iter()
+                .map(|software| {
+                    let version = software.version.as_deref().unwrap_or("version unavailable");
+                    format!(
+                "<div class='software-item'><b>{}</b><span>{}</span><small>{}</small></div>",
+                escape_html(&software.name), escape_html(version), escape_html(&software.evidence)
+            )
+                })
+                .collect::<Vec<_>>()
+                .join("")
+        };
 
     let deps_html = if total_deps == 0 {
         "<p style='color: #999; font-size: 12px;'>No outbound dependencies detected</p>".to_string()
@@ -286,6 +304,12 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
         .inventory-grid b {{ color: #555; font-size: 12px; }}
         .inventory-grid span {{ color: #667eea; font-size: 24px; font-weight: bold; margin: 5px 0; }}
         .inventory-grid small {{ color: #888; font-size: 11px; }}
+        .software-list {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 15px; }}
+        .software-item {{ background: white; border: 1px solid #ddd; border-radius: 6px; padding: 12px; }}
+        .software-item b, .software-item span, .software-item small {{ display: block; }}
+        .software-item b {{ color: #555; font-size: 12px; }}
+        .software-item span {{ color: #667eea; font-size: 16px; font-weight: bold; margin: 4px 0; }}
+        .software-item small, .muted {{ color: #888; font-size: 11px; }}
 
         .stat-box {{
             background: white;
@@ -371,6 +395,8 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
         <div class="section" style="margin: 0 30px 30px;">
             <h2>Site & Infrastructure Inventory</h2>
             {}
+            <h3 style="margin-top: 20px; color: #555;">Detected Software Versions</h3>
+            <div class="software-list">{}</div>
         </div>
     </div>
 
@@ -490,6 +516,7 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
         high_conf_count,
         risks_html,
         inventory_cards,
+        software_html,
         safe_json_for_script(&hostname)?,
         deps_json,
         risks_json,

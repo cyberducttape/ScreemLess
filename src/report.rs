@@ -49,6 +49,7 @@ impl<'a> Reporter<'a> {
         self.print_outbound_dependencies(&analysis)?;
         self.print_inbound_dependencies(&analysis)?;
         self.print_risks(&analysis)?;
+        self.print_software_inventory(&analysis);
         self.print_summary(&analysis)?;
 
         Ok(())
@@ -319,6 +320,23 @@ impl<'a> Reporter<'a> {
         println!("  Identified risks: {}", analysis.risks.len());
 
         Ok(())
+    }
+
+    fn print_software_inventory(&self, analysis: &AnalysisResult) {
+        println!("SOFTWARE INVENTORY");
+        if analysis.inventory.software.is_empty() {
+            println!("  No versioned software observations available\n");
+            return;
+        }
+        for software in &analysis.inventory.software {
+            println!(
+                "  {}: {} ({} observation(s))",
+                software.name,
+                software.version.as_deref().unwrap_or("version unavailable"),
+                software.observations
+            );
+        }
+        println!();
     }
 
     fn print_readiness_assessment(&self, analysis: &AnalysisResult) -> Result<()> {

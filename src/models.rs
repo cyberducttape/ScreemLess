@@ -240,7 +240,18 @@ pub struct SiteInventory {
     pub databases: Vec<InventoryConnection>,
     pub storage_connections: Vec<InventoryConnection>,
     pub tech_stack: Vec<String>,
+    #[serde(default)]
+    pub software: Vec<SoftwareInventory>,
     pub load_balancers: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SoftwareInventory {
+    pub name: String,
+    pub version: Option<String>,
+    pub executable: Option<String>,
+    pub evidence: String,
+    pub observations: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -339,6 +350,8 @@ pub struct ObservationSnapshot {
     pub dns_names: Vec<DnsName>,
     #[serde(default)]
     pub config_references: Vec<ConfigReference>,
+    #[serde(default)]
+    pub software: Vec<SoftwareInventory>,
     #[serde(default = "ProbeStatuses::legacy_unknown")]
     pub probe_statuses: ProbeStatuses,
 }

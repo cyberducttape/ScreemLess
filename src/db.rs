@@ -383,6 +383,7 @@ mod tests {
             systemd_timers: vec![],
             dns_names: vec![],
             config_references: vec![],
+            software: vec![],
             probe_statuses: ProbeStatuses::default(),
         };
 

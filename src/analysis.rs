@@ -252,9 +252,26 @@ impl<'a> Analyzer<'a> {
 
         let mut users = BTreeSet::new();
         let mut stack = BTreeSet::new();
+        let mut software = std::collections::BTreeMap::<
+            (String, Option<String>, Option<String>),
+            SoftwareInventory,
+        >::new();
         for snapshot in snapshots {
             for process in &snapshot.processes {
                 users.insert(process.user.clone());
+            }
+            for observed in &snapshot.software {
+                let key = (
+                    observed.name.clone(),
+                    observed.version.clone(),
+                    observed.executable.clone(),
+                );
+                if let Some(entry) = software.get_mut(&key) {
+                    entry.observations += observed.observations;
+                } else {
+                    software.insert(key, observed.clone());
+                }
+                stack.insert(observed.name.clone());
             }
             for service in &snapshot.listening_services {
                 users.insert(service.user.clone());
@@ -351,6 +368,7 @@ impl<'a> Analyzer<'a> {
             databases,
             storage_connections,
             tech_stack: stack.into_iter().collect(),
+            software: software.into_values().collect(),
             load_balancers: load_balancers.into_iter().collect(),
         }
     }
@@ -877,6 +895,7 @@ mod tests {
                 context: "nginx site; root=/srv/example/public; ports=443".to_string(),
                 config_line: None,
             }],
+            software: Vec::new(),
             probe_statuses: ProbeStatuses::default(),
         };
 

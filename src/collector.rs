@@ -17,6 +17,7 @@ static PASSWD_CACHE: OnceLock<HashMap<u32, String>> = OnceLock::new();
 
 type ProcessAttribution = HashMap<u32, (String, u32, String)>;
 type ConfigDnsCache = Mutex<Option<(Instant, Vec<DnsName>, Vec<ConfigReference>)>>;
+type ProcessInventory = (Vec<Process>, ProcessAttribution, Vec<SoftwareInventory>);
 
 impl Collector {
     pub async fn collect_snapshot() -> Result<ObservationSnapshot> {
@@ -24,12 +25,12 @@ impl Collector {
         let timestamp = Utc::now();
         let mut probe_statuses = ProbeStatuses::default();
 
-        let (processes, pid_to_process) = match Self::collect_process_inventory() {
+        let (processes, pid_to_process, software) = match Self::collect_process_inventory() {
             Ok(inventory) => inventory,
             Err(error) => {
                 probe_statuses.process_attribution =
                     ProbeStatus::partial(format!("process inventory unavailable: {}", error), 0);
-                (Vec::new(), HashMap::new())
+                (Vec::new(), HashMap::new(), Vec::new())
             }
         };
 
@@ -99,6 +100,7 @@ impl Collector {
             systemd_timers,
             dns_names,
             config_references,
+            software,
             probe_statuses,
         })
     }
@@ -301,9 +303,10 @@ impl Collector {
             .unwrap_or(0)
     }
 
-    fn collect_process_inventory() -> Result<(Vec<Process>, ProcessAttribution)> {
+    fn collect_process_inventory() -> Result<ProcessInventory> {
         let mut processes = Vec::new();
         let mut pid_to_process = HashMap::new();
+        let mut software_candidates = HashMap::<String, (u32, String)>::new();
 
         for proc_entry in procfs::process::all_processes()? {
             let process = match proc_entry {
@@ -313,10 +316,11 @@ impl Collector {
 
             if let (Ok(stat), Ok(status)) = (process.stat(), process.status()) {
                 let user = Self::username_for_uid(status.ruid);
+                let process_name = stat.comm.clone();
 
                 processes.push(Process {
                     pid: process.pid() as u32,
-                    name: stat.comm.clone(),
+                    name: process_name.clone(),
                     user: user.clone(),
                     // Command lines frequently contain credentials. The executable name
                     // above is sufficient for dependency attribution.
@@ -324,12 +328,110 @@ impl Collector {
                 });
                 pid_to_process.insert(
                     process.pid() as u32,
-                    (stat.comm, process.pid() as u32, user),
+                    (process_name.clone(), process.pid() as u32, user),
                 );
+                if Self::software_probe(&process_name).is_some() {
+                    if let Ok(executable) = fs::read_link(format!("/proc/{}/exe", process.pid())) {
+                        software_candidates
+                            .entry(Self::software_name(&process_name))
+                            .or_insert((process.pid() as u32, executable.display().to_string()));
+                    }
+                }
             }
         }
 
-        Ok((processes, pid_to_process))
+        let software = software_candidates
+            .into_iter()
+            .map(|(name, (pid, executable))| Self::collect_software_version(name, pid, executable))
+            .collect();
+
+        Ok((processes, pid_to_process, software))
+    }
+
+    fn software_probe(process_name: &str) -> Option<&'static str> {
+        let name = process_name.to_ascii_lowercase();
+        match name.as_str() {
+            "node" | "nodejs" | "python" | "python3" | "gunicorn" | "uwsgi" => Some("--version"),
+            "caddy" | "traefik" => Some("version"),
+            "nginx" | "apache2" | "httpd" | "haproxy" => Some("-v"),
+            "php" => Some("-v"),
+            _ if name.starts_with("python3.") || name.starts_with("php-fpm") => Some("--version"),
+            _ => None,
+        }
+    }
+
+    fn software_name(process_name: &str) -> String {
+        let name = process_name.to_ascii_lowercase();
+        if name.starts_with("python3.") || name == "python3" || name == "python" {
+            "python".to_string()
+        } else if name.starts_with("php-fpm") || name == "php" {
+            "php".to_string()
+        } else if name == "nodejs" {
+            "node".to_string()
+        } else if name == "apache2" || name == "httpd" {
+            "apache".to_string()
+        } else {
+            name
+        }
+    }
+
+    fn collect_software_version(name: String, pid: u32, executable: String) -> SoftwareInventory {
+        let version_arg = Self::software_probe(&name).unwrap_or("--version");
+        let executable_path = Path::new(&executable);
+        let executable_name = executable_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+            .trim_end_matches(" (deleted)");
+        let allowed_executable = match name.as_str() {
+            "python" => executable_name.starts_with("python"),
+            "php" => executable_name.starts_with("php"),
+            "node" => executable_name == "node" || executable_name == "nodejs",
+            "apache" => executable_name == "apache2" || executable_name == "httpd",
+            _ => executable_name == name,
+        };
+        let version = if allowed_executable {
+            Self::run_version_probe(executable_path, version_arg)
+        } else {
+            None
+        };
+        let evidence = match &version {
+            Some(_) => format!("version probe from process {}", pid),
+            None => format!("observed process {}; version probe unavailable", pid),
+        };
+        SoftwareInventory {
+            name,
+            version,
+            executable: Some(executable),
+            evidence,
+            observations: 1,
+        }
+    }
+
+    fn run_version_probe(executable: &Path, argument: &str) -> Option<String> {
+        let timeout = ["/usr/bin/timeout", "/bin/timeout"]
+            .into_iter()
+            .map(Path::new)
+            .find(|path| path.is_file())?;
+        let executable = executable.to_str()?;
+        let output = Command::new(timeout)
+            .args(["2", executable, argument])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let text = if output.stdout.is_empty() {
+            String::from_utf8_lossy(&output.stderr)
+        } else {
+            String::from_utf8_lossy(&output.stdout)
+        };
+        let line = text.lines().next()?.trim();
+        let sanitized = line
+            .chars()
+            .filter(|character| !character.is_control())
+            .collect::<String>();
+        (!sanitized.is_empty()).then(|| sanitized.chars().take(200).collect())
     }
 
     fn username_for_uid(uid: u32) -> String {
