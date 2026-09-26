@@ -129,6 +129,9 @@ impl Collector {
                 Ok((dns_names, dns_unavailable, config_references, config_scan_audit)) => {
                     state.dns_names = dns_names;
                     state.config_references = config_references;
+                    if let Some(status) = Self::config_scan_probe_status(&config_scan_audit) {
+                        probe_statuses.config_scan = status;
+                    }
                     state.config_scan_audit = Some(config_scan_audit);
                     if dns_unavailable > 0 {
                         probe_statuses.dns = ProbeStatus::partial(
@@ -867,11 +870,46 @@ impl Collector {
         }
         Ok((names, unavailable, config_refs, config_scan_audit))
     }
+
+    fn config_scan_probe_status(audit: &ConfigScanAudit) -> Option<ProbeStatus> {
+        let recorded_errors = audit.errors.len().saturating_add(audit.errors_truncated);
+        if audit.files_skipped == 0 && recorded_errors == 0 {
+            return None;
+        }
+
+        let unavailable = audit.files_skipped.max(recorded_errors).max(1);
+        Some(ProbeStatus::partial(
+            format!(
+                "configuration scan skipped {} file(s), encountered {} permission denial(s), and recorded {} issue(s)",
+                audit.files_skipped,
+                audit.permission_denied,
+                recorded_errors
+            ),
+            unavailable,
+        ))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::Collector;
+    use crate::models::ConfigScanAudit;
+
+    #[test]
+    fn skipped_config_files_make_config_probe_partial() {
+        let audit = ConfigScanAudit {
+            files_discovered: 4,
+            files_parsed: 3,
+            files_skipped: 1,
+            permission_denied: 1,
+            errors: vec!["/etc/example.conf: permission denied".to_string()],
+            ..ConfigScanAudit::default()
+        };
+        let status = Collector::config_scan_probe_status(&audit).unwrap();
+        assert!(!status.is_complete());
+        assert_eq!(status.unavailable, 1);
+        assert!(status.details.unwrap().contains("permission denial"));
+    }
 
     #[test]
     fn parses_ss_ipv6_endpoint_without_brackets() {

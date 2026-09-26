@@ -160,6 +160,12 @@ pub struct ConfigScanAudit {
     pub permission_denied: usize,
     pub syntax_unsupported: usize,
     pub bytes_scanned: u64,
+    #[serde(default)]
+    pub errors: Vec<String>,
+    #[serde(default)]
+    pub errors_truncated: usize,
+    #[serde(default)]
+    pub syntax_validation: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

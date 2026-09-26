@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use regex::Regex;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -8,20 +9,125 @@ use crate::models::{ConfigReference, ConfigScanAudit};
 pub struct ConfigScanner;
 
 const MAX_CONFIG_FILE_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_AUDIT_ERRORS: usize = 100;
+const SCAN_ROOTS: &[&str] = &[
+    "/etc/nginx",
+    "/etc/apache2",
+    "/etc/httpd",
+    "/etc/haproxy",
+    "/etc/traefik",
+    "/etc/caddy",
+    "/etc/php",
+    "/etc/php-fpm.d",
+    "/etc/mysql",
+    "/etc/postgresql",
+    "/etc/mariadb",
+    "/etc/app",
+    "/etc/environment",
+    "/var/www",
+    "/opt",
+    "/app",
+    "/srv",
+    "/home",
+    "/root",
+];
+type ConfigScanFn = fn(&mut ScanContext) -> Result<Vec<ConfigReference>>;
+
+#[derive(Default)]
+struct ScanContext {
+    audit: ConfigScanAudit,
+    discovered: BTreeSet<PathBuf>,
+    parsed: BTreeSet<PathBuf>,
+    skipped: BTreeSet<PathBuf>,
+    contents: HashMap<PathBuf, Option<String>>,
+}
+
+impl ScanContext {
+    fn record_file_error(&mut self, path: &Path, error: &anyhow::Error) {
+        let identity = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        self.discovered.insert(identity.clone());
+        self.audit.files_discovered = self.discovered.len();
+        if self.skipped.insert(identity) {
+            self.audit.files_skipped += 1;
+        }
+
+        let permission_denied = error.chain().any(|cause| {
+            cause
+                .downcast_ref::<std::io::Error>()
+                .map(|io_error| io_error.kind() == std::io::ErrorKind::PermissionDenied)
+                .unwrap_or(false)
+        });
+        if permission_denied {
+            self.audit.permission_denied += 1;
+        }
+
+        if self.audit.errors.len() < MAX_AUDIT_ERRORS {
+            self.audit
+                .errors
+                .push(format!("{}: {:#}", path.display(), error));
+        } else {
+            self.audit.errors_truncated += 1;
+        }
+    }
+
+    fn record_scanner_error(&mut self, scanner: &str, error: &anyhow::Error) {
+        let permission_denied = error.chain().any(|cause| {
+            cause
+                .downcast_ref::<std::io::Error>()
+                .map(|io_error| io_error.kind() == std::io::ErrorKind::PermissionDenied)
+                .unwrap_or(false)
+        });
+        if permission_denied {
+            self.audit.permission_denied += 1;
+        }
+        if self.audit.errors.len() < MAX_AUDIT_ERRORS {
+            self.audit
+                .errors
+                .push(format!("{} scanner: {:#}", scanner, error));
+        } else {
+            self.audit.errors_truncated += 1;
+        }
+    }
+}
 
 impl ConfigScanner {
-    pub fn scan() -> Result<Vec<ConfigReference>> {
-        let mut references = Vec::new();
+    fn path_is_within_search_root(path: &Path, canonical_path: &Path, roots: &[&str]) -> bool {
+        roots
+            .iter()
+            .map(Path::new)
+            .filter(|root| path.starts_with(root))
+            .max_by_key(|root| root.components().count())
+            .map(|root| Self::path_is_within_root(path, canonical_path, root))
+            .unwrap_or(false)
+    }
 
-        references.extend(Self::scan_nginx()?);
-        references.extend(Self::scan_apache()?);
-        references.extend(Self::scan_haproxy()?);
-        references.extend(Self::scan_traefik()?);
-        references.extend(Self::scan_caddy()?);
-        references.extend(Self::scan_php_fpm()?);
-        references.extend(Self::scan_app_configs()?);
-        references.extend(Self::scan_env_files()?);
-        references.extend(Self::scan_database_configs()?);
+    fn path_is_within_root(path: &Path, canonical_path: &Path, root: &Path) -> bool {
+        path.starts_with(root)
+            && root
+                .canonicalize()
+                .map(|canonical_root| canonical_path.starts_with(canonical_root))
+                .unwrap_or(false)
+    }
+
+    fn scan_with_context(context: &mut ScanContext) -> Vec<ConfigReference> {
+        let mut references = Vec::new();
+        let scanners: [(&str, ConfigScanFn); 9] = [
+            ("nginx", Self::scan_nginx),
+            ("apache", Self::scan_apache),
+            ("haproxy", Self::scan_haproxy),
+            ("traefik", Self::scan_traefik),
+            ("caddy", Self::scan_caddy),
+            ("php-fpm", Self::scan_php_fpm),
+            ("application", Self::scan_app_configs),
+            ("environment", Self::scan_env_files),
+            ("database", Self::scan_database_configs),
+        ];
+        for (name, scan) in scanners {
+            match scan(context) {
+                Ok(found) => references.extend(found),
+                Err(error) => context.record_scanner_error(name, &error),
+            }
+        }
 
         references.sort_by(|a, b| {
             (&a.file_path, &a.hostname, &a.port, &a.context).cmp(&(
@@ -38,14 +144,16 @@ impl ConfigScanner {
                 && a.context == b.context
         });
 
-        Ok(references)
+        references
     }
 
     pub fn scan_with_audit() -> Result<(Vec<ConfigReference>, ConfigScanAudit)> {
         let paths_searched = vec![
             "/etc/nginx",
             "/etc/apache2/sites-enabled",
+            "/etc/apache2/sites-available (disabled entries excluded)",
             "/etc/httpd/conf.d",
+            "/etc/httpd/sites-enabled",
             "/etc/haproxy",
             "/etc/traefik",
             "/etc/caddy",
@@ -59,71 +167,36 @@ impl ConfigScanner {
             "/app",
             "/srv/*",
             "/home/*",
-        ];
-        let mut discovered = std::collections::BTreeSet::new();
-        for root in [
-            "/etc/nginx",
-            "/etc/apache2/sites-enabled",
-            "/etc/httpd/conf.d",
-            "/etc/haproxy",
-            "/etc/traefik",
-            "/etc/caddy",
-            "/etc/php",
-            "/etc/php-fpm.d",
-        ] {
-            discovered.extend(Self::config_files_under(Path::new(root))?);
-        }
-        for pattern in [
-            "/var/www/*/wp-config.php",
-            "/var/www/*/.env",
-            "/opt/*/config.ini",
-            "/opt/*/config.yaml",
-            "/opt/*/config.json",
-            "/etc/app/config.ini",
-            "/app/.env",
-            "/app/config/*.yaml",
-            "/app/config/*.yml",
-            "/srv/*/config.yaml",
-            "/home/*/app/.env",
             "/etc/environment",
             "/root/.env",
             "/home/*/.env",
+            "/var/www/*/.env",
             "/opt/*/.env",
-            "/etc/mysql/my.cnf",
-            "/etc/postgresql/postgresql.conf",
-            "/etc/mariadb/my.cnf",
-        ] {
-            if let Ok(entries) = glob::glob(pattern) {
-                discovered.extend(entries.flatten());
-            }
-        }
-        let references = Self::scan()?;
-        let bytes_scanned = discovered
-            .iter()
-            .filter_map(|path| fs::metadata(path).ok())
-            .map(|metadata| metadata.len())
-            .sum();
-        let files_discovered = discovered.len();
-        Ok((
-            references,
-            ConfigScanAudit {
-                scanner_version: "config-scanner/2".to_string(),
-                paths_searched: paths_searched.into_iter().map(str::to_string).collect(),
-                files_discovered,
-                files_parsed: files_discovered,
-                files_skipped: 0,
-                permission_denied: 0,
-                syntax_unsupported: 0,
-                bytes_scanned,
-            },
-        ))
+            "/app/config/*",
+            "/etc/app/config.ini",
+            "/var/www/*/wp-config.php",
+            "/opt/*/config.ini|config.yaml|config.json",
+            "/app/.env",
+            "/app/config/*.yaml|*.yml",
+            "/srv/*/config.yaml",
+            "/home/*/app/.env",
+        ];
+        let mut context = ScanContext::default();
+        let references = Self::scan_with_context(&mut context);
+        context.audit.scanner_version = "config-scanner/3".to_string();
+        context.audit.paths_searched = paths_searched.into_iter().map(str::to_string).collect();
+        context.audit.syntax_validation =
+            "not performed; extraction uses pattern-based directives".to_string();
+        Ok((references, context.audit))
     }
 
-    fn scan_nginx() -> Result<Vec<ConfigReference>> {
+    fn scan_nginx(context: &mut ScanContext) -> Result<Vec<ConfigReference>> {
         let mut refs = Vec::new();
 
         for path in Self::config_files_under(Path::new("/etc/nginx"))? {
-            let content = Self::read_config_file(&path)?;
+            let Some(content) = Self::read_config_file(&path, context) else {
+                continue;
+            };
             refs.extend(Self::parse_nginx_config(&path, &content)?);
         }
 
@@ -235,7 +308,7 @@ impl ConfigScanner {
         Ok(refs)
     }
 
-    fn scan_apache() -> Result<Vec<ConfigReference>> {
+    fn scan_apache(context: &mut ScanContext) -> Result<Vec<ConfigReference>> {
         let mut refs = Vec::new();
         for dir in [
             "/etc/apache2/sites-enabled",
@@ -244,7 +317,9 @@ impl ConfigScanner {
             "/etc/httpd/sites-enabled",
         ] {
             for path in Self::config_files_under(Path::new(dir))? {
-                let content = Self::read_config_file(&path)?;
+                let Some(content) = Self::read_config_file(&path, context) else {
+                    continue;
+                };
                 refs.extend(Self::parse_apache_config(&path, &content)?);
             }
         }
@@ -327,10 +402,12 @@ impl ConfigScanner {
         Ok(refs)
     }
 
-    fn scan_haproxy() -> Result<Vec<ConfigReference>> {
+    fn scan_haproxy(context: &mut ScanContext) -> Result<Vec<ConfigReference>> {
         let mut refs = Vec::new();
         for path in Self::config_files_under(Path::new("/etc/haproxy"))? {
-            let content = Self::read_config_file(&path)?;
+            let Some(content) = Self::read_config_file(&path, context) else {
+                continue;
+            };
             refs.extend(Self::parse_haproxy_config(&path, &content)?);
         }
         Ok(refs)
@@ -358,10 +435,12 @@ impl ConfigScanner {
         Ok(refs)
     }
 
-    fn scan_traefik() -> Result<Vec<ConfigReference>> {
+    fn scan_traefik(context: &mut ScanContext) -> Result<Vec<ConfigReference>> {
         let mut refs = Vec::new();
         for path in Self::config_files_under(Path::new("/etc/traefik"))? {
-            let content = Self::read_config_file(&path)?;
+            let Some(content) = Self::read_config_file(&path, context) else {
+                continue;
+            };
             refs.extend(Self::parse_traefik_config(&path, &content)?);
         }
         Ok(refs)
@@ -389,7 +468,7 @@ impl ConfigScanner {
         Ok(refs)
     }
 
-    fn scan_caddy() -> Result<Vec<ConfigReference>> {
+    fn scan_caddy(context: &mut ScanContext) -> Result<Vec<ConfigReference>> {
         let mut refs = Vec::new();
         for path in Self::config_files_under(Path::new("/etc/caddy"))? {
             let file_name = path
@@ -397,7 +476,9 @@ impl ConfigScanner {
                 .and_then(|name| name.to_str())
                 .unwrap_or_default();
             if file_name.eq_ignore_ascii_case("caddyfile") {
-                let content = Self::read_config_file(&path)?;
+                let Some(content) = Self::read_config_file(&path, context) else {
+                    continue;
+                };
                 refs.extend(Self::parse_caddy_config(&path, &content)?);
             }
         }
@@ -558,13 +639,15 @@ impl ConfigScanner {
         }
     }
 
-    fn scan_php_fpm() -> Result<Vec<ConfigReference>> {
+    fn scan_php_fpm(context: &mut ScanContext) -> Result<Vec<ConfigReference>> {
         let mut refs = Vec::new();
 
         for root in [Path::new("/etc/php"), Path::new("/etc/php-fpm.d")] {
             for path in Self::config_files_under(root)? {
                 if path.to_string_lossy().ends_with(".conf") {
-                    let content = Self::read_config_file(&path)?;
+                    let Some(content) = Self::read_config_file(&path, context) else {
+                        continue;
+                    };
                     refs.extend(Self::parse_php_config(&path, &content)?);
                 }
             }
@@ -604,7 +687,7 @@ impl ConfigScanner {
         Ok(refs)
     }
 
-    fn scan_app_configs() -> Result<Vec<ConfigReference>> {
+    fn scan_app_configs(context: &mut ScanContext) -> Result<Vec<ConfigReference>> {
         let mut refs = Vec::new();
 
         let config_patterns = vec![
@@ -629,7 +712,9 @@ impl ConfigScanner {
                 if entry.file_name().and_then(|name| name.to_str()) == Some(".env") {
                     continue;
                 }
-                let content = Self::read_config_file(&entry)?;
+                let Some(content) = Self::read_config_file(&entry, context) else {
+                    continue;
+                };
                 refs.extend(Self::parse_app_config(&entry, &content)?);
             }
         }
@@ -739,7 +824,7 @@ impl ConfigScanner {
         Ok(())
     }
 
-    fn scan_env_files() -> Result<Vec<ConfigReference>> {
+    fn scan_env_files(context: &mut ScanContext) -> Result<Vec<ConfigReference>> {
         let mut refs = Vec::new();
 
         let env_paths = vec![
@@ -755,7 +840,9 @@ impl ConfigScanner {
                 .with_context(|| format!("Invalid environment glob {}", pattern))?;
             for entry in entries {
                 let entry = entry.with_context(|| format!("Unable to enumerate {}", pattern))?;
-                let content = Self::read_config_file(&entry)?;
+                let Some(content) = Self::read_config_file(&entry, context) else {
+                    continue;
+                };
                 refs.extend(Self::parse_env_file(&entry, &content)?);
             }
         }
@@ -844,7 +931,7 @@ impl ConfigScanner {
         )
     }
 
-    fn scan_database_configs() -> Result<Vec<ConfigReference>> {
+    fn scan_database_configs(context: &mut ScanContext) -> Result<Vec<ConfigReference>> {
         let mut refs = Vec::new();
 
         let db_config_paths = vec![
@@ -855,7 +942,9 @@ impl ConfigScanner {
 
         for path in db_config_paths {
             if Path::new(path).exists() {
-                let content = Self::read_config_file(Path::new(path))?;
+                let Some(content) = Self::read_config_file(Path::new(path), context) else {
+                    continue;
+                };
                 refs.extend(Self::parse_database_config(Path::new(path), &content)?);
             }
         }
@@ -904,24 +993,63 @@ impl ConfigScanner {
             .all(|c| c.is_alphanumeric() || c == '.' || c == '-' || c == '_')
     }
 
-    fn read_config_file(path: &Path) -> Result<String> {
-        let metadata = fs::metadata(path)
-            .with_context(|| format!("Unable to stat config file {}", path.display()))?;
-        if !metadata.is_file() {
-            return Err(anyhow::anyhow!(
-                "Config path is not a regular file: {}",
-                path.display()
-            ));
+    fn read_config_file(path: &Path, context: &mut ScanContext) -> Option<String> {
+        Self::read_config_file_with_roots(path, context, SCAN_ROOTS)
+    }
+
+    fn read_config_file_with_roots(
+        path: &Path,
+        context: &mut ScanContext,
+        roots: &[&str],
+    ) -> Option<String> {
+        let identity = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        if let Some(cached) = context.contents.get(&identity) {
+            return cached.clone();
         }
-        if metadata.len() > MAX_CONFIG_FILE_BYTES {
-            return Err(anyhow::anyhow!(
-                "Config file exceeds {} byte limit: {}",
-                MAX_CONFIG_FILE_BYTES,
-                path.display()
-            ));
+
+        context.discovered.insert(identity.clone());
+        context.audit.files_discovered = context.discovered.len();
+
+        let result = (|| {
+            if !Self::path_is_within_search_root(path, &identity, roots) {
+                anyhow::bail!("Config path resolves outside configured scan roots");
+            }
+            let entry_metadata = fs::symlink_metadata(path)
+                .with_context(|| format!("Unable to inspect config file {}", path.display()))?;
+            if entry_metadata.file_type().is_symlink() {
+                anyhow::bail!("Refusing to read a config-file symlink: {}", path.display());
+            }
+            let metadata = fs::metadata(path)
+                .with_context(|| format!("Unable to stat config file {}", path.display()))?;
+            if !metadata.is_file() {
+                anyhow::bail!("Config path is not a regular file: {}", path.display());
+            }
+            if metadata.len() > MAX_CONFIG_FILE_BYTES {
+                anyhow::bail!(
+                    "Config file exceeds {} byte limit: {}",
+                    MAX_CONFIG_FILE_BYTES,
+                    path.display()
+                );
+            }
+            fs::read_to_string(path)
+                .with_context(|| format!("Unable to read config file {}", path.display()))
+        })();
+
+        match result {
+            Ok(content) => {
+                if context.parsed.insert(identity.clone()) {
+                    context.audit.files_parsed += 1;
+                    context.audit.bytes_scanned += content.len() as u64;
+                }
+                context.contents.insert(identity, Some(content.clone()));
+                Some(content)
+            }
+            Err(error) => {
+                context.record_file_error(path, &error);
+                context.contents.insert(identity, None);
+                None
+            }
         }
-        fs::read_to_string(path)
-            .with_context(|| format!("Unable to read config file {}", path.display()))
     }
 
     fn strip_comments(content: &str, marker: char) -> String {
@@ -951,6 +1079,68 @@ mod tests {
     use super::ConfigScanner;
     use std::fs;
     use std::path::Path;
+
+    #[test]
+    fn scan_metrics_count_unique_reads_and_record_skipped_files() {
+        let root = std::env::temp_dir().join(format!(
+            "screamless-scan-metrics-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let outside = root.with_extension("external");
+        fs::create_dir_all(&outside).unwrap();
+        let readable = root.join("readable.conf");
+        let missing = root.join("missing.conf");
+        let oversized = root.join("oversized.conf");
+        let linked_directory = root.join("linked");
+        fs::write(&readable, "backend = db01:5432\n").unwrap();
+        fs::write(outside.join("outside.conf"), "DB_HOST=outside\n").unwrap();
+        fs::File::create(&oversized)
+            .unwrap()
+            .set_len(super::MAX_CONFIG_FILE_BYTES + 1)
+            .unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, &linked_directory).unwrap();
+
+        let mut context = super::ScanContext::default();
+        let roots = [root.to_str().unwrap()];
+        assert!(
+            ConfigScanner::read_config_file_with_roots(&readable, &mut context, &roots).is_some()
+        );
+        assert!(
+            ConfigScanner::read_config_file_with_roots(&readable, &mut context, &roots).is_some()
+        );
+        assert!(
+            ConfigScanner::read_config_file_with_roots(&missing, &mut context, &roots).is_none()
+        );
+        assert!(
+            ConfigScanner::read_config_file_with_roots(&oversized, &mut context, &roots).is_none()
+        );
+        #[cfg(unix)]
+        assert!(ConfigScanner::read_config_file_with_roots(
+            &linked_directory.join("outside.conf"),
+            &mut context,
+            &roots
+        )
+        .is_none());
+
+        #[cfg(unix)]
+        let expected_discovered = 4;
+        #[cfg(not(unix))]
+        let expected_discovered = 3;
+        assert_eq!(context.audit.files_discovered, expected_discovered);
+        assert_eq!(context.audit.files_parsed, 1);
+        assert_eq!(context.audit.files_skipped, expected_discovered - 1);
+        assert_eq!(
+            context.audit.bytes_scanned,
+            fs::metadata(&readable).unwrap().len()
+        );
+        assert_eq!(context.audit.errors.len(), expected_discovered - 1);
+
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(outside).unwrap();
+    }
 
     #[test]
     fn env_scanner_only_accepts_host_keys_and_urls() {
