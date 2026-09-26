@@ -71,6 +71,14 @@ Process activity counts snapshots in which a process was observed; it does not c
 
 Long-running `observe` sessions retain the most recent 30 days of snapshots automatically.
 
+### Storage architecture
+
+The JSON snapshot in `snapshots.data` is the canonical audit/provenance record and
+is the source used by analysis. Legacy normalized relationship tables are retained
+for compatibility with older databases, but new snapshots are not duplicated into
+those tables. This keeps collection to one serialization and one database write
+while preserving the complete evidence needed for future analysis.
+
 ### Shutdown Impact
 ```
 If you shut down db01:

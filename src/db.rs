@@ -85,6 +85,9 @@ impl Database {
                 FOREIGN KEY(snapshot_id) REFERENCES snapshots(id)
             );
 
+            -- Legacy compatibility tables. The JSON snapshot is canonical;
+            -- new snapshots are no longer duplicated into these tables.
+
             CREATE INDEX IF NOT EXISTS idx_snapshots_hostname_timestamp
                 ON snapshots(hostname, timestamp);
             CREATE INDEX IF NOT EXISTS idx_listening_services_snapshot
@@ -102,7 +105,6 @@ impl Database {
         }
         if version < SCHEMA_VERSION {
             if version < 1 {
-                self.backfill_normalized_tables()?;
                 self.conn.execute_batch("PRAGMA user_version = 1;")?;
             }
             if version < 2 {
@@ -136,70 +138,6 @@ impl Database {
         Ok(())
     }
 
-    fn backfill_normalized_tables(&self) -> SqlResult<()> {
-        self.conn.execute_batch(
-            "DELETE FROM listening_services;
-             DELETE FROM network_connections;
-             DELETE FROM cron_jobs;
-             DELETE FROM systemd_timers;",
-        )?;
-
-        let snapshots = {
-            let mut stmt = self
-                .conn
-                .prepare("SELECT id, data FROM snapshots ORDER BY id")?;
-            let rows = stmt.query_map([], |row| {
-                let id = row.get::<_, i64>(0)?;
-                let json = row.get::<_, String>(1)?;
-                let snapshot =
-                    serde_json::from_str::<ObservationSnapshot>(&json).map_err(|error| {
-                        rusqlite::Error::FromSqlConversionFailure(1, Type::Text, Box::new(error))
-                    })?;
-                Ok((id, snapshot))
-            })?;
-            rows.collect::<SqlResult<Vec<_>>>()?
-        };
-
-        for (snapshot_id, snapshot) in snapshots {
-            for service in &snapshot.listening_services {
-                self.conn.execute(
-                    "INSERT INTO listening_services (snapshot_id, port, protocol, process_name, pid, user)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    rusqlite::params![snapshot_id, service.port, service.protocol, service.process_name, service.pid, service.user],
-                )?;
-            }
-            for connection in &snapshot.network_connections {
-                self.conn.execute(
-                    "INSERT INTO network_connections
-                     (snapshot_id, local_addr, local_port, remote_addr, remote_port, protocol, state, pid, process_name)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                    rusqlite::params![snapshot_id, connection.local_addr, connection.local_port, connection.remote_addr, connection.remote_port, connection.protocol, connection.state, connection.pid, connection.process_name],
-                )?;
-            }
-            for job in &snapshot.cron_jobs {
-                self.conn.execute(
-                    "INSERT INTO cron_jobs (snapshot_id, schedule, command, source)
-                     VALUES (?1, ?2, ?3, ?4)",
-                    rusqlite::params![snapshot_id, job.schedule, job.command, job.source],
-                )?;
-            }
-            for timer in &snapshot.systemd_timers {
-                self.conn.execute(
-                    "INSERT INTO systemd_timers (snapshot_id, name, unit, enabled, active)
-                     VALUES (?1, ?2, ?3, ?4, ?5)",
-                    rusqlite::params![
-                        snapshot_id,
-                        timer.name,
-                        timer.unit,
-                        timer.enabled,
-                        timer.active
-                    ],
-                )?;
-            }
-        }
-        Ok(())
-    }
-
     pub fn store_snapshot(&mut self, snapshot: &ObservationSnapshot) -> SqlResult<()> {
         let snapshot_json = serde_json::to_string(&snapshot)
             .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
@@ -213,64 +151,6 @@ impl Database {
              ON CONFLICT(hostname, timestamp) DO UPDATE SET data = excluded.data",
             rusqlite::params![&snapshot.hostname, timestamp, snapshot_json],
         )?;
-
-        let snapshot_id: i64 = tx.query_row(
-            "SELECT id FROM snapshots WHERE hostname = ?1 AND timestamp = ?2",
-            rusqlite::params![&snapshot.hostname, timestamp],
-            |row| row.get(0),
-        )?;
-        tx.execute(
-            "DELETE FROM listening_services WHERE snapshot_id = ?1",
-            [snapshot_id],
-        )?;
-        tx.execute(
-            "DELETE FROM network_connections WHERE snapshot_id = ?1",
-            [snapshot_id],
-        )?;
-        tx.execute(
-            "DELETE FROM cron_jobs WHERE snapshot_id = ?1",
-            [snapshot_id],
-        )?;
-        tx.execute(
-            "DELETE FROM systemd_timers WHERE snapshot_id = ?1",
-            [snapshot_id],
-        )?;
-
-        for service in &snapshot.listening_services {
-            tx.execute(
-                "INSERT INTO listening_services (snapshot_id, port, protocol, process_name, pid, user)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                rusqlite::params![snapshot_id, service.port, service.protocol, service.process_name, service.pid, service.user],
-            )?;
-        }
-        for connection in &snapshot.network_connections {
-            tx.execute(
-                "INSERT INTO network_connections
-                 (snapshot_id, local_addr, local_port, remote_addr, remote_port, protocol, state, pid, process_name)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                rusqlite::params![snapshot_id, connection.local_addr, connection.local_port, connection.remote_addr, connection.remote_port, connection.protocol, connection.state, connection.pid, connection.process_name],
-            )?;
-        }
-        for job in &snapshot.cron_jobs {
-            tx.execute(
-                "INSERT INTO cron_jobs (snapshot_id, schedule, command, source)
-                 VALUES (?1, ?2, ?3, ?4)",
-                rusqlite::params![snapshot_id, job.schedule, job.command, job.source],
-            )?;
-        }
-        for timer in &snapshot.systemd_timers {
-            tx.execute(
-                "INSERT INTO systemd_timers (snapshot_id, name, unit, enabled, active)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params![
-                    snapshot_id,
-                    timer.name,
-                    timer.unit,
-                    timer.enabled,
-                    timer.active
-                ],
-            )?;
-        }
 
         tx.commit()?;
 
@@ -379,7 +259,7 @@ mod tests {
     use chrono::Utc;
 
     #[test]
-    fn stores_snapshot_data_and_normalized_rows_together() {
+    fn stores_snapshot_as_canonical_audit_record_without_normalized_duplicates() {
         let path =
             std::env::temp_dir().join(format!("screamless-db-test-{}.db", std::process::id()));
         let mut db = Database::new(&path).unwrap();
@@ -427,8 +307,9 @@ mod tests {
             .conn
             .query_row("SELECT COUNT(*) FROM cron_jobs", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(listener_count, 2);
-        assert_eq!(cron_count, 2);
+        assert_eq!(listener_count, 0);
+        assert_eq!(cron_count, 0);
+        assert_eq!(db.get_snapshots_since("test-host", 0).unwrap().len(), 2);
 
         #[cfg(unix)]
         {
