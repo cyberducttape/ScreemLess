@@ -26,6 +26,12 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      - name: Validate installer and service activation scripts
+        run: |
+          bash -n install.sh tests/service_activation.sh
+          sh -n packaging/postinstall.sh packaging/service-activation.sh
+          bash tests/service_activation.sh
+
       - name: Run Clippy
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
@@ -105,8 +111,10 @@ jobs:
           mkdir -p "dist/screamless-${VERSION}"
           install -m 0755 target/release/screamless "dist/screamless-${VERSION}/screamless"
           install -m 0644 LICENSE CHANGELOG.md README.md packaging/screamless-agent.service "dist/screamless-${VERSION}/"
+          install -m 0755 packaging/service-activation.sh "dist/screamless-${VERSION}/service-activation.sh"
           tar -C dist -czf "dist/screamless-${VERSION}-linux-arm64.tar.gz" "screamless-${VERSION}"
           tar -tzf "dist/screamless-${VERSION}-linux-arm64.tar.gz" | grep -q "screamless-${VERSION}/screamless"
+          tar -tzf "dist/screamless-${VERSION}-linux-arm64.tar.gz" | grep -q "screamless-${VERSION}/service-activation.sh"
           if tar -tzf "dist/screamless-${VERSION}-linux-arm64.tar.gz" | grep -E '(^|/)\.git(/|$)'; then
             echo "Git internals found in ARM64 archive" >&2
             exit 1

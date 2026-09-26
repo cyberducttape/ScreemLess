@@ -14,5 +14,9 @@ contents:
     dst: /etc/systemd/system/screamless-agent.service
     file_info:
       mode: 0644
+  - src: ./packaging/service-activation.sh
+    dst: /usr/lib/screamless/service-activation.sh
+    file_info:
+      mode: 0755
 scripts:
   postinstall: ./packaging/postinstall.sh

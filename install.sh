@@ -83,24 +83,20 @@ if [[ "$INSTALL_SERVICE" == 1 ]]; then
     DATA_DIR="/var/lib/screamless"
     if [[ "$FROM_SOURCE" == 1 ]]; then
         SERVICE_FILE="$BUILD_DIR/source/packaging/screamless-agent.service"
+        SERVICE_ACTIVATION="$BUILD_DIR/source/packaging/service-activation.sh"
     else
         SERVICE_FILE="$BUILD_DIR/screamless-${VERSION}/screamless-agent.service"
+        SERVICE_ACTIVATION="$BUILD_DIR/screamless-${VERSION}/service-activation.sh"
     fi
-    if [[ ! -f "$SERVICE_FILE" ]]; then
-        echo "Agent service unit is missing from the installation source" >&2
+    if [[ ! -f "$SERVICE_FILE" || ! -f "$SERVICE_ACTIVATION" ]]; then
+        echo "Agent service files are missing from the installation source" >&2
         exit 1
     fi
 
     as_root install -d -m 0750 "$DATA_DIR"
     as_root install -m 0644 "$SERVICE_FILE" /etc/systemd/system/screamless-agent.service
     if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
-        as_root systemctl daemon-reload
-        as_root systemctl enable screamless-agent.service
-        if as_root systemctl is-active --quiet screamless-agent.service; then
-            as_root systemctl restart screamless-agent.service
-        else
-            as_root systemctl start screamless-agent.service
-        fi
+        as_root sh "$SERVICE_ACTIVATION" --run
     else
         echo "systemd is not running; enable screamless-agent.service after boot" >&2
     fi
