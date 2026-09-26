@@ -76,3 +76,38 @@ jobs:
 
       - name: Check MSRV build
         run: cargo check --locked --all-targets
+
+  arm64-release:
+    name: Linux ARM64 build and archive smoke test
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # stable
+        with:
+          toolchain: 1.96.0
+
+      - name: Test and build ARM64 binary
+        run: |
+          test "$(uname -m)" = aarch64
+          cargo test --locked --all-targets
+          cargo build --locked --release
+          readelf -h target/release/screamless | grep -Eq 'Machine:.*AArch64'
+          target/release/screamless --help >/dev/null
+
+      - name: Smoke-test ARM64 release archive layout
+        run: |
+          VERSION="${GITHUB_SHA::12}"
+          mkdir -p "dist/screamless-${VERSION}"
+          install -m 0755 target/release/screamless "dist/screamless-${VERSION}/screamless"
+          install -m 0644 LICENSE CHANGELOG.md README.md packaging/screamless-agent.service "dist/screamless-${VERSION}/"
+          tar -C dist -czf "dist/screamless-${VERSION}-linux-arm64.tar.gz" "screamless-${VERSION}"
+          tar -tzf "dist/screamless-${VERSION}-linux-arm64.tar.gz" | grep -q "screamless-${VERSION}/screamless"
+          if tar -tzf "dist/screamless-${VERSION}-linux-arm64.tar.gz" | grep -E '(^|/)\.git(/|$)'; then
+            echo "Git internals found in ARM64 archive" >&2
+            exit 1
+          fi

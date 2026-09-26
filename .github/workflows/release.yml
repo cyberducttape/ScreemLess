@@ -55,10 +55,6 @@ jobs:
           format: spdx-json
           output-file: dist/SBOM.spdx.json
 
-      - name: Generate checksums
-        working-directory: dist
-        run: sha256sum -- *.tar.gz *.deb *.rpm SBOM.spdx.json > SHA256SUMS
-
       - name: Upload unsigned release artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -66,8 +62,44 @@ jobs:
           path: dist/
           if-no-files-found: error
 
+  build-arm64:
+    name: Build Linux ARM64 archive
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # stable
+        with:
+          toolchain: 1.96.0
+
+      - name: Build and stage Linux ARM64 artifact
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          test "$(uname -m)" = aarch64
+          cargo build --locked --release
+          readelf -h target/release/screamless | grep -Eq 'Machine:.*AArch64'
+          target/release/screamless --help >/dev/null
+          mkdir -p "dist/screamless-${VERSION}"
+          install -m 0755 target/release/screamless "dist/screamless-${VERSION}/screamless"
+          install -m 0644 LICENSE CHANGELOG.md README.md packaging/screamless-agent.service "dist/screamless-${VERSION}/"
+          tar -C dist -czf "dist/screamless-${VERSION}-linux-arm64.tar.gz" "screamless-${VERSION}"
+          if tar -tzf "dist/screamless-${VERSION}-linux-arm64.tar.gz" | grep -E '(^|/)\.git(/|$)'; then
+            echo "Git internals found in ARM64 binary archive" >&2
+            exit 1
+          fi
+
+      - name: Upload unsigned ARM64 archive
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: unsigned-release-arm64
+          path: dist/screamless-${{ env.VERSION }}-linux-arm64.tar.gz
+          if-no-files-found: error
+
   sign:
-    needs: build
+    needs: [build, build-arm64]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -78,6 +110,16 @@ jobs:
         with:
           name: unsigned-release-files
           path: dist/
+
+      - name: Download unsigned ARM64 archive
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: unsigned-release-arm64
+          path: dist/
+
+      - name: Generate checksums for all architectures
+        working-directory: dist
+        run: sha256sum -- *.tar.gz *.deb *.rpm SBOM.spdx.json > SHA256SUMS
 
       - name: Install Cosign
         uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
