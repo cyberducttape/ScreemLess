@@ -213,21 +213,18 @@ impl ConfigScanner {
         let upstream_re = Regex::new(r"(?m)upstream\s+\w+\s*\{([^}]+)\}")?;
         let server_re = Regex::new(r"(?m)server\s+([^\s;]+)(?::(\d+))?")?;
         let proxy_re = Regex::new(r"proxy_pass\s+(?:https?://)?([^/:]+)(?::(\d+))?")?;
-        let site_re = Regex::new(r"(?ms)server\s*\{([^}]*)\}")?;
         let name_re = Regex::new(r"\bserver_name\s+([^;]+);")?;
         let root_re = Regex::new(r"\broot\s+([^;]+);")?;
         let listen_re = Regex::new(r"\blisten\s+([^;]+);")?;
 
-        for site in site_re.captures_iter(&content) {
-            let Some(block) = site.get(1).map(|value| value.as_str()) else {
-                continue;
-            };
+        for block in Self::nginx_server_blocks(&content)? {
+            let directives = Self::nginx_direct_scope(block);
             let root = root_re
-                .captures(block)
+                .captures(&directives)
                 .and_then(|capture| capture.get(1))
                 .map(|value| value.as_str().trim().to_string());
             let ports = listen_re
-                .captures_iter(block)
+                .captures_iter(&directives)
                 .filter_map(|capture| capture.get(1))
                 .filter_map(|value| value.as_str().split_whitespace().next())
                 .filter_map(|value| {
@@ -239,7 +236,10 @@ impl ConfigScanner {
                         .ok()
                 })
                 .collect::<Vec<_>>();
-            if let Some(names) = name_re.captures(block).and_then(|capture| capture.get(1)) {
+            if let Some(names) = name_re
+                .captures(&directives)
+                .and_then(|capture| capture.get(1))
+            {
                 for hostname in names
                     .as_str()
                     .split_whitespace()
@@ -309,6 +309,104 @@ impl ConfigScanner {
         }
 
         Ok(refs)
+    }
+
+    fn nginx_server_blocks(content: &str) -> Result<Vec<&str>> {
+        let server_start_re = Regex::new(r"\bserver\s*\{")?;
+        let mut blocks = Vec::new();
+        for start in server_start_re.find_iter(content) {
+            let open_brace = start.end() - 1;
+            let block_start = open_brace + 1;
+            let mut depth = 1usize;
+            let mut quote = None;
+            let mut escaped = false;
+            for (relative, character) in content[block_start..].char_indices() {
+                if escaped {
+                    escaped = false;
+                    continue;
+                }
+                if quote.is_some() && character == '\\' {
+                    escaped = true;
+                    continue;
+                }
+                if let Some(quote_character) = quote {
+                    if character == quote_character {
+                        quote = None;
+                    }
+                    continue;
+                }
+                match character {
+                    '\'' | '"' => quote = Some(character),
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            blocks.push(&content[block_start..block_start + relative]);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(blocks)
+    }
+
+    /// Masks nested Nginx scopes so site-level fields (e.g. `root`) are not
+    /// accidentally taken from a `location` block.
+    fn nginx_direct_scope(block: &str) -> String {
+        let mut output = String::with_capacity(block.len());
+        let mut depth = 0usize;
+        let mut quote = None;
+        let mut escaped = false;
+        for character in block.chars() {
+            if escaped {
+                if depth == 0 {
+                    output.push(character);
+                } else {
+                    output.push(if character == '\n' { '\n' } else { ' ' });
+                }
+                escaped = false;
+                continue;
+            }
+            if quote.is_some() && character == '\\' {
+                if depth == 0 {
+                    output.push(character);
+                } else {
+                    output.push(' ');
+                }
+                escaped = true;
+                continue;
+            }
+            if let Some(quote_character) = quote {
+                if depth == 0 {
+                    output.push(character);
+                } else {
+                    output.push(if character == '\n' { '\n' } else { ' ' });
+                }
+                if character == quote_character {
+                    quote = None;
+                }
+                continue;
+            }
+            match character {
+                '\'' | '"' => {
+                    quote = Some(character);
+                    output.push(if depth == 0 { character } else { ' ' });
+                }
+                '{' => {
+                    depth += 1;
+                    output.push(' ');
+                }
+                '}' => {
+                    depth = depth.saturating_sub(1);
+                    output.push(' ');
+                }
+                _ if depth == 0 => output.push(character),
+                _ => output.push(if character == '\n' { '\n' } else { ' ' }),
+            }
+        }
+        output
     }
 
     fn scan_apache(context: &mut ScanContext) -> Result<Vec<ConfigReference>> {
@@ -1324,6 +1422,41 @@ mod tests {
         assert!(!refs
             .iter()
             .any(|reference| reference.hostname == "disabled.example.com"));
+    }
+
+    #[test]
+    fn nginx_nested_location_does_not_truncate_or_override_server_directives() {
+        let refs = ConfigScanner::parse_nginx_config(
+            Path::new("/etc/nginx/sites-enabled/nested.conf"),
+            r#"server {
+                listen 443 ssl;
+                root /srv/site;
+                location /assets/ {
+                    root /srv/assets;
+                }
+                server_name nested.example.test;
+            }
+            server {
+                location / {
+                    server_name not-a-site.example.test;
+                    root /srv/location-only;
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let site = refs
+            .iter()
+            .find(|reference| reference.hostname == "nested.example.test")
+            .expect("server_name after nested location should be discovered");
+        assert!(site.context.contains("root=/srv/site"));
+        assert!(site.context.contains("ports=443"));
+        assert!(!refs
+            .iter()
+            .any(|reference| reference.hostname == "not-a-site.example.test"));
+        assert!(!refs
+            .iter()
+            .any(|reference| reference.context.contains("root=/srv/location-only")));
     }
 
     #[test]
