@@ -14,9 +14,14 @@ impl Database {
         let conn = Connection::open(path)?;
         let mut db = Database { conn };
         db.conn.execute_batch("PRAGMA foreign_keys = ON;")?;
-        db.conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        db.conn.busy_timeout(std::time::Duration::from_secs(30))?;
         db.restrict_file_permissions(path)?;
+        // WAL lets report/dashboard readers coexist with the collector's
+        // periodic writes instead of taking a database-wide read lock.
+        // SQLite retains its default FULL synchronous setting for durability.
+        db.conn.pragma_update(None, "journal_mode", "WAL")?;
         db.init_schema()?;
+        db.restrict_file_permissions(path)?;
         Ok(db)
     }
 
@@ -24,8 +29,22 @@ impl Database {
         #[cfg(unix)]
         if path != Path::new(":memory:") {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+            for protected_path in [
+                path.to_path_buf(),
+                Path::new(&format!("{}-wal", path.display())).to_path_buf(),
+                Path::new(&format!("{}-shm", path.display())).to_path_buf(),
+            ] {
+                match std::fs::set_permissions(
+                    &protected_path,
+                    std::fs::Permissions::from_mode(0o600),
+                ) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -256,6 +275,7 @@ mod tests {
     use super::Database;
     use crate::models::*;
     use chrono::Utc;
+    use rusqlite::Connection;
 
     #[test]
     fn stores_snapshot_as_canonical_audit_record_without_normalized_duplicates() {
@@ -320,6 +340,57 @@ mod tests {
             );
         }
 
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn database_uses_wal_for_concurrent_reader_writer_access() {
+        let path = std::env::temp_dir().join(format!(
+            "screamless-db-wal-{}-{}.db",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let db = Database::new(&path).unwrap();
+        let journal_mode: String = db
+            .conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+
+        let reader = Connection::open(&path).unwrap();
+        reader
+            .query_row("SELECT COUNT(*) FROM snapshots", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap();
+        reader.execute_batch("BEGIN DEFERRED;").unwrap();
+        reader
+            .query_row("SELECT COUNT(*) FROM snapshots", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO snapshots (hostname, timestamp, data) VALUES (?1, ?2, ?3)",
+                rusqlite::params!["writer", 1_i64, "{}"],
+            )
+            .unwrap();
+        let visible_to_reader: i64 = reader
+            .query_row("SELECT COUNT(*) FROM snapshots", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(visible_to_reader, 0);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let wal_path = std::path::PathBuf::from(format!("{}-wal", path.display()));
+            assert_eq!(
+                std::fs::metadata(wal_path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        reader.execute_batch("ROLLBACK;").unwrap();
+        drop(reader);
         drop(db);
         let _ = std::fs::remove_file(path);
     }
