@@ -40,6 +40,15 @@ while (($#)); do
     shift
 done
 
+if [[ "$INSTALL_SERVICE" == 1 ]]; then
+    case "$INSTALL_DIR" in
+        /tmp|/tmp/*|/var/tmp|/var/tmp/*)
+            echo "INSTALL_DIR cannot be under /tmp or /var/tmp because the systemd service uses PrivateTmp=true" >&2
+            exit 3
+            ;;
+    esac
+fi
+
 case "$(uname -m)" in
     x86_64) ARTIFACT_ARCH=amd64 ;;
     aarch64|arm64) ARTIFACT_ARCH=arm64 ;;
@@ -78,12 +87,6 @@ fi
 
 [[ -x "$BINARY" ]] || { echo "Release binary was not found" >&2; exit 1; }
 
-if [[ -w "$INSTALL_DIR" ]]; then
-    install -D -m 0755 "$BINARY" "$INSTALL_DIR/screamless"
-else
-    as_root install -D -m 0755 "$BINARY" "$INSTALL_DIR/screamless"
-fi
-
 if [[ "$INSTALL_SERVICE" == 1 ]]; then
     DATA_DIR="/var/lib/screamless"
     if [[ "$FROM_SOURCE" == 1 ]]; then
@@ -104,7 +107,15 @@ if [[ "$INSTALL_SERVICE" == 1 ]]; then
         bash "$SERVICE_RENDERER" "$SERVICE_FILE" "$INSTALL_DIR/screamless" > "$CUSTOM_SERVICE_FILE"
         SERVICE_FILE="$CUSTOM_SERVICE_FILE"
     fi
+fi
 
+if [[ -w "$INSTALL_DIR" ]]; then
+    install -D -m 0755 "$BINARY" "$INSTALL_DIR/screamless"
+else
+    as_root install -D -m 0755 "$BINARY" "$INSTALL_DIR/screamless"
+fi
+
+if [[ "$INSTALL_SERVICE" == 1 ]]; then
     as_root install -d -m 0750 "$DATA_DIR"
     as_root install -m 0644 "$SERVICE_FILE" /etc/systemd/system/screamless-agent.service
     if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
