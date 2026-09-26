@@ -435,6 +435,17 @@ fn infrastructure(db_path: &std::path::Path, servers: String, format: OutputForm
     let clusters = InfrastructureMapper::find_dependency_clusters(&chains);
 
     if json_output {
+        let hosts = server_list
+            .iter()
+            .filter_map(|hostname| {
+                server_analyses.get(hostname).map(|(analysis, _)| {
+                    serde_json::json!({
+                        "hostname": hostname,
+                        "analysis": analysis,
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
@@ -445,9 +456,8 @@ fn infrastructure(db_path: &std::path::Path, servers: String, format: OutputForm
                     "requested_hours": 168,
                     "hosts_requested": server_list,
                 },
-                "hosts": server_analyses,
+                "hosts": hosts,
                 "servers_analyzed": server_analyses.len(),
-                "analyses": server_analyses,
                 "dependency_chains": chains,
                 "high_fan_in_candidates": high_fan_in,
                 "high_fan_in_services": high_fan_in,
