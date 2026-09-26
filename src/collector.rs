@@ -175,7 +175,9 @@ impl Collector {
         fs::read_to_string("/etc/hostname")
             .map(|s| s.trim().to_string())
             .or_else(|_| {
-                Command::new("hostname")
+                let executable = Self::trusted_command_path("hostname")
+                    .ok_or_else(|| anyhow!("No trusted hostname utility found"))?;
+                Command::new(executable)
                     .output()
                     .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
                     .context("Failed to get hostname")
@@ -248,12 +250,61 @@ impl Collector {
     }
 
     fn command_text(command: &str, args: &[&str]) -> Option<String> {
-        let output = Command::new(command).args(args).output().ok()?;
+        let executable = Self::trusted_command_path(command)?;
+        let output = Command::new(executable).args(args).output().ok()?;
         if !output.status.success() {
             return None;
         }
         let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
         (!value.is_empty()).then_some(value)
+    }
+
+    fn trusted_command_path(command: &str) -> Option<std::path::PathBuf> {
+        if command.is_empty()
+            || !command
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return None;
+        }
+
+        ["/usr/bin", "/usr/sbin", "/bin", "/sbin"]
+            .iter()
+            .map(|directory| std::path::Path::new(directory).join(command))
+            .find_map(|candidate| {
+                let executable = fs::canonicalize(candidate).ok()?;
+                let metadata = fs::metadata(&executable).ok()?;
+                if !metadata.is_file() {
+                    return None;
+                }
+
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt;
+                    if metadata.uid() != 0
+                        || metadata.mode() & 0o022 != 0
+                        || metadata.mode() & 0o111 == 0
+                    {
+                        return None;
+                    }
+                    let mut directory = executable.parent();
+                    while let Some(path) = directory {
+                        let directory_metadata = fs::metadata(path).ok()?;
+                        if !directory_metadata.is_dir()
+                            || directory_metadata.uid() != 0
+                            || directory_metadata.mode() & 0o022 != 0
+                        {
+                            return None;
+                        }
+                        if path == std::path::Path::new("/") {
+                            break;
+                        }
+                        directory = path.parent();
+                    }
+                }
+
+                Some(executable)
+            })
     }
 
     fn interface_addresses() -> Vec<String> {
@@ -389,17 +440,20 @@ impl Collector {
     }
 
     fn run_socket_probe(args: &[&str]) -> Result<Output> {
-        let ss_result = Command::new("ss").args(args).output();
-        if let Ok(output) = ss_result {
-            if output.status.success() {
-                return Ok(output);
+        if let Some(ss) = Self::trusted_command_path("ss") {
+            if let Ok(output) = Command::new(ss).args(args).output() {
+                if output.status.success() {
+                    return Ok(output);
+                }
             }
         }
 
-        let netstat = Command::new("netstat")
+        let netstat = Self::trusted_command_path("netstat")
+            .ok_or_else(|| anyhow!("No trusted ss or netstat utility found"))?;
+        let netstat = Command::new(netstat)
             .args(args)
             .output()
-            .context("Failed to execute ss and netstat")?;
+            .context("Failed to execute trusted ss and netstat utilities")?;
         if netstat.status.success() {
             Ok(netstat)
         } else {
@@ -783,7 +837,9 @@ impl Collector {
     fn collect_systemd_timers() -> Result<Vec<SystemdTimer>> {
         let mut timers = Vec::new();
 
-        let output = Command::new("systemctl")
+        let systemctl = Self::trusted_command_path("systemctl")
+            .ok_or_else(|| anyhow!("No trusted systemctl utility found"))?;
+        let output = Command::new(systemctl)
             .args(["list-timers", "--all", "--output=json"])
             .output()
             .context("Failed to run systemctl list-timers")?;
@@ -894,6 +950,22 @@ impl Collector {
 mod tests {
     use super::Collector;
     use crate::models::ConfigScanAudit;
+
+    #[test]
+    fn host_utility_resolution_accepts_only_root_owned_system_binaries() {
+        let hostname = Collector::trusted_command_path("hostname")
+            .expect("hostname should be installed on Linux CI");
+        assert!(hostname.is_absolute());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let metadata = std::fs::metadata(hostname).unwrap();
+            assert_eq!(metadata.uid(), 0);
+            assert_eq!(metadata.mode() & 0o022, 0);
+        }
+        assert!(Collector::trusted_command_path("../hostname").is_none());
+        assert!(Collector::trusted_command_path("hostname;id").is_none());
+    }
 
     #[test]
     fn skipped_config_files_make_config_probe_partial() {
