@@ -64,7 +64,7 @@ impl InboundGraphBuilder {
             .insert(canonical.clone());
         for address in Analyzer::identity_addresses(&snapshot.host_identity) {
             self.endpoint_targets
-                .entry(address.to_ascii_lowercase())
+                .entry(Analyzer::normalize_endpoint_address(&address))
                 .or_default()
                 .insert(canonical.clone());
         }
@@ -75,7 +75,7 @@ impl InboundGraphBuilder {
                 .extend(
                     dns.ip_addresses
                         .iter()
-                        .map(|address| address.to_ascii_lowercase()),
+                        .map(|address| Analyzer::normalize_endpoint_address(address)),
                 );
         }
     }
@@ -95,7 +95,7 @@ impl InboundGraphBuilder {
     fn add_connection_snapshot(&mut self, snapshot: &ObservationSnapshot) {
         let source = snapshot.hostname.clone();
         for connection in &snapshot.network_connections {
-            let remote = connection.remote_addr.to_ascii_lowercase();
+            let remote = Analyzer::normalize_endpoint_address(&connection.remote_addr);
             let Some(targets) = self.endpoint_targets.get(&remote) else {
                 continue;
             };
@@ -1303,6 +1303,13 @@ impl<'a> Analyzer<'a> {
             .collect()
     }
 
+    fn normalize_endpoint_address(address: &str) -> String {
+        address
+            .parse::<std::net::IpAddr>()
+            .map(|ip| ip.to_string())
+            .unwrap_or_else(|_| address.to_ascii_lowercase())
+    }
+
     fn merge_host_identity(
         snapshots: &[ObservationSnapshot],
         target_hostname: &str,
@@ -1675,7 +1682,7 @@ impl<'a> Analyzer<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::Analyzer;
+    use super::{Analyzer, InboundGraphBuilder};
     use crate::db::Database;
     use crate::models::{
         ConfigReference, DnsName, Evidence, EvidenceLevel, HostIdentity, ImpactLevel,
@@ -2099,6 +2106,40 @@ mod tests {
             .contains("6 polling sample(s)"));
         drop(db);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn inbound_dependency_matches_equivalent_ipv6_spellings() {
+        let now = Utc::now();
+        let mut target = test_snapshot(now);
+        target.hostname = "db01".to_string();
+        target.host_identity.hostname = "db01".to_string();
+        target.host_identity.ipv6_addresses = vec!["2001:db8::40".to_string()];
+
+        let mut source = test_snapshot(now);
+        source.hostname = "web01".to_string();
+        source.host_identity.hostname = "web01".to_string();
+        source.network_connections.push(NetworkConnection {
+            local_addr: "2001:db8::10".to_string(),
+            local_port: 50_000,
+            remote_addr: "2001:0DB8:0:0:0:0:0:40".to_string(),
+            remote_port: 5432,
+            protocol: "tcp".to_string(),
+            state: "ESTABLISHED".to_string(),
+            pid: 42,
+            process_name: "application".to_string(),
+        });
+
+        let mut builder = InboundGraphBuilder::default();
+        builder.add_endpoint_snapshot(&target);
+        builder.add_endpoint_snapshot(&source);
+        builder.finish_endpoint_index();
+        builder.add_connection_snapshot(&source);
+        let (graph, _) = builder.finish();
+
+        assert_eq!(graph["db01"].len(), 1);
+        assert_eq!(graph["db01"][0].source_hostname.as_deref(), Some("web01"));
+        assert!(graph["db01"][0].evidence[0].description.contains("5432"));
     }
 
     #[test]
