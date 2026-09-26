@@ -53,6 +53,10 @@ curl -fsSL https://raw.githubusercontent.com/cyberducttape/ScreemLess/v1.1.0/ins
 ./target/release/screamless dashboard --output analysis.html
 ```
 
+The observer emits structured diagnostics to stderr. Set `RUST_LOG` to tune
+verbosity, for example `RUST_LOG=screamless=info` for journal-friendly run,
+snapshot, timing, and failure fields.
+
 ## What It Tells You
 
 ### Outbound Dependencies

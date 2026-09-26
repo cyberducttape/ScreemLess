@@ -4,7 +4,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 use std::io::Write;
 use std::path::PathBuf;
+use std::time::Instant;
 use tokio::time::{self, Duration};
+use tracing::{info, warn};
 
 use crate::collector::{CollectionState, Collector};
 use crate::db::Database;
@@ -163,8 +165,17 @@ async fn observe(
     let mut db = Database::new(db_path)?;
     let mut collection_state = CollectionState::default();
     let start = std::time::Instant::now();
+    let run_id = format!("{}-{}", Utc::now().timestamp_millis(), std::process::id());
+    info!(
+        run_id = %run_id,
+        event = "observation_started",
+        duration_seconds = duration.as_secs(),
+        interval_seconds = interval.as_secs(),
+        "starting observation run"
+    );
 
     loop {
+        let collection_started = Instant::now();
         match Collector::collect_snapshot_with_state(&mut collection_state).await {
             Ok(mut snapshot) => {
                 snapshot.sampling_interval_seconds = Some(interval.as_secs().max(1));
@@ -180,8 +191,26 @@ async fn observe(
                     snapshot.listening_services.len(),
                     snapshot.network_connections.len()
                 );
+                info!(
+                    run_id = %run_id,
+                    snapshot_id = %format!("{}-{}", snapshot.hostname, snapshot.timestamp.timestamp_millis()),
+                    collection_ms = collection_started.elapsed().as_millis() as u64,
+                    socket_observations = snapshot.network_connections.len(),
+                    process_count = snapshot.processes.len(),
+                    event = "snapshot_collected",
+                    "observation snapshot collected"
+                );
             }
-            Err(e) => eprintln!("Error collecting snapshot: {}", e),
+            Err(e) => {
+                warn!(
+                    run_id = %run_id,
+                    collection_ms = collection_started.elapsed().as_millis() as u64,
+                    error = %e,
+                    event = "snapshot_failed",
+                    "observation snapshot failed"
+                );
+                eprintln!("Error collecting snapshot: {}", e)
+            }
         }
 
         if start.elapsed() >= duration {
@@ -192,6 +221,7 @@ async fn observe(
     }
 
     println!("\nObservation complete. Run 'screamless report' to analyze.");
+    info!(run_id = %run_id, event = "observation_completed", "observation run completed");
     Ok(())
 }
 
