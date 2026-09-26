@@ -12,9 +12,9 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # stable
         with:
           toolchain: 1.96.0
 
@@ -44,14 +44,12 @@ jobs:
           fi
 
       - name: Build deb and rpm packages
-        uses: goreleaser/nfpm-action@v2
-        with:
-          packager: deb,rpm
-          config: packaging/nfpm.yaml
-          package: dist
+        run: |
+          go run github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0 package --packager deb --config packaging/nfpm.yaml --target dist/
+          go run github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0 package --packager rpm --config packaging/nfpm.yaml --target dist/
 
       - name: Generate SPDX SBOM
-        uses: anchore/sbom-action@v0
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
           path: .
           format: spdx-json
@@ -62,7 +60,7 @@ jobs:
         run: sha256sum -- *.tar.gz *.deb *.rpm SBOM.spdx.json > SHA256SUMS
 
       - name: Upload unsigned release artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: unsigned-release-files
           path: dist/
@@ -76,20 +74,20 @@ jobs:
       id-token: write
     steps:
       - name: Download unsigned release artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: unsigned-release-files
           path: dist/
 
       - name: Install Cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
 
       - name: Sign checksums with keyless Cosign
         working-directory: dist
         run: cosign sign-blob --yes --output-signature SHA256SUMS.sig --output-certificate SHA256SUMS.pem SHA256SUMS
 
       - name: Upload signed release artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: signed-release-files
           path: dist/
@@ -102,13 +100,13 @@ jobs:
       contents: write
     steps:
       - name: Download signed release artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: signed-release-files
           path: dist/
 
       - name: Publish GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           generate_release_notes: true
           files: |
