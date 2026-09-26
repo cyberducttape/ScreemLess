@@ -324,7 +324,7 @@ impl<'a> Analyzer<'a> {
                 observed_processes: HashMap::new(),
                 risks: Vec::new(),
                 decommission_confidence: 0,
-                probe_statuses: ProbeStatuses::default(),
+                probe_statuses: ProbeStatuses::legacy_unknown(),
                 inventory: SiteInventory::default(),
                 config_scan_audit: None,
             });
@@ -1711,6 +1711,17 @@ mod tests {
         assert_eq!(merged.ipv4_addresses.len(), 2);
         assert!(merged.ipv4_addresses.contains(&"192.0.2.10".to_string()));
         assert!(merged.ipv4_addresses.contains(&"192.0.2.11".to_string()));
+    }
+
+    #[test]
+    fn host_without_observations_does_not_report_complete_probes() {
+        let db = Database::new(":memory:").unwrap();
+        let analysis = Analyzer::new(&db).analyze("unobserved-host", 168).unwrap();
+
+        assert_eq!(analysis.total_snapshots, 0);
+        assert!(!analysis.probe_statuses.all_complete());
+        assert_eq!(analysis.coverage.evidence_quality, "LOW");
+        assert_eq!(analysis.decommission_confidence, 0);
     }
 
     #[test]
