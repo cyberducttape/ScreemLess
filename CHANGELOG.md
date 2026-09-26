@@ -10,6 +10,8 @@
   versioned preflight JSON.
 - Include observation coverage and inbound evidence in preflight JSON; keep a
   stable result shape with `null` for metrics unavailable on invalid requests.
+- Normalize trailing DNS dots when merging host identity observations so
+  address history is not dropped across equivalent FQDN forms.
 - Stop and disable the systemd agent on package removal while preserving its
   observation database; package upgrades do not stop the running service.
 

@@ -1261,11 +1261,11 @@ impl<'a> Analyzer<'a> {
             identity.short_hostname.as_str(),
         ]
         .into_iter()
-        .any(|name| name.eq_ignore_ascii_case(target))
+        .any(|name| Self::normalize_hostname(name) == Self::normalize_hostname(target))
             || identity
                 .dns_aliases
                 .iter()
-                .any(|alias| alias.eq_ignore_ascii_case(target))
+                .any(|alias| Self::normalize_hostname(alias) == Self::normalize_hostname(target))
     }
 
     fn identity_addresses(identity: &HostIdentity) -> HashSet<String> {
@@ -1694,6 +1694,23 @@ mod tests {
             privileges: "full".to_string(),
             probe_statuses: ProbeStatuses::default(),
         }
+    }
+
+    #[test]
+    fn host_identity_merge_normalizes_dns_root_dots() {
+        let now = Utc::now();
+        let mut earlier = test_snapshot(now - chrono::Duration::hours(1));
+        earlier.host_identity.hostname = "DB01.INTERNAL.".to_string();
+        earlier.host_identity.ipv4_addresses = vec!["192.0.2.10".to_string()];
+
+        let mut later = test_snapshot(now);
+        later.host_identity.hostname = "db01.internal".to_string();
+        later.host_identity.ipv4_addresses = vec!["192.0.2.11".to_string()];
+
+        let merged = Analyzer::merge_host_identity(&[earlier, later], "DB01.INTERNAL.");
+        assert_eq!(merged.ipv4_addresses.len(), 2);
+        assert!(merged.ipv4_addresses.contains(&"192.0.2.10".to_string()));
+        assert!(merged.ipv4_addresses.contains(&"192.0.2.11".to_string()));
     }
 
     #[test]
