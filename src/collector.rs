@@ -36,6 +36,7 @@ const INVENTORY_PROBE_TIMEOUT: StdDuration = StdDuration::from_secs(10);
 const SMALL_PROBE_OUTPUT_LIMIT: usize = 1024 * 1024;
 const SOCKET_PROBE_OUTPUT_LIMIT: usize = 16 * 1024 * 1024;
 const DNS_LOOKUP_TIMEOUT: StdDuration = StdDuration::from_secs(3);
+const DNS_COLLECTION_TIMEOUT: StdDuration = StdDuration::from_secs(30);
 const DNS_LOOKUP_BATCH_SIZE: usize = 16;
 const DNS_LOOKUP_LIMIT: usize = 1024;
 
@@ -1049,7 +1050,12 @@ impl Collector {
         hostnames.truncate(DNS_LOOKUP_LIMIT);
         let mut resolved = HashMap::<String, Vec<String>>::new();
         let mut timed_out = false;
+        let collection_deadline = Instant::now() + DNS_COLLECTION_TIMEOUT;
         for batch in hostnames.chunks(DNS_LOOKUP_BATCH_SIZE) {
+            let now = Instant::now();
+            if now >= collection_deadline {
+                break;
+            }
             let mut tasks = tokio::task::JoinSet::new();
             for hostname in batch {
                 let hostname = hostname.clone();
@@ -1060,7 +1066,7 @@ impl Collector {
             }
 
             let mut pending = batch.len();
-            let batch_deadline = Instant::now() + DNS_LOOKUP_TIMEOUT;
+            let batch_deadline = (now + DNS_LOOKUP_TIMEOUT).min(collection_deadline);
             while pending > 0 {
                 let remaining = batch_deadline.saturating_duration_since(Instant::now());
                 match tokio::time::timeout(remaining, tasks.join_next()).await {
