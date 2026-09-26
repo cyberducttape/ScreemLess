@@ -4,6 +4,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use crate::models::{ConfigReference, ConfigScanAudit};
 
@@ -13,6 +14,41 @@ const MAX_CONFIG_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_CONFIG_TREE_ENTRIES: usize = 20_000;
 const MAX_CONFIG_TREE_DEPTH: usize = 32;
 const MAX_AUDIT_ERRORS: usize = 100;
+const DB_HOST_REGEX: &str = r#"(?mi)(DB_HOST|DATABASE_HOST|database\.host|mysql\.host|postgres\.host|POSTGRES_HOST|DATABASES.*host)\s*[=:]\s*["']?([^\s;,"'\n}]+)"#;
+const REDIS_HOST_REGEX: &str =
+    r#"(?mi)(?:REDIS_HOST|CACHE_URL|redis\.host|cache\.redis)\s*[=:]\s*["']?([^\s;,"'\n}]+)"#;
+const API_URL_REGEX: &str =
+    r#"(?mi)(?:API_URL|api_url|api\.base|api\.endpoint|SERVICE_URL)\s*[=:]\s*["']?([^\s;,"'\n}]+)"#;
+const SEARCH_HOST_REGEX: &str =
+    r#"(?mi)(?:ELASTICSEARCH|ELASTIC_URL|SEARCH_HOST)\s*[=:]\s*["']?([^\s;,"'\n}]+)"#;
+const STORAGE_ENDPOINT_REGEX: &str = r#"(?mi)(?:S3_ENDPOINT|S3_URL|AWS_S3_ENDPOINT|MINIO_ENDPOINT|OBJECT_STORAGE_URL)\s*[=:]\s*["']?([^\s;,"'\n}]+)"#;
+const CONFIG_REGEX_PATTERNS: &[&str] = &[
+    r"(?m)upstream\s+\w+\s*\{([^}]+)\}",
+    r"(?m)server\s+([^\s;]+)(?::(\d+))?",
+    r"proxy_pass\s+(?:https?://)?([^/:]+)(?::(\d+))?",
+    r"\bserver_name\s+([^;]+);",
+    r"\broot\s+([^;]+);",
+    r"\blisten\s+([^;]+);",
+    r"\bserver\s*\{",
+    r"(?is)<VirtualHost\s+([^>]+)>(.*?)</VirtualHost>",
+    r"(?mi)^\s*ServerName\s+(\S+)",
+    r"(?mi)^\s*ServerAlias\s+(.+)",
+    r"(?mi)^\s*DocumentRoot\s+([^\s#]+)",
+    r"(?mi)^\s*ProxyPass\s+\S+\s+(?:https?://)?([^/:\s]+)(?::(\d+))?",
+    r"(?mi)^\s*server\s+\S+\s+(?:[a-z0-9_-]+@)?([^\s:]+)(?::(\d+))?",
+    r##"(?mi)\burl\s*[:=]\s*["']?(?:https?://)?([^/:\s"']+)(?::(\d+))?"##,
+    r"(?m)^\s*([^{}]+)\{([^}]*)\}",
+    r"(?m)^\s*root\s+\S+\s+([^\s#]+)",
+    r"(?m)^\s*reverse_proxy(?:\s+\S+)?\s+([^\s{,]+)",
+    r"(?m)listen\s*=\s*([^\s]+)",
+    DB_HOST_REGEX,
+    REDIS_HOST_REGEX,
+    API_URL_REGEX,
+    SEARCH_HOST_REGEX,
+    STORAGE_ENDPOINT_REGEX,
+    r"(?m)^([A-Z_]+)=(.*)$",
+    r"(?m)bind-address\s*=\s*([^\s\n]+)",
+];
 const SCAN_ROOTS: &[&str] = &[
     "/etc/nginx",
     "/etc/apache2",
@@ -94,6 +130,24 @@ impl ScanContext {
 }
 
 impl ConfigScanner {
+    fn compiled_regex(pattern: &'static str) -> &'static Regex {
+        static REGEXES: OnceLock<HashMap<&'static str, Regex>> = OnceLock::new();
+        REGEXES
+            .get_or_init(|| {
+                CONFIG_REGEX_PATTERNS
+                    .iter()
+                    .map(|pattern| {
+                        (
+                            *pattern,
+                            Regex::new(pattern).expect("static config scanner regex is valid"),
+                        )
+                    })
+                    .collect()
+            })
+            .get(pattern)
+            .expect("config scanner regex is registered")
+    }
+
     fn path_is_within_search_root(path: &Path, canonical_path: &Path, roots: &[&str]) -> bool {
         roots
             .iter()
@@ -204,12 +258,12 @@ impl ConfigScanner {
         let content = Self::strip_comments(content, '#');
         let mut refs = Vec::new();
 
-        let upstream_re = Regex::new(r"(?m)upstream\s+\w+\s*\{([^}]+)\}")?;
-        let server_re = Regex::new(r"(?m)server\s+([^\s;]+)(?::(\d+))?")?;
-        let proxy_re = Regex::new(r"proxy_pass\s+(?:https?://)?([^/:]+)(?::(\d+))?")?;
-        let name_re = Regex::new(r"\bserver_name\s+([^;]+);")?;
-        let root_re = Regex::new(r"\broot\s+([^;]+);")?;
-        let listen_re = Regex::new(r"\blisten\s+([^;]+);")?;
+        let upstream_re = Self::compiled_regex(r"(?m)upstream\s+\w+\s*\{([^}]+)\}");
+        let server_re = Self::compiled_regex(r"(?m)server\s+([^\s;]+)(?::(\d+))?");
+        let proxy_re = Self::compiled_regex(r"proxy_pass\s+(?:https?://)?([^/:]+)(?::(\d+))?");
+        let name_re = Self::compiled_regex(r"\bserver_name\s+([^;]+);");
+        let root_re = Self::compiled_regex(r"\broot\s+([^;]+);");
+        let listen_re = Self::compiled_regex(r"\blisten\s+([^;]+);");
 
         for block in Self::nginx_server_blocks(&content)? {
             let directives = Self::nginx_direct_scope(block);
@@ -306,7 +360,7 @@ impl ConfigScanner {
     }
 
     fn nginx_server_blocks(content: &str) -> Result<Vec<&str>> {
-        let server_start_re = Regex::new(r"\bserver\s*\{")?;
+        let server_start_re = Self::compiled_regex(r"\bserver\s*\{");
         let mut blocks = Vec::new();
         for start in server_start_re.find_iter(content) {
             let open_brace = start.end() - 1;
@@ -423,12 +477,12 @@ impl ConfigScanner {
     fn parse_apache_config(path: &Path, content: &str) -> Result<Vec<ConfigReference>> {
         let content = Self::strip_comments(content, '#');
         let mut refs = Vec::new();
-        let vhost_re = Regex::new(r"(?is)<VirtualHost\s+([^>]+)>(.*?)</VirtualHost>")?;
-        let name_re = Regex::new(r"(?mi)^\s*ServerName\s+(\S+)")?;
-        let alias_re = Regex::new(r"(?mi)^\s*ServerAlias\s+(.+)")?;
-        let root_re = Regex::new(r"(?mi)^\s*DocumentRoot\s+([^\s#]+)")?;
+        let vhost_re = Self::compiled_regex(r"(?is)<VirtualHost\s+([^>]+)>(.*?)</VirtualHost>");
+        let name_re = Self::compiled_regex(r"(?mi)^\s*ServerName\s+(\S+)");
+        let alias_re = Self::compiled_regex(r"(?mi)^\s*ServerAlias\s+(.+)");
+        let root_re = Self::compiled_regex(r"(?mi)^\s*DocumentRoot\s+([^\s#]+)");
         let proxy_re =
-            Regex::new(r"(?mi)^\s*ProxyPass\s+\S+\s+(?:https?://)?([^/:\s]+)(?::(\d+))?")?;
+            Self::compiled_regex(r"(?mi)^\s*ProxyPass\s+\S+\s+(?:https?://)?([^/:\s]+)(?::(\d+))?");
 
         for capture in vhost_re.captures_iter(&content) {
             let specification = capture
@@ -510,7 +564,7 @@ impl ConfigScanner {
     fn parse_haproxy_config(path: &Path, content: &str) -> Result<Vec<ConfigReference>> {
         let content = Self::strip_comments(content, '#');
         let server_re =
-            Regex::new(r"(?mi)^\s*server\s+\S+\s+(?:[a-z0-9_-]+@)?([^\s:]+)(?::(\d+))?")?;
+            Self::compiled_regex(r"(?mi)^\s*server\s+\S+\s+(?:[a-z0-9_-]+@)?([^\s:]+)(?::(\d+))?");
         let mut refs = Vec::new();
         for capture in server_re.captures_iter(&content) {
             let Some(hostname) = capture.get(1).map(|value| value.as_str()) else {
@@ -542,8 +596,9 @@ impl ConfigScanner {
 
     fn parse_traefik_config(path: &Path, content: &str) -> Result<Vec<ConfigReference>> {
         let content = Self::strip_comments(content, '#');
-        let url_re =
-            Regex::new(r##"(?mi)\burl\s*[:=]\s*["']?(?:https?://)?([^/:\s"']+)(?::(\d+))?"##)?;
+        let url_re = Self::compiled_regex(
+            r##"(?mi)\burl\s*[:=]\s*["']?(?:https?://)?([^/:\s"']+)(?::(\d+))?"##,
+        );
         let mut refs = Vec::new();
         for capture in url_re.captures_iter(&content) {
             let Some(hostname) = capture.get(1).map(|value| value.as_str()) else {
@@ -581,9 +636,9 @@ impl ConfigScanner {
 
     fn parse_caddy_config(path: &Path, content: &str) -> Result<Vec<ConfigReference>> {
         let content = Self::strip_comments(content, '#');
-        let site_re = Regex::new(r"(?m)^\s*([^{}]+)\{([^}]*)\}")?;
-        let root_re = Regex::new(r"(?m)^\s*root\s+\S+\s+([^\s#]+)")?;
-        let proxy_re = Regex::new(r"(?m)^\s*reverse_proxy(?:\s+\S+)?\s+([^\s{,]+)")?;
+        let site_re = Self::compiled_regex(r"(?m)^\s*([^{}]+)\{([^}]*)\}");
+        let root_re = Self::compiled_regex(r"(?m)^\s*root\s+\S+\s+([^\s#]+)");
+        let proxy_re = Self::compiled_regex(r"(?m)^\s*reverse_proxy(?:\s+\S+)?\s+([^\s{,]+)");
         let mut refs = Vec::new();
 
         for site in site_re.captures_iter(&content) {
@@ -754,7 +809,7 @@ impl ConfigScanner {
         let content = Self::strip_comments(content, ';');
         let mut refs = Vec::new();
 
-        let listen_re = Regex::new(r"(?m)listen\s*=\s*([^\s]+)")?;
+        let listen_re = Self::compiled_regex(r"(?m)listen\s*=\s*([^\s]+)");
 
         for caps in listen_re.captures_iter(&content) {
             if let Some(addr) = caps.get(1) {
@@ -820,21 +875,11 @@ impl ConfigScanner {
         let content = Self::strip_comments(content, '#');
         let mut refs = Vec::new();
 
-        let db_host_re = Regex::new(
-            "(?mi)(DB_HOST|DATABASE_HOST|database\\.host|mysql\\.host|postgres\\.host|POSTGRES_HOST|DATABASES.*host)\\s*[=:]\\s*[\"']?([^\\s;,\"'\\n}]+)"
-        )?;
-        let redis_re = Regex::new(
-            "(?mi)(?:REDIS_HOST|CACHE_URL|redis\\.host|cache\\.redis)\\s*[=:]\\s*[\"']?([^\\s;,\"'\\n}]+)"
-        )?;
-        let api_re = Regex::new(
-            "(?mi)(?:API_URL|api_url|api\\.base|api\\.endpoint|SERVICE_URL)\\s*[=:]\\s*[\"']?([^\\s;,\"'\\n}]+)",
-        )?;
-        let es_re = Regex::new(
-            "(?mi)(?:ELASTICSEARCH|ELASTIC_URL|SEARCH_HOST)\\s*[=:]\\s*[\"']?([^\\s;,\"'\\n}]+)",
-        )?;
-        let storage_re = Regex::new(
-            "(?mi)(?:S3_ENDPOINT|S3_URL|AWS_S3_ENDPOINT|MINIO_ENDPOINT|OBJECT_STORAGE_URL)\\s*[=:]\\s*[\"']?([^\\s;,\"'\\n}]+)"
-        )?;
+        let db_host_re = Self::compiled_regex(DB_HOST_REGEX);
+        let redis_re = Self::compiled_regex(REDIS_HOST_REGEX);
+        let api_re = Self::compiled_regex(API_URL_REGEX);
+        let es_re = Self::compiled_regex(SEARCH_HOST_REGEX);
+        let storage_re = Self::compiled_regex(STORAGE_ENDPOINT_REGEX);
 
         let patterns = vec![
             (db_host_re, "Database host", None),
@@ -996,7 +1041,7 @@ impl ConfigScanner {
         let content = Self::strip_comments(content, '#');
         let mut refs = Vec::new();
 
-        let env_var_re = Regex::new(r"(?m)^([A-Z_]+)=(.*)$")?;
+        let env_var_re = Self::compiled_regex(r"(?m)^([A-Z_]+)=(.*)$");
 
         for caps in env_var_re.captures_iter(&content) {
             if let (Some(key), Some(value)) = (caps.get(1), caps.get(2)) {
@@ -1098,7 +1143,7 @@ impl ConfigScanner {
         let content = Self::strip_comments(content, '#');
         let mut refs = Vec::new();
 
-        let bind_re = Regex::new(r"(?m)bind-address\s*=\s*([^\s\n]+)")?;
+        let bind_re = Self::compiled_regex(r"(?m)bind-address\s*=\s*([^\s\n]+)");
 
         for caps in bind_re.captures_iter(&content) {
             if let Some(addr) = caps.get(1) {
@@ -1255,7 +1300,7 @@ impl ConfigScanner {
 
 #[cfg(test)]
 mod tests {
-    use super::ConfigScanner;
+    use super::{ConfigScanner, CONFIG_REGEX_PATTERNS};
     use std::fs;
     use std::path::Path;
 
@@ -1290,6 +1335,16 @@ mod tests {
         assert!(paths.contains(&"/var/www/*/wp-config.php"));
         assert!(!paths.contains(&"/var/www/*"));
         assert!(!paths.contains(&"/opt/*"));
+    }
+
+    #[test]
+    fn fixed_parser_patterns_are_compiled_once_and_reused() {
+        for pattern in CONFIG_REGEX_PATTERNS {
+            assert!(std::ptr::eq(
+                ConfigScanner::compiled_regex(pattern),
+                ConfigScanner::compiled_regex(pattern)
+            ));
+        }
     }
 
     #[test]
