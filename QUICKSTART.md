@@ -111,7 +111,7 @@ screamless observe &
 - Validate with network team
 
 ### "Performance issues on large systems"
-- Screamless is lightweight, but analyzing 10,000+ connections takes time
+- Screamless is lightweight, but analyzing large databases with 10,000+ snapshots or dependency edges takes time
 - Run observations during off-peak
 - Use background mode: `screamless observe &`
 

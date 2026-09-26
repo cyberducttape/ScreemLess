@@ -68,17 +68,17 @@ snapshot, timing, and failure fields.
 
 ### Outbound Dependencies
 ```
-Web server connects to:
-  db01:3306           94% confidence (42 connections, nginx process, wp-config.php reference)
-  redis01:6379        87% confidence (15 connections, php-fpm process)
+Observed outbound dependencies:
+  db01:3306           94% confidence (42 socket observations, nginx process, wp-config.php reference)
+  redis01:6379        87% confidence (15 socket observations, php-fpm process)
   api.vendor.com:443  61% confidence (2 socket observations; config evidence is supporting context)
 ```
 
 ### Inbound Dependencies  
 ```
 These servers depend on THIS one:
-  web01        95% confidence (observed outbound connections to this server)
-  monitor01    92% confidence (observed outbound connections to this server in the shared database)
+  web01        95% confidence (outbound socket observations in the shared database)
+  monitor01    92% confidence (outbound socket observations in the shared database)
 ```
 
 Process activity counts snapshots in which a process was observed; it does not claim to count process executions. Cron discovery parses schedules from system and user crontabs, while command bodies are redacted and job activity is not inferred.
@@ -127,9 +127,10 @@ The inventory shown in JSON reports and the dashboard includes configured
 virtual hosts, active/inactive listener status, document roots, observed users,
 recognized application processes, inferred database/storage connections, and
 load-balancer candidates backed by upstream/proxy configuration. Reverse-proxy
-configuration is parsed for Nginx, Apache, HAProxy, Traefik, and Caddy. Inbound site
-traffic is reported as observed established-socket connections; it is not HTTP
-request or visitor analytics.
+configuration is parsed for Nginx, Apache, HAProxy, Traefik, and Caddy. Listener
+activity is reported as host-level socket observations, not assigned to
+individual virtual hosts. It is not HTTP request or visitor analytics, and an
+observation is not a count of unique connection events.
 
 ## Commands
 
