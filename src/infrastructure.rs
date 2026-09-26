@@ -13,12 +13,43 @@ impl InfrastructureMapper {
         let mut chains = HashMap::new();
         let inferred_inbound = Self::reverse_observed_edges(servers);
 
-        for (server_name, (analysis, _)) in servers {
+        for (server_name, (analysis, analyzed_inbound)) in servers {
             let outbound_deps = analysis.dependencies.clone();
-            let inbound_deps = inferred_inbound
+            let mut inbound_deps = inferred_inbound
                 .get(server_name)
                 .cloned()
                 .unwrap_or_default();
+            for dependency in analyzed_inbound {
+                if let Some(existing) = inbound_deps.iter_mut().find(|existing| {
+                    match (&existing.source_hostname, &dependency.source_hostname) {
+                        (Some(left), Some(right)) => left.eq_ignore_ascii_case(right),
+                        (None, None) => existing.source_ip == dependency.source_ip,
+                        _ => false,
+                    }
+                }) {
+                    existing.confidence = existing.confidence.max(dependency.confidence);
+                    for evidence in &dependency.evidence {
+                        if !existing.evidence.iter().any(|current| {
+                            current.level == evidence.level
+                                && current.description == evidence.description
+                        }) {
+                            existing.evidence.push(evidence.clone());
+                        }
+                    }
+                    for method in &dependency.detection_methods {
+                        if !existing.detection_methods.contains(method) {
+                            existing.detection_methods.push(method.clone());
+                        }
+                    }
+                    if Self::impact_score(&dependency.impact_level)
+                        > Self::impact_score(&existing.impact_level)
+                    {
+                        existing.impact_level = dependency.impact_level.clone();
+                    }
+                } else {
+                    inbound_deps.push(dependency.clone());
+                }
+            }
 
             let is_high_fan_in_candidate =
                 Self::is_high_fan_in_candidate(server_name, &outbound_deps, &inbound_deps);
@@ -206,6 +237,15 @@ impl InfrastructureMapper {
         (impact.min(100)) as u8
     }
 
+    fn impact_score(impact: &ImpactLevel) -> u8 {
+        match impact {
+            ImpactLevel::Critical => 4,
+            ImpactLevel::High => 3,
+            ImpactLevel::Medium => 2,
+            ImpactLevel::Low => 1,
+        }
+    }
+
     #[allow(dead_code)]
     pub fn shutdown_impact_analysis(
         server: &str,
@@ -262,7 +302,10 @@ pub struct ShutdownImpact {
 #[cfg(test)]
 mod tests {
     use super::InfrastructureMapper;
-    use crate::models::{AnalysisResult, Dependency, ProbeStatuses};
+    use crate::models::{
+        AnalysisResult, Dependency, Evidence, EvidenceLevel, ImpactLevel, InboundDependency,
+        ProbeStatuses,
+    };
     use chrono::Utc;
 
     fn analysis(dependencies: Vec<Dependency>) -> AnalysisResult {
@@ -316,6 +359,32 @@ mod tests {
             inbound[0].detection_methods,
             vec!["central_outbound_observation"]
         );
+    }
+
+    #[test]
+    fn retains_analyzed_inbound_edges_without_outbound_hostname_match() {
+        let target_analysis = analysis(Vec::new());
+        let analyzed_edge = InboundDependency {
+            source_ip: "10.0.0.8".to_string(),
+            source_hostname: Some("app.internal".to_string()),
+            confidence: 82,
+            evidence: vec![Evidence {
+                level: EvidenceLevel::High,
+                description: "Matched destination host identity address".to_string(),
+            }],
+            detection_methods: vec!["host_identity_ip".to_string()],
+            impact_level: ImpactLevel::High,
+        };
+        let mut servers = std::collections::HashMap::new();
+        servers.insert("db01".to_string(), (target_analysis, vec![analyzed_edge]));
+        servers.insert("app01".to_string(), (analysis(Vec::new()), Vec::new()));
+
+        let graph = InfrastructureMapper::build_full_dependency_graph(&servers);
+        let inbound = &graph["db01"].inbound_deps;
+        assert_eq!(inbound.len(), 1);
+        assert_eq!(inbound[0].source_hostname.as_deref(), Some("app.internal"));
+        assert_eq!(inbound[0].confidence, 82);
+        assert_eq!(inbound[0].detection_methods, vec!["host_identity_ip"]);
     }
 
     #[test]
