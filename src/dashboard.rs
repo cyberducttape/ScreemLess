@@ -592,24 +592,33 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
                     group.dataset.nodeId = node.id;
                     group.style.cursor = 'grab';
                     group.addEventListener('pointerdown', function (event) {{
+                        if (event.button !== 0) return;
                         event.preventDefault();
                         group.setPointerCapture(event.pointerId);
                         group.style.cursor = 'grabbing';
                         const move = function (moveEvent) {{
+                            if (moveEvent.pointerId !== event.pointerId) return;
+                            const screenMatrix = svg.getScreenCTM();
+                            if (!screenMatrix) return;
                             const point = svg.createSVGPoint();
                             point.x = moveEvent.clientX;
                             point.y = moveEvent.clientY;
-                            const localPoint = point.matrixTransform(svg.getScreenCTM().inverse());
+                            const localPoint = point.matrixTransform(screenMatrix.inverse());
                             positions.set(node.id, {{x: localPoint.x, y: localPoint.y}});
                             updateGraphGeometry();
                         }};
-                        const end = function () {{
+                        const end = function (endEvent) {{
+                            if (endEvent.pointerId !== event.pointerId) return;
                             group.style.cursor = 'grab';
                             group.removeEventListener('pointermove', move);
                             group.removeEventListener('pointerup', end);
+                            group.removeEventListener('pointercancel', end);
+                            group.removeEventListener('lostpointercapture', end);
                         }};
                         group.addEventListener('pointermove', move);
                         group.addEventListener('pointerup', end);
+                        group.addEventListener('pointercancel', end);
+                        group.addEventListener('lostpointercapture', end);
                     }});
                     svg.appendChild(group);
                 }});
