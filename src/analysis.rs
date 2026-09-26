@@ -1333,7 +1333,49 @@ impl<'a> Analyzer<'a> {
                 }
             }
         };
-        for identity in relevant {
+        for identity in relevant.iter().rev() {
+            // Keep the newest known scalar identity when a later refresh is
+            // temporarily unable to read one of these files.
+            if merged
+                .fqdn
+                .as_deref()
+                .map_or(true, |value| value.trim().is_empty())
+            {
+                merged.fqdn = identity
+                    .fqdn
+                    .clone()
+                    .filter(|value| !value.trim().is_empty());
+            }
+            if merged
+                .host_uuid
+                .as_deref()
+                .map_or(true, |value| value.trim().is_empty())
+            {
+                merged.host_uuid = identity
+                    .host_uuid
+                    .clone()
+                    .filter(|value| !value.trim().is_empty());
+            }
+            if merged
+                .machine_id
+                .as_deref()
+                .map_or(true, |value| value.trim().is_empty())
+            {
+                merged.machine_id = identity
+                    .machine_id
+                    .clone()
+                    .filter(|value| !value.trim().is_empty());
+            }
+            if merged
+                .cloud_instance_id
+                .as_deref()
+                .map_or(true, |value| value.trim().is_empty())
+            {
+                merged.cloud_instance_id = identity
+                    .cloud_instance_id
+                    .clone()
+                    .filter(|value| !value.trim().is_empty());
+            }
             add_unique(&mut merged.ipv4_addresses, identity.ipv4_addresses.clone());
             add_unique(&mut merged.ipv6_addresses, identity.ipv6_addresses.clone());
             add_unique(&mut merged.vip_addresses, identity.vip_addresses.clone());
@@ -1729,6 +1771,26 @@ mod tests {
         assert_eq!(merged.ipv4_addresses.len(), 2);
         assert!(merged.ipv4_addresses.contains(&"192.0.2.10".to_string()));
         assert!(merged.ipv4_addresses.contains(&"192.0.2.11".to_string()));
+    }
+
+    #[test]
+    fn host_identity_merge_preserves_last_known_scalar_ids() {
+        let now = Utc::now();
+        let mut earlier = test_snapshot(now - chrono::Duration::hours(1));
+        earlier.host_identity.hostname = "db01".to_string();
+        earlier.host_identity.fqdn = Some("db01.internal".to_string());
+        earlier.host_identity.host_uuid = Some("hardware-uuid".to_string());
+        earlier.host_identity.machine_id = Some("machine-id".to_string());
+        earlier.host_identity.cloud_instance_id = Some("instance-id".to_string());
+
+        let mut later = test_snapshot(now);
+        later.host_identity.hostname = "db01".to_string();
+
+        let merged = Analyzer::merge_host_identity(&[earlier, later], "db01");
+        assert_eq!(merged.fqdn.as_deref(), Some("db01.internal"));
+        assert_eq!(merged.host_uuid.as_deref(), Some("hardware-uuid"));
+        assert_eq!(merged.machine_id.as_deref(), Some("machine-id"));
+        assert_eq!(merged.cloud_instance_id.as_deref(), Some("instance-id"));
     }
 
     #[test]
