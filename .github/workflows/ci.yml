@@ -33,7 +33,9 @@ jobs:
           bash -n packaging/validate-service-install-dir.sh
           bash -n packaging/verify-release-version.sh tests/release_metadata.sh
           sh -n packaging/postinstall.sh packaging/service-activation.sh
+          sh -n packaging/preremove.sh packaging/postremove.sh
           bash tests/service_activation.sh
+          bash tests/package_removal.sh
           bash tests/installer_service_path.sh
           bash tests/release_metadata.sh
 

@@ -282,6 +282,10 @@ The package/installer can enable the collector with:
 sudo systemctl enable --now screamless-agent
 ```
 
+Removing the Debian or RPM package stops and disables the agent, but preserves
+`/var/lib/screamless` and its observation database. Package upgrades leave the
+service running while the replacement package is installed.
+
 ## Why It Matters
 
 In 2026, most infrastructure is undocumented. Screamless provides local observational evidence, but it does not replace an event-driven network sensor or a central multi-host ingest service.
