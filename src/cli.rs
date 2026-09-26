@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use chrono::Utc;
+use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 use std::io::Write;
 use std::path::PathBuf;
@@ -10,6 +11,12 @@ use crate::db::Database;
 use crate::report::Reporter;
 
 const SNAPSHOT_RETENTION_DAYS: i64 = 30;
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum OutputFormat {
+    Text,
+    Json,
+}
 
 #[derive(Parser)]
 #[command(name = "screamless")]
@@ -73,7 +80,7 @@ pub enum Command {
 
         /// Output format (text, json)
         #[arg(short, long, default_value = "text")]
-        format: String,
+        format: OutputFormat,
     },
 
     /// Pre-flight safety check before deployment
@@ -329,7 +336,7 @@ fn write_private_file(path: &std::path::Path, contents: &[u8]) -> Result<()> {
     result
 }
 
-fn infrastructure(db_path: &std::path::Path, servers: String, format: String) -> Result<()> {
+fn infrastructure(db_path: &std::path::Path, servers: String, format: OutputFormat) -> Result<()> {
     use crate::analysis::Analyzer;
     use crate::infrastructure::InfrastructureMapper;
     use std::collections::HashMap;
@@ -343,7 +350,7 @@ fn infrastructure(db_path: &std::path::Path, servers: String, format: String) ->
         .filter(|s| !s.is_empty())
         .collect();
     let mut server_analyses = HashMap::new();
-    let json_output = format.eq_ignore_ascii_case("json");
+    let json_output = matches!(format, OutputFormat::Json);
 
     if !json_output {
         println!("\nAnalyzing {} servers...\n", server_list.len());
@@ -370,6 +377,14 @@ fn infrastructure(db_path: &std::path::Path, servers: String, format: String) ->
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
+                "schema_version": "1.0",
+                "generated_at": Utc::now().to_rfc3339(),
+                "collector_version": env!("CARGO_PKG_VERSION"),
+                "observation_window": {
+                    "requested_hours": 168,
+                    "hosts_requested": server_list,
+                },
+                "hosts": server_analyses,
                 "servers_analyzed": server_analyses.len(),
                 "analyses": server_analyses,
                 "dependency_chains": chains,
