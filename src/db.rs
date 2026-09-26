@@ -18,7 +18,7 @@ impl SnapshotWindow<'_> {
         let hostname = hostname.trim().trim_end_matches('.').to_ascii_lowercase();
         let mut stmt = self.conn.prepare(
             "SELECT data FROM snapshots
-             WHERE hostname = ?1 COLLATE NOCASE AND timestamp >= ?2
+             WHERE lower(rtrim(hostname, '.')) = ?1 AND timestamp >= ?2
              ORDER BY timestamp ASC",
         )?;
         let snapshots = stmt
@@ -155,6 +155,8 @@ impl Database {
                 ON snapshots(hostname, timestamp);
             CREATE INDEX IF NOT EXISTS idx_snapshots_hostname_nocase_timestamp
                 ON snapshots(hostname COLLATE NOCASE, timestamp);
+            CREATE INDEX IF NOT EXISTS idx_snapshots_normalized_hostname_timestamp
+                ON snapshots(lower(rtrim(hostname, '.')), timestamp);
             CREATE INDEX IF NOT EXISTS idx_listening_services_snapshot
                 ON listening_services(snapshot_id);
             CREATE INDEX IF NOT EXISTS idx_network_connections_snapshot
@@ -397,14 +399,16 @@ mod tests {
     #[test]
     fn host_snapshot_lookup_ignores_dns_case_and_root_dot() {
         let mut db = Database::new(":memory:").unwrap();
-        db.store_snapshot(&test_snapshot("node-a.internal", Utc::now()))
+        db.store_snapshot(&test_snapshot("node-a.internal.", Utc::now()))
             .unwrap();
 
-        let snapshots = db
-            .with_snapshot_window(0, |window| window.snapshots_for_host("NODE-A.INTERNAL."))
-            .unwrap();
-        assert_eq!(snapshots.len(), 1);
-        assert_eq!(snapshots[0].hostname, "node-a.internal");
+        for lookup in ["NODE-A.INTERNAL.", "node-a.internal"] {
+            let snapshots = db
+                .with_snapshot_window(0, |window| window.snapshots_for_host(lookup))
+                .unwrap();
+            assert_eq!(snapshots.len(), 1, "lookup failed for {lookup}");
+            assert_eq!(snapshots[0].hostname, "node-a.internal.");
+        }
     }
 
     #[test]
