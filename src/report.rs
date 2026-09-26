@@ -106,7 +106,7 @@ impl<'a> Reporter<'a> {
         Ok(())
     }
 
-    pub fn decommission_check(&self, hostname: &Option<String>) -> Result<()> {
+    pub fn decommission_check(&self, hostname: &Option<String>) -> Result<u8> {
         let hostname = self.resolve_hostname(hostname)?;
         let analyzer = Analyzer::new(self.db);
 
@@ -127,7 +127,8 @@ impl<'a> Reporter<'a> {
 
         if analysis.total_snapshots == 0 {
             println!("No observations found. Run 'screamless observe' first.");
-            return Ok(());
+            println!("INSUFFICIENT EVIDENCE. No decommission conclusion can be drawn.");
+            return Ok(4);
         }
 
         self.print_probe_status(&analysis);
@@ -143,20 +144,56 @@ impl<'a> Reporter<'a> {
         println!("║ {} ║", readiness_str.center(48));
         println!("╚════════════════════════════════════════════════════╝\n");
 
-        if analysis.decommission_confidence >= 80 {
-            println!("✓ NO ACTIVE DEPENDENCIES DETECTED in the collected evidence.\n");
+        let has_blocking_risks = analysis
+            .risks
+            .iter()
+            .any(|risk| matches!(risk.severity, RiskSeverity::Warn | RiskSeverity::Fail));
+        let exit_code = Self::decommission_exit_code(
+            analysis.total_snapshots,
+            analysis.probe_statuses.all_complete(),
+            &analysis.coverage.evidence_quality,
+            analysis.coverage.coverage_percent,
+            analysis.decommission_confidence,
+            has_blocking_risks,
+        );
+        if exit_code == 0 {
+            println!("✓ NO HIGH-CONFIDENCE ACTIVITY DETECTED in the collected evidence.\n");
             println!(
                 "This is not proof of absence; validate with service owners before proceeding."
             );
-        } else if analysis.decommission_confidence >= 50 {
+        } else if exit_code == 2 {
             println!("⚠ CAUTION. Investigate remaining items before proceeding.\n");
-            println!("Outstanding dependencies or scheduled jobs detected.");
+            println!("Activity or dependencies were detected; treat decommissioning as blocked.");
         } else {
-            println!("✗ NOT READY. Cannot decommission safely.\n");
-            println!("Active dependencies or critical processes detected.");
+            println!("? INSUFFICIENT EVIDENCE. Do not treat this host as cleared.\n");
+            println!("Observation coverage or collection completeness is inadequate.");
         }
 
-        Ok(())
+        Ok(exit_code)
+    }
+
+    fn decommission_exit_code(
+        total_snapshots: usize,
+        probes_complete: bool,
+        evidence_quality: &str,
+        coverage_percent: f64,
+        confidence: u8,
+        has_blocking_risks: bool,
+    ) -> u8 {
+        if total_snapshots == 0
+            || !probes_complete
+            || evidence_quality != "HIGH"
+            || !coverage_percent.is_finite()
+            || coverage_percent < 90.0
+        {
+            return 4;
+        }
+
+        if confidence < 80 || has_blocking_risks {
+            return 2;
+        }
+
+        0
     }
 
     fn print_observation_coverage(&self, analysis: &AnalysisResult) {
@@ -593,5 +630,32 @@ impl StringCenter for str {
             let right = width - len - left;
             format!("{}{}{}", " ".repeat(left), self, " ".repeat(right))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Reporter;
+
+    fn exit_code(quality: &str, coverage: f64, confidence: u8, risks: bool) -> u8 {
+        Reporter::decommission_exit_code(10, true, quality, coverage, confidence, risks)
+    }
+
+    #[test]
+    fn decommission_policy_requires_high_complete_coverage() {
+        assert_eq!(exit_code("MEDIUM", 99.0, 100, false), 4);
+        assert_eq!(exit_code("HIGH", 89.9, 100, false), 4);
+        assert_eq!(
+            Reporter::decommission_exit_code(0, true, "HIGH", 100.0, 100, false),
+            4
+        );
+        assert_eq!(exit_code("HIGH", 100.0, 100, false), 0);
+    }
+
+    #[test]
+    fn decommission_policy_blocks_detected_risks() {
+        assert_eq!(exit_code("HIGH", 100.0, 79, false), 2);
+        assert_eq!(exit_code("HIGH", 100.0, 100, true), 2);
+        assert_eq!(exit_code("HIGH", f64::NAN, 100, false), 4);
     }
 }
