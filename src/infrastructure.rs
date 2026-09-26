@@ -22,7 +22,9 @@ impl InfrastructureMapper {
             for dependency in analyzed_inbound {
                 if let Some(existing) = inbound_deps.iter_mut().find(|existing| {
                     match (&existing.source_hostname, &dependency.source_hostname) {
-                        (Some(left), Some(right)) => left.eq_ignore_ascii_case(right),
+                        (Some(left), Some(right)) => {
+                            Self::normalize_server_name(left) == Self::normalize_server_name(right)
+                        }
                         (None, None) => existing.source_ip == dependency.source_ip,
                         _ => false,
                     }
@@ -83,15 +85,16 @@ impl InfrastructureMapper {
                     .and_then(|hostname| Self::resolve_server_key(hostname, servers))
                     .or_else(|| Self::resolve_server_key(&dependency.remote_addr, servers));
                 let Some(target) = target else { continue };
-                if target.eq_ignore_ascii_case(source) {
+                if Self::normalize_server_name(&target) == Self::normalize_server_name(source) {
                     continue;
                 }
 
                 let entry = inbound.entry(target).or_default();
-                if let Some(existing) = entry
-                    .iter_mut()
-                    .find(|edge| edge.source_hostname.as_deref() == Some(source.as_str()))
-                {
+                if let Some(existing) = entry.iter_mut().find(|edge| {
+                    edge.source_hostname.as_deref().is_some_and(|name| {
+                        Self::normalize_server_name(name) == Self::normalize_server_name(source)
+                    })
+                }) {
                     existing.confidence = existing.confidence.max(dependency.confidence);
                     existing.evidence.push(Evidence {
                         level: EvidenceLevel::Med,
@@ -189,10 +192,16 @@ impl InfrastructureMapper {
     }
 
     fn resolve_server_key<V>(candidate: &str, chains: &HashMap<String, V>) -> Option<String> {
-        chains
+        let normalized = Self::normalize_server_name(candidate);
+        let mut matches = chains
             .keys()
-            .find(|server| server.eq_ignore_ascii_case(candidate))
-            .cloned()
+            .filter(|server| Self::normalize_server_name(server) == normalized);
+        let resolved = matches.next()?.clone();
+        matches.next().is_none().then_some(resolved)
+    }
+
+    fn normalize_server_name(name: &str) -> String {
+        name.trim().trim_end_matches('.').to_ascii_lowercase()
     }
 
     pub fn find_high_fan_in_services(
@@ -359,6 +368,50 @@ mod tests {
             inbound[0].detection_methods,
             vec!["central_outbound_observation"]
         );
+    }
+
+    #[test]
+    fn resolves_trailing_dns_dot_and_case_for_fleet_edges() {
+        let now = Utc::now();
+        let dependency = Dependency {
+            remote_addr: "10.0.0.2".to_string(),
+            remote_port: 5432,
+            protocol: "tcp".to_string(),
+            observation_count: 1,
+            first_seen: now,
+            last_seen: now,
+            processes: vec!["worker".to_string()],
+            confidence: 80,
+            evidence: Vec::new(),
+            config_references: Vec::new(),
+            hostname: Some("DB01.INTERNAL.".to_string()),
+        };
+        let mut servers = std::collections::HashMap::new();
+        servers.insert(
+            "worker01".to_string(),
+            (analysis(vec![dependency]), Vec::new()),
+        );
+        servers.insert(
+            "db01.internal".to_string(),
+            (analysis(Vec::new()), Vec::new()),
+        );
+
+        let graph = InfrastructureMapper::build_full_dependency_graph(&servers);
+        assert_eq!(graph["db01.internal"].inbound_deps.len(), 1);
+        assert_eq!(
+            graph["db01.internal"].inbound_deps[0]
+                .source_hostname
+                .as_deref(),
+            Some("worker01")
+        );
+    }
+
+    #[test]
+    fn refuses_ambiguous_normalized_server_keys() {
+        let mut servers = std::collections::HashMap::new();
+        servers.insert("db01.internal".to_string(), ());
+        servers.insert("DB01.INTERNAL.".to_string(), ());
+        assert!(InfrastructureMapper::resolve_server_key("db01.internal", &servers).is_none());
     }
 
     #[test]
