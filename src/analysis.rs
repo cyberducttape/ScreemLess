@@ -1144,13 +1144,11 @@ impl<'a> Analyzer<'a> {
             .filter_map(|snapshot| snapshot.sampling_interval_seconds)
             .map(|seconds| seconds.max(1) as i64)
             .collect::<Vec<_>>();
-        if intervals.is_empty() {
-            intervals = snapshots
-                .windows(2)
-                .map(|pair| (pair[1].timestamp - pair[0].timestamp).num_seconds().max(1))
-                .collect();
-        }
         intervals.sort_unstable();
+        // Never infer the expected cadence from observed gaps: missing
+        // observations would then make coverage look better by definition.
+        // Snapshots without an explicit cadence use the collector's default
+        // one-minute interval, which is conservative for manual snapshots.
         intervals.get(intervals.len() / 2).copied().unwrap_or(60)
     }
 }
@@ -1249,6 +1247,41 @@ mod tests {
         let coverage = Analyzer::build_observation_coverage(&[snapshot], now, 168);
         assert_eq!(coverage.expected_samples, 10_080);
         assert_eq!(coverage.successful_samples, 1);
+        assert!(coverage.coverage_percent < 1.0);
+        assert_eq!(coverage.evidence_quality, "LOW");
+    }
+
+    #[test]
+    fn sparse_manual_snapshots_do_not_define_their_own_expected_coverage() {
+        let now = Utc::now();
+        let make_snapshot = |timestamp| ObservationSnapshot {
+            timestamp,
+            hostname: "web01".to_string(),
+            host_identity: HostIdentity {
+                hostname: "web01".to_string(),
+                ..HostIdentity::default()
+            },
+            listening_services: Vec::new(),
+            network_connections: Vec::new(),
+            processes: Vec::new(),
+            cron_jobs: Vec::new(),
+            systemd_timers: Vec::new(),
+            dns_names: Vec::new(),
+            config_references: Vec::new(),
+            config_scan_audit: None,
+            software: Vec::new(),
+            sampling_interval_seconds: None,
+            privileges: "full".to_string(),
+            probe_statuses: ProbeStatuses::default(),
+        };
+        let snapshots = vec![
+            make_snapshot(now - chrono::Duration::days(7)),
+            make_snapshot(now),
+        ];
+
+        let coverage = Analyzer::build_observation_coverage(&snapshots, now, 168);
+        assert_eq!(coverage.expected_samples, 10_080);
+        assert_eq!(coverage.successful_samples, 2);
         assert!(coverage.coverage_percent < 1.0);
         assert_eq!(coverage.evidence_quality, "LOW");
     }
