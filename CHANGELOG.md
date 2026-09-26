@@ -19,6 +19,7 @@ hardening while keeping the collector conservative about what it can prove.
 - Socket observations are no longer presented as connection-event counts
 - Configuration discovery is recursive, bounded, comment-aware, and symlink-safe
 - Installation uses signed/versioned release artifacts instead of tracking `master`
+- CI validates the declared Rust 1.70 MSRV on a pinned Ubuntu 24.04 runner
 
 ## [1.0.0] - 2026-09-23
 

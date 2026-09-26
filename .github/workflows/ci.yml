@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   rust:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -36,3 +36,23 @@ jobs:
 
       - name: Build release binary
         run: cargo build --locked --release
+
+      - name: Verify release binary metadata
+        run: |
+          test -x target/release/screamless
+          target/release/screamless --help >/dev/null
+
+  msrv:
+    name: MSRV (Rust 1.70)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install declared MSRV
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.70.0
+
+      - name: Check MSRV build
+        run: cargo check --locked --all-targets
