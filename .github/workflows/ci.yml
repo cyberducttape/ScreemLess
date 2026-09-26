@@ -55,10 +55,12 @@ jobs:
       - name: Build release binary
         run: cargo build --locked --release
 
-      - name: Verify release binary metadata
+      - name: Verify release binary and systemd unit
         run: |
           test -x target/release/screamless
           target/release/screamless --help >/dev/null
+          sudo install -m 0755 target/release/screamless /usr/local/bin/screamless
+          systemd-analyze verify packaging/screamless-agent.service
 
   msrv:
     name: MSRV (Rust 1.70)

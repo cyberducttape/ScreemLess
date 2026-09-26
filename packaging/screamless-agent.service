@@ -11,11 +11,15 @@ RestartSec=10s
 User=root
 Group=root
 UMask=0077
-NoNewPrivileges=no
+NoNewPrivileges=yes
 PrivateTmp=true
 ProtectHome=read-only
-ProtectSystem=full
+ProtectSystem=strict
 ReadWritePaths=/var/lib/screamless
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
 
 [Install]
 WantedBy=multi-user.target
