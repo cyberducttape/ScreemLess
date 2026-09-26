@@ -328,10 +328,12 @@ pub struct SoftwareInventory {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebsiteInventory {
     pub name: String,
+    /// Listener evidence only; this is not an HTTP health check or proof that
+    /// a virtual host serves requests.
     pub status: String,
     pub ports: Vec<u16>,
-    #[serde(alias = "usage_observations")]
-    pub availability_observations: usize,
+    #[serde(alias = "availability_observations", alias = "usage_observations")]
+    pub listener_presence_observations: usize,
     #[serde(default)]
     #[serde(alias = "inbound_connection_observations")]
     pub listener_activity_observations: usize,

@@ -124,7 +124,7 @@ Cascade risk: MEDIUM (2 systems lose access, 1 degrades)
 | Website and infrastructure inventory | ✅ Config-backed, evidence-labeled |
 
 The inventory shown in JSON reports and the dashboard includes configured
-virtual hosts, active/inactive listener status, document roots, observed users,
+virtual hosts, host-level listener status (including shared-port ambiguity), document roots, observed users,
 recognized application processes, inferred database/storage connections, and
 load-balancer candidates backed by upstream/proxy configuration. Reverse-proxy
 configuration is parsed for Nginx, Apache, HAProxy, Traefik, and Caddy. Listener

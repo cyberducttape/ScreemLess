@@ -422,9 +422,9 @@ impl<'a> Analyzer<'a> {
                 .entry(reference.hostname.clone())
                 .or_insert_with(|| WebsiteInventory {
                     name: reference.hostname.clone(),
-                    status: "inactive".to_string(),
+                    status: "no_matching_listener_observed".to_string(),
                     ports: Vec::new(),
-                    availability_observations: 0,
+                    listener_presence_observations: 0,
                     listener_activity_observations: 0,
                     content_paths: Vec::new(),
                     tech_stack: Vec::new(),
@@ -485,8 +485,6 @@ impl<'a> Analyzer<'a> {
             })
             .sum();
         let latest_web_services = snapshots.last().map(web_services).unwrap_or_default();
-        let latest_has_web = !latest_web_services.is_empty();
-
         for snapshot in snapshots {
             let services = web_services(snapshot);
             let inbound_connections = snapshot
@@ -503,7 +501,7 @@ impl<'a> Analyzer<'a> {
                         .filter(|service| site.ports.is_empty() || site.ports.contains(&service.0))
                         .collect::<Vec<_>>();
                     if !matching_services.is_empty() {
-                        site.availability_observations += 1;
+                        site.listener_presence_observations += 1;
                     }
                     // A socket port cannot identify which virtual host received
                     // the request. Do not duplicate traffic across sites sharing
@@ -531,14 +529,14 @@ impl<'a> Analyzer<'a> {
                         .entry(key.clone())
                         .or_insert_with(|| WebsiteInventory {
                             name: key,
-                            status: "inactive".to_string(),
+                            status: "no_matching_listener_observed".to_string(),
                             ports: Vec::new(),
-                            availability_observations: 0,
+                            listener_presence_observations: 0,
                             listener_activity_observations: 0,
                             content_paths: Vec::new(),
                             tech_stack: Vec::new(),
                         });
-                    entry.availability_observations += 1;
+                    entry.listener_presence_observations += 1;
                     entry.listener_activity_observations += inbound_connections
                         .iter()
                         .filter(|connection| connection.local_port == service.0)
@@ -553,14 +551,21 @@ impl<'a> Analyzer<'a> {
             }
         }
         for site in websites.values_mut() {
-            site.status = if latest_has_web
-                && latest_web_services
-                    .iter()
-                    .any(|service| site.ports.is_empty() || site.ports.contains(&service.0))
+            let matching_latest_services = latest_web_services
+                .iter()
+                .filter(|service| site.ports.is_empty() || site.ports.contains(&service.0))
+                .collect::<Vec<_>>();
+            site.status = if matching_latest_services.is_empty() {
+                "no_matching_listener_observed"
+            } else if configured_sites
+                && (site.ports.is_empty()
+                    || matching_latest_services
+                        .iter()
+                        .any(|service| site_port_owners.get(&service.0) != Some(&1)))
             {
-                "active"
+                "shared_listener_unattributed"
             } else {
-                "inactive"
+                "listener_observed"
             }
             .to_string();
         }
@@ -2205,7 +2210,7 @@ mod tests {
         let inventory = Analyzer::build_inventory(&[refresh_snapshot, cached_sample], &[]);
         assert_eq!(inventory.websites.len(), 1);
         assert_eq!(inventory.websites[0].name, "example.com");
-        assert_eq!(inventory.websites[0].status, "active");
+        assert_eq!(inventory.websites[0].status, "listener_observed");
         assert_eq!(
             inventory.websites[0].content_paths,
             vec!["/srv/example/public"]
@@ -2231,6 +2236,10 @@ mod tests {
             .websites
             .iter()
             .all(|site| site.listener_activity_observations == 0));
+        assert!(shared_port_inventory
+            .websites
+            .iter()
+            .all(|site| site.status == "shared_listener_unattributed"));
         assert_eq!(shared_port_inventory.web_listener_observations, 1);
         assert_eq!(shared_port_inventory.listener_activity_observations, 1);
 
