@@ -549,6 +549,7 @@ mod tests {
             observation_window_hours: 1,
             total_snapshots: 1,
             observation_span: (now, now),
+            host_identity: HostIdentity::default(),
             coverage: ObservationCoverage::default(),
             dependencies: vec![Dependency {
                 remote_addr: "10.0.0.2".to_string(),

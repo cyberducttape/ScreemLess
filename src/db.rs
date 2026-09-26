@@ -386,6 +386,10 @@ mod tests {
         let snapshot = ObservationSnapshot {
             timestamp: Utc::now(),
             hostname: "test-host".to_string(),
+            host_identity: HostIdentity {
+                hostname: "test-host".to_string(),
+                ..HostIdentity::default()
+            },
             listening_services: vec![ListeningService {
                 port: 443,
                 protocol: "tcp".to_string(),

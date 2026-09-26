@@ -31,6 +31,7 @@ impl<'a> Analyzer<'a> {
                 observation_window_hours: hours,
                 total_snapshots: 0,
                 observation_span: (now, now),
+                host_identity: HostIdentity::default(),
                 coverage: Self::build_observation_coverage(&[], now, hours),
                 dependencies: Vec::new(),
                 inbound_dependencies: Vec::new(),
@@ -50,6 +51,7 @@ impl<'a> Analyzer<'a> {
         let first_snap = snapshots.first().unwrap();
         let last_snap = snapshots.last().unwrap();
         let coverage = Self::build_observation_coverage(&snapshots, now, hours);
+        let host_identity = Self::merge_host_identity(&snapshots, hostname);
 
         let dependencies = self.infer_dependencies(&snapshots)?;
         let observed_processes = self.analyze_process_activity(&snapshots)?;
@@ -86,6 +88,7 @@ impl<'a> Analyzer<'a> {
             observation_window_hours: hours,
             total_snapshots: snapshots.len(),
             observation_span: (first_snap.timestamp, last_snap.timestamp),
+            host_identity,
             coverage,
             dependencies,
             inbound_dependencies,
@@ -410,10 +413,16 @@ impl<'a> Analyzer<'a> {
         let target = target_hostname.to_ascii_lowercase();
         let mut target_ips = snapshots
             .iter()
-            .flat_map(|snapshot| snapshot.dns_names.iter())
-            .filter(|dns| dns.hostname.eq_ignore_ascii_case(target_hostname))
-            .flat_map(|dns| dns.ip_addresses.iter().cloned())
+            .filter(|snapshot| Self::identity_matches(&snapshot.host_identity, target_hostname))
+            .flat_map(|snapshot| Self::identity_addresses(&snapshot.host_identity))
             .collect::<HashSet<_>>();
+        target_ips.extend(
+            snapshots
+                .iter()
+                .flat_map(|snapshot| snapshot.dns_names.iter())
+                .filter(|dns| dns.hostname.eq_ignore_ascii_case(target_hostname))
+                .flat_map(|dns| dns.ip_addresses.iter().cloned()),
+        );
         if target.parse::<IpAddr>().is_ok() {
             target_ips.insert(target.clone());
         }
@@ -772,6 +781,9 @@ impl<'a> Analyzer<'a> {
         let mut map = HashMap::new();
 
         for snapshot in snapshots {
+            for ip in Self::identity_addresses(&snapshot.host_identity) {
+                map.insert(ip, snapshot.host_identity.hostname.clone());
+            }
             for dns in &snapshot.dns_names {
                 for ip in &dns.ip_addresses {
                     map.insert(ip.clone(), dns.hostname.clone());
@@ -780,6 +792,73 @@ impl<'a> Analyzer<'a> {
         }
 
         map
+    }
+
+    fn identity_matches(identity: &HostIdentity, target: &str) -> bool {
+        [
+            identity.hostname.as_str(),
+            identity.fqdn.as_deref().unwrap_or_default(),
+            identity.short_hostname.as_str(),
+        ]
+        .into_iter()
+        .any(|name| name.eq_ignore_ascii_case(target))
+            || identity
+                .dns_aliases
+                .iter()
+                .any(|alias| alias.eq_ignore_ascii_case(target))
+    }
+
+    fn identity_addresses(identity: &HostIdentity) -> HashSet<String> {
+        identity
+            .ipv4_addresses
+            .iter()
+            .chain(identity.ipv6_addresses.iter())
+            .chain(identity.vip_addresses.iter())
+            .chain(identity.interface_addresses.iter())
+            .chain(identity.container_addresses.iter())
+            .cloned()
+            .collect()
+    }
+
+    fn merge_host_identity(
+        snapshots: &[ObservationSnapshot],
+        target_hostname: &str,
+    ) -> HostIdentity {
+        let relevant = snapshots
+            .iter()
+            .filter(|snapshot| Self::identity_matches(&snapshot.host_identity, target_hostname))
+            .map(|snapshot| &snapshot.host_identity)
+            .collect::<Vec<_>>();
+        let source = relevant
+            .last()
+            .copied()
+            .or_else(|| snapshots.last().map(|snapshot| &snapshot.host_identity));
+        let Some(source) = source else {
+            return HostIdentity::default();
+        };
+        let mut merged = source.clone();
+        let add_unique = |values: &mut Vec<String>, additions: Vec<String>| {
+            for value in additions {
+                if !values.contains(&value) {
+                    values.push(value);
+                }
+            }
+        };
+        for identity in relevant {
+            add_unique(&mut merged.ipv4_addresses, identity.ipv4_addresses.clone());
+            add_unique(&mut merged.ipv6_addresses, identity.ipv6_addresses.clone());
+            add_unique(&mut merged.vip_addresses, identity.vip_addresses.clone());
+            add_unique(
+                &mut merged.interface_addresses,
+                identity.interface_addresses.clone(),
+            );
+            add_unique(&mut merged.dns_aliases, identity.dns_aliases.clone());
+            add_unique(
+                &mut merged.container_addresses,
+                identity.container_addresses.clone(),
+            );
+        }
+        merged
     }
 
     fn calculate_decommission_confidence(
@@ -982,8 +1061,9 @@ mod tests {
     use super::Analyzer;
     use crate::db::Database;
     use crate::models::{
-        ConfigReference, Evidence, EvidenceLevel, ImpactLevel, InboundDependency, ListeningService,
-        NetworkConnection, ObservationCoverage, ObservationSnapshot, ProbeStatuses, Process,
+        ConfigReference, Evidence, EvidenceLevel, HostIdentity, ImpactLevel, InboundDependency,
+        ListeningService, NetworkConnection, ObservationCoverage, ObservationSnapshot,
+        ProbeStatuses, Process,
     };
     use chrono::Utc;
 
@@ -1049,6 +1129,10 @@ mod tests {
         let snapshot = ObservationSnapshot {
             timestamp: now,
             hostname: "web01".to_string(),
+            host_identity: HostIdentity {
+                hostname: "web01".to_string(),
+                ..HostIdentity::default()
+            },
             listening_services: Vec::new(),
             network_connections: Vec::new(),
             processes: Vec::new(),
@@ -1070,10 +1154,82 @@ mod tests {
     }
 
     #[test]
+    fn inbound_dependencies_use_target_host_identity_addresses() {
+        let path = std::env::temp_dir().join(format!(
+            "screamless-inbound-identity-test-{}.db",
+            std::process::id()
+        ));
+        let mut db = Database::new(&path).unwrap();
+        let now = Utc::now();
+        let source = ObservationSnapshot {
+            timestamp: now,
+            hostname: "web01".to_string(),
+            host_identity: HostIdentity {
+                hostname: "web01".to_string(),
+                ..HostIdentity::default()
+            },
+            listening_services: Vec::new(),
+            network_connections: vec![NetworkConnection {
+                local_addr: "10.20.30.10".to_string(),
+                local_port: 51000,
+                remote_addr: "10.20.30.40".to_string(),
+                remote_port: 5432,
+                protocol: "tcp".to_string(),
+                state: "ESTABLISHED".to_string(),
+                pid: 1,
+                process_name: "app".to_string(),
+            }],
+            processes: Vec::new(),
+            cron_jobs: Vec::new(),
+            systemd_timers: Vec::new(),
+            dns_names: Vec::new(),
+            config_references: Vec::new(),
+            software: Vec::new(),
+            sampling_interval_seconds: Some(60),
+            privileges: "full".to_string(),
+            probe_statuses: ProbeStatuses::default(),
+        };
+        let target = ObservationSnapshot {
+            timestamp: now + chrono::Duration::seconds(1),
+            hostname: "db01".to_string(),
+            host_identity: HostIdentity {
+                hostname: "db01".to_string(),
+                ipv4_addresses: vec!["10.20.30.40".to_string()],
+                ..HostIdentity::default()
+            },
+            listening_services: Vec::new(),
+            network_connections: Vec::new(),
+            processes: Vec::new(),
+            cron_jobs: Vec::new(),
+            systemd_timers: Vec::new(),
+            dns_names: Vec::new(),
+            config_references: Vec::new(),
+            software: Vec::new(),
+            sampling_interval_seconds: Some(60),
+            privileges: "full".to_string(),
+            probe_statuses: ProbeStatuses::default(),
+        };
+        db.store_snapshot(&source).unwrap();
+        db.store_snapshot(&target).unwrap();
+
+        let inbound = Analyzer::new(&db)
+            .infer_inbound_dependencies("db01", 0)
+            .unwrap();
+        assert_eq!(inbound.len(), 1);
+        assert_eq!(inbound[0].source_hostname.as_deref(), Some("web01"));
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn inventory_uses_virtual_host_identity_and_inbound_socket_evidence() {
         let snapshot = ObservationSnapshot {
             timestamp: Utc::now(),
             hostname: "web01".to_string(),
+            host_identity: HostIdentity {
+                hostname: "web01".to_string(),
+                ..HostIdentity::default()
+            },
             listening_services: vec![ListeningService {
                 port: 443,
                 protocol: "tcp".to_string(),

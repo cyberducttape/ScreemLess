@@ -221,6 +221,8 @@ pub struct AnalysisResult {
     pub total_snapshots: usize,
     pub observation_span: (DateTime<Utc>, DateTime<Utc>),
     #[serde(default)]
+    pub host_identity: HostIdentity,
+    #[serde(default)]
     pub coverage: ObservationCoverage,
     pub dependencies: Vec<Dependency>,
     pub inbound_dependencies: Vec<InboundDependency>,
@@ -363,6 +365,8 @@ pub struct DnsName {
 pub struct ObservationSnapshot {
     pub timestamp: DateTime<Utc>,
     pub hostname: String,
+    #[serde(default)]
+    pub host_identity: HostIdentity,
     pub listening_services: Vec<ListeningService>,
     pub network_connections: Vec<NetworkConnection>,
     pub processes: Vec<Process>,
@@ -379,6 +383,24 @@ pub struct ObservationSnapshot {
     pub privileges: String,
     #[serde(default = "ProbeStatuses::legacy_unknown")]
     pub probe_statuses: ProbeStatuses,
+}
+
+/// Stable local identity and address inventory used to correlate raw socket
+/// addresses with the machine that owns them.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct HostIdentity {
+    pub hostname: String,
+    pub fqdn: Option<String>,
+    pub short_hostname: String,
+    pub host_uuid: Option<String>,
+    pub machine_id: Option<String>,
+    pub cloud_instance_id: Option<String>,
+    pub ipv4_addresses: Vec<String>,
+    pub ipv6_addresses: Vec<String>,
+    pub vip_addresses: Vec<String>,
+    pub interface_addresses: Vec<String>,
+    pub dns_aliases: Vec<String>,
+    pub container_addresses: Vec<String>,
 }
 
 fn unknown_privileges() -> String {

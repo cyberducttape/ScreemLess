@@ -90,9 +90,11 @@ impl Collector {
             );
         }
 
+        let host_identity = Self::collect_host_identity(&hostname);
         Ok(ObservationSnapshot {
             timestamp,
             hostname,
+            host_identity,
             listening_services,
             network_connections,
             processes,
@@ -134,6 +136,115 @@ impl Collector {
         } else {
             "restricted".to_string()
         }
+    }
+
+    fn collect_host_identity(hostname: &str) -> HostIdentity {
+        let short_hostname = hostname.split('.').next().unwrap_or(hostname).to_string();
+        let fqdn = Self::command_text("hostname", &["--fqdn"])
+            .filter(|value| value.contains('.'))
+            .or_else(|| hostname.contains('.').then(|| hostname.to_string()));
+        let interface_addresses = Self::interface_addresses();
+        let ipv4_addresses = interface_addresses
+            .iter()
+            .filter(|address| address.parse::<std::net::Ipv4Addr>().is_ok())
+            .cloned()
+            .collect();
+        let ipv6_addresses = interface_addresses
+            .iter()
+            .filter(|address| address.parse::<std::net::Ipv6Addr>().is_ok())
+            .cloned()
+            .collect();
+        let dns_aliases = Self::hosts_aliases(hostname, &interface_addresses);
+
+        HostIdentity {
+            hostname: hostname.to_string(),
+            fqdn,
+            short_hostname,
+            host_uuid: Self::read_identity_file("/sys/class/dmi/id/product_uuid"),
+            machine_id: Self::read_identity_file("/etc/machine-id")
+                .or_else(|| Self::read_identity_file("/var/lib/dbus/machine-id")),
+            cloud_instance_id: [
+                "/var/lib/cloud/instance/instance-id",
+                "/var/lib/cloud/data/instance-id",
+            ]
+            .into_iter()
+            .find_map(Self::read_identity_file),
+            ipv4_addresses,
+            ipv6_addresses,
+            vip_addresses: Vec::new(),
+            interface_addresses,
+            dns_aliases,
+            // Container addresses require a container-runtime API or namespace
+            // inspection and are intentionally left empty when unavailable.
+            container_addresses: Vec::new(),
+        }
+    }
+
+    fn read_identity_file(path: &str) -> Option<String> {
+        let value = fs::read_to_string(path).ok()?.trim().to_string();
+        (!value.is_empty()).then_some(value)
+    }
+
+    fn command_text(command: &str, args: &[&str]) -> Option<String> {
+        let output = Command::new(command).args(args).output().ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        (!value.is_empty()).then_some(value)
+    }
+
+    fn interface_addresses() -> Vec<String> {
+        if let Some(output) = Self::command_text("ip", &["-j", "-o", "address", "show"]) {
+            if let Ok(interfaces) = serde_json::from_str::<serde_json::Value>(&output) {
+                let addresses = interfaces
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .flat_map(|interface| interface.get("addr_info"))
+                    .filter_map(|value| value.as_array())
+                    .flatten()
+                    .filter_map(|address| address.get("local").and_then(|value| value.as_str()))
+                    .map(str::to_string)
+                    .collect::<Vec<_>>();
+                if !addresses.is_empty() {
+                    return addresses;
+                }
+            }
+        }
+
+        Self::command_text("hostname", &["-I"])
+            .map(|value| value.split_whitespace().map(str::to_string).collect())
+            .unwrap_or_default()
+    }
+
+    fn hosts_aliases(hostname: &str, interface_addresses: &[String]) -> Vec<String> {
+        fs::read_to_string("/etc/hosts")
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| line.split('#').next())
+            .flat_map(|line| {
+                let fields = line.split_whitespace().collect::<Vec<_>>();
+                let Some(address) = fields.first() else {
+                    return Vec::new();
+                };
+                let local_address = interface_addresses.iter().any(|local| local == address);
+                let names_local_host = fields
+                    .iter()
+                    .skip(1)
+                    .any(|name| name.eq_ignore_ascii_case(hostname));
+                if local_address || names_local_host {
+                    fields
+                        .iter()
+                        .skip(1)
+                        .map(|name| (*name).to_string())
+                        .collect()
+                } else {
+                    Vec::new()
+                }
+            })
+            .filter(|alias| !alias.eq_ignore_ascii_case(hostname) && alias != "localhost")
+            .collect()
     }
 
     fn collect_listening_services(
