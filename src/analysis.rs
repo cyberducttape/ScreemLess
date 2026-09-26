@@ -1072,14 +1072,21 @@ impl<'a> Analyzer<'a> {
         if coverage_percent < 90.0 {
             remaining_unknowns.push("observation window is not sufficiently covered".to_string());
         }
-        if let Some(last) = snapshots.last() {
-            let freshness = (now - last.timestamp).num_seconds().max(0);
-            if freshness > interval_seconds * 2 {
-                remaining_unknowns.push(format!("last observation is {} seconds old", freshness));
+        let last_observation_fresh = if let Some(last) = snapshots.last() {
+            let age_seconds = (now - last.timestamp).num_seconds();
+            if age_seconds < 0 {
+                remaining_unknowns.push("last observation timestamp is in the future".to_string());
+                false
+            } else if age_seconds > interval_seconds * 2 {
+                remaining_unknowns.push(format!("last observation is {} seconds old", age_seconds));
+                false
+            } else {
+                true
             }
         } else {
             remaining_unknowns.push("no successful observations".to_string());
-        }
+            false
+        };
 
         let privileges = if !snapshots.is_empty()
             && snapshots
@@ -1101,9 +1108,10 @@ impl<'a> Analyzer<'a> {
         let evidence_quality = if coverage_percent >= 90.0
             && probe_coverage.values().all(|percent| *percent >= 99.0)
             && privileges == "full"
+            && last_observation_fresh
         {
             "HIGH"
-        } else if coverage_percent >= 50.0 && !snapshots.is_empty() {
+        } else if coverage_percent >= 50.0 && !snapshots.is_empty() && last_observation_fresh {
             "MEDIUM"
         } else {
             "LOW"
@@ -1164,6 +1172,29 @@ mod tests {
     };
     use chrono::Utc;
 
+    fn test_snapshot(timestamp: chrono::DateTime<Utc>) -> ObservationSnapshot {
+        ObservationSnapshot {
+            timestamp,
+            hostname: "web01".to_string(),
+            host_identity: HostIdentity {
+                hostname: "web01".to_string(),
+                ..HostIdentity::default()
+            },
+            listening_services: Vec::new(),
+            network_connections: Vec::new(),
+            processes: Vec::new(),
+            cron_jobs: Vec::new(),
+            systemd_timers: Vec::new(),
+            dns_names: Vec::new(),
+            config_references: Vec::new(),
+            config_scan_audit: None,
+            software: Vec::new(),
+            sampling_interval_seconds: Some(60),
+            privileges: "full".to_string(),
+            probe_statuses: ProbeStatuses::default(),
+        }
+    }
+
     #[test]
     fn confirmed_inbound_dependency_blocks_high_readiness() {
         let path = std::env::temp_dir().join(format!(
@@ -1223,32 +1254,30 @@ mod tests {
     #[test]
     fn one_snapshot_cannot_claim_full_observation_coverage() {
         let now = Utc::now();
-        let snapshot = ObservationSnapshot {
-            timestamp: now,
-            hostname: "web01".to_string(),
-            host_identity: HostIdentity {
-                hostname: "web01".to_string(),
-                ..HostIdentity::default()
-            },
-            listening_services: Vec::new(),
-            network_connections: Vec::new(),
-            processes: Vec::new(),
-            cron_jobs: Vec::new(),
-            systemd_timers: Vec::new(),
-            dns_names: Vec::new(),
-            config_references: Vec::new(),
-            config_scan_audit: None,
-            software: Vec::new(),
-            sampling_interval_seconds: Some(60),
-            privileges: "full".to_string(),
-            probe_statuses: ProbeStatuses::default(),
-        };
+        let snapshot = test_snapshot(now);
 
         let coverage = Analyzer::build_observation_coverage(&[snapshot], now, 168);
         assert_eq!(coverage.expected_samples, 10_080);
         assert_eq!(coverage.successful_samples, 1);
         assert!(coverage.coverage_percent < 1.0);
         assert_eq!(coverage.evidence_quality, "LOW");
+    }
+
+    #[test]
+    fn stale_observations_cannot_receive_high_evidence_quality() {
+        let now = Utc::now();
+        let snapshots = (5..60)
+            .rev()
+            .map(|minutes_ago| test_snapshot(now - chrono::Duration::minutes(minutes_ago)))
+            .collect::<Vec<_>>();
+
+        let coverage = Analyzer::build_observation_coverage(&snapshots, now, 1);
+        assert!(coverage.coverage_percent >= 90.0);
+        assert_eq!(coverage.evidence_quality, "LOW");
+        assert!(coverage
+            .remaining_unknowns
+            .iter()
+            .any(|unknown| unknown.contains("last observation is")));
     }
 
     #[test]
