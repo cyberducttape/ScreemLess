@@ -415,13 +415,15 @@ impl Collector {
             // child by CommandExt::process_group(0); no memory is accessed.
             let result = unsafe { libc::kill(process_group, libc::SIGKILL) };
             if result == 0 {
-                return Ok(());
+                Ok(())
+            } else {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::NotFound {
+                    Ok(())
+                } else {
+                    Err(error)
+                }
             }
-            let error = io::Error::last_os_error();
-            if error.kind() == io::ErrorKind::NotFound {
-                return Ok(());
-            }
-            return Err(error);
         }
         #[cfg(not(unix))]
         {
