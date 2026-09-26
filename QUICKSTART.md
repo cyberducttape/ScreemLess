@@ -4,11 +4,11 @@
 
 ```bash
 # Using install script (easiest)
-curl -fsSL https://raw.githubusercontent.com/cyberducttape/ScreemLess/master/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/cyberducttape/ScreemLess/v1.1.0/install.sh | bash
 
 # Or build from source
-git clone --branch master https://github.com/cyberducttape/ScreemLess
-cd screamless
+git clone --branch v1.1.0 https://github.com/cyberducttape/ScreemLess
+cd ScreemLess
 cargo build --release
 sudo cp target/release/screamless /usr/local/bin/
 ```
@@ -50,7 +50,7 @@ screamless preflight --server db01 --operation restart
 ### "Review observed infrastructure relationships"
 ```bash
 screamless infrastructure --servers web01,web02,db01,cache01,backup01
-# Output: Shows observed relationships and potential single points of failure
+# Output: Shows observed relationships and high-fan-in dependency candidates
 ```
 
 ### "Generate a shareable report"

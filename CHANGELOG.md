@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.1.0] - 2026-09-26
+
+Screamless 1.1.0 adds production-oriented evidence, inventory, and release
+hardening while keeping the collector conservative about what it can prove.
+
+### Added
+
+- Host identity inventory and fleet-scale dependency graph analysis
+- Reverse-proxy and software-version inventory without executing workload binaries
+- Observation coverage, configuration-scan audit data, and evidence-first dashboard
+- Versioned infrastructure JSON output and documented automation exit codes
+- Versioned release artifacts, checksums, SPDX SBOM, and systemd agent packaging
+
+### Changed
+
+- High-fan-in candidates no longer claim single-point-of-failure status
+- Socket observations are no longer presented as connection-event counts
+- Configuration discovery is recursive, bounded, comment-aware, and symlink-safe
+- Installation uses signed/versioned release artifacts instead of tracking `master`
+
 ## [1.0.0] - 2026-09-23
 
 Screamless 1.0.0 is an experimental Linux dependency-observation prototype.
@@ -48,8 +68,8 @@ reported as proof of safety.
 
 ### Distribution
 
-- Corrected installation and documentation links for
-  github.com/cyberducttape/ScreemLess on the master branch.
+- Corrected installation and documentation links for versioned releases of
+  github.com/cyberducttape/ScreemLess.
 - Added MIT license, Cargo metadata, and committed Cargo.lock.
 
 Future work includes event-driven collection, multi-host ingest, richer

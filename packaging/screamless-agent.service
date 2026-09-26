@@ -1,0 +1,21 @@
+[Unit]
+Description=Screamless local dependency evidence collector
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/screamless observe --db /var/lib/screamless/screamless.db --duration 3650d --interval 1m
+Restart=on-failure
+RestartSec=10s
+User=root
+Group=root
+UMask=0077
+NoNewPrivileges=no
+PrivateTmp=true
+ProtectHome=read-only
+ProtectSystem=full
+ReadWritePaths=/var/lib/screamless
+
+[Install]
+WantedBy=multi-user.target

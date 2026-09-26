@@ -31,8 +31,11 @@ Most servers have **no documentation**. You inherit them. Nobody knows why they 
 ## Quick Start
 
 ```bash
-# Build
-cargo build --release
+# Install the published release (no Rust toolchain required)
+curl -fsSL https://raw.githubusercontent.com/cyberducttape/ScreemLess/v1.1.0/install.sh | bash
+
+# Or download a versioned artifact from GitHub Releases
+# screamless-1.1.0-linux-amd64.tar.gz
 
 # Observe for 7 days (the default)
 ./target/release/screamless observe
@@ -226,9 +229,9 @@ Screamless is useful when treated as an evidence collector:
 ## Installation
 
 ```bash
-# Clone
-git clone <repo>
-cd screamless
+# Source build (development only)
+git clone --branch v1.1.0 https://github.com/cyberducttape/ScreemLess
+cd ScreemLess
 
 # Build
 cargo build --release
@@ -237,6 +240,19 @@ cargo build --release
 scp target/release/screamless root@server:/usr/local/bin/
 ssh root@server screamless observe --duration 7d
 ssh root@server screamless report
+```
+
+Published releases include:
+
+- `screamless_1.1.0_amd64.deb`
+- `screamless-1.1.0-1.x86_64.rpm`
+- `screamless-1.1.0-linux-amd64.tar.gz`
+- `SHA256SUMS`, `SBOM.spdx.json`, and Cosign signature material
+
+The package/installer can enable the collector with:
+
+```bash
+sudo systemctl enable --now screamless-agent
 ```
 
 ## Why It Matters

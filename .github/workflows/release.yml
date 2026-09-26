@@ -1,0 +1,69 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.96.0
+
+      - name: Build and stage Linux amd64 artifact
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          cargo build --locked --release
+          mkdir -p "dist/screamless-${VERSION}"
+          install -m 0755 target/release/screamless "dist/screamless-${VERSION}/screamless"
+          install -m 0644 LICENSE CHANGELOG.md README.md packaging/screamless-agent.service "dist/screamless-${VERSION}/"
+          tar -C dist -czf "dist/screamless-${VERSION}-linux-amd64.tar.gz" "screamless-${VERSION}"
+
+      - name: Build deb and rpm packages
+        uses: goreleaser/nfpm-action@v2
+        with:
+          packager: deb,rpm
+          config: packaging/nfpm.yaml
+          package: dist
+
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: spdx-json
+          output-file: dist/SBOM.spdx.json
+
+      - name: Generate checksums
+        working-directory: dist
+        run: sha256sum *.tar.gz *.deb *.rpm SBOM.spdx.json > SHA256SUMS
+
+      - name: Sign release files when Cosign is available
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign checksums with keyless Cosign
+        working-directory: dist
+        run: cosign sign-blob --yes --output-signature SHA256SUMS.sig --output-certificate SHA256SUMS.pem SHA256SUMS
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/*.tar.gz
+            dist/*.deb
+            dist/*.rpm
+            dist/SHA256SUMS
+            dist/SHA256SUMS.sig
+            dist/SHA256SUMS.pem
+            dist/SBOM.spdx.json
+            LICENSE
+            CHANGELOG.md
