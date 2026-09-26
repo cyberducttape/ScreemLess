@@ -720,55 +720,36 @@ impl Collector {
     fn socket_state(parts: &[&str]) -> String {
         parts
             .iter()
-            .find(|part| {
-                matches!(
-                    **part,
-                    "LISTEN"
-                        | "ESTAB"
-                        | "ESTABLISHED"
-                        | "SYN-SENT"
-                        | "SYN-RECV"
-                        | "FIN-WAIT-1"
-                        | "FIN-WAIT-2"
-                        | "TIME-WAIT"
-                        | "CLOSE"
-                        | "CLOSE-WAIT"
-                        | "LAST-ACK"
-                        | "CLOSING"
-                        | "NEW-SYN-RECV"
-                        | "UNCONN"
-                        | "CONNECTED"
-                )
-            })
-            .map(|state| match *state {
-                "ESTAB" => "ESTABLISHED",
-                other => other,
-            })
+            .find_map(|part| Self::canonical_socket_state(part))
             .unwrap_or("UNKNOWN")
             .to_string()
     }
 
+    fn canonical_socket_state(state: &str) -> Option<&'static str> {
+        let state = state.to_ascii_uppercase().replace('_', "-");
+        Some(match state.as_str() {
+            "LISTEN" => "LISTEN",
+            "ESTAB" | "ESTABLISHED" => "ESTABLISHED",
+            "SYN-SENT" => "SYN-SENT",
+            "SYN-RECV" => "SYN-RECV",
+            "FIN-WAIT-1" | "FIN-WAIT1" => "FIN-WAIT-1",
+            "FIN-WAIT-2" | "FIN-WAIT2" => "FIN-WAIT-2",
+            "TIME-WAIT" => "TIME-WAIT",
+            "CLOSE" => "CLOSE",
+            "CLOSE-WAIT" => "CLOSE-WAIT",
+            "LAST-ACK" => "LAST-ACK",
+            "CLOSING" => "CLOSING",
+            "NEW-SYN-RECV" => "NEW-SYN-RECV",
+            "UNCONN" => "UNCONN",
+            "CONNECTED" => "CONNECTED",
+            _ => return None,
+        })
+    }
+
     fn is_connection_line(parts: &[&str]) -> bool {
         parts.iter().any(|part| {
-            matches!(
-                *part,
-                "ESTAB"
-                    | "ESTABLISHED"
-                    | "SYN-SENT"
-                    | "SYN-RECV"
-                    | "FIN-WAIT-1"
-                    | "FIN-WAIT-2"
-                    | "TIME-WAIT"
-                    | "CLOSE"
-                    | "CLOSE-WAIT"
-                    | "LAST-ACK"
-                    | "CLOSING"
-                    | "NEW-SYN-RECV"
-                    | "UNCONN"
-                    | "CONNECTED"
-                    | "udp"
-                    | "udp6"
-            )
+            Self::canonical_socket_state(part).is_some_and(|state| state != "LISTEN")
+                || matches!(*part, "udp" | "udp6")
         })
     }
 
@@ -1530,6 +1511,30 @@ mod tests {
         let unconnected_udp = "UNCONN 0 0 0.0.0.0:5353 *:*";
         let parts: Vec<&str> = unconnected_udp.split_whitespace().collect();
         assert!(!Collector::is_malformed_connection_row(&parts));
+    }
+
+    #[test]
+    fn recognizes_netstat_underscore_tcp_states() {
+        let fixture = "tcp 0 0 192.0.2.10:49152 192.0.2.20:443 SYN_SENT 1234/node";
+        let parts: Vec<&str> = fixture.split_whitespace().collect();
+
+        assert!(Collector::is_socket_record(&parts));
+        assert!(Collector::is_connection_line(&parts));
+        assert_eq!(Collector::socket_state(&parts), "SYN-SENT");
+        assert_eq!(Collector::find_endpoints(&parts).len(), 2);
+
+        for (state, expected) in [
+            ("FIN_WAIT1", "FIN-WAIT-1"),
+            ("FIN_WAIT2", "FIN-WAIT-2"),
+            ("TIME_WAIT", "TIME-WAIT"),
+            ("CLOSE_WAIT", "CLOSE-WAIT"),
+            ("LAST_ACK", "LAST-ACK"),
+            ("SYN_RECV", "SYN-RECV"),
+        ] {
+            let parts = ["tcp", "0", "0", "192.0.2.10:1", "192.0.2.20:2", state];
+            assert!(Collector::is_connection_line(&parts), "state {state}");
+            assert_eq!(Collector::socket_state(&parts), expected);
+        }
     }
 
     #[test]
