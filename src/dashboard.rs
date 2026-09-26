@@ -1,16 +1,19 @@
-use anyhow::Result;
 use crate::models::AnalysisResult;
+use anyhow::Result;
 use serde::Serialize;
 
 fn escape_html(value: &str) -> String {
-    value.chars().map(|character| match character {
-        '&' => "&amp;".to_string(),
-        '<' => "&lt;".to_string(),
-        '>' => "&gt;".to_string(),
-        '"' => "&quot;".to_string(),
-        '\'' => "&#39;".to_string(),
-        _ => character.to_string(),
-    }).collect()
+    value
+        .chars()
+        .map(|character| match character {
+            '&' => "&amp;".to_string(),
+            '<' => "&lt;".to_string(),
+            '>' => "&gt;".to_string(),
+            '"' => "&quot;".to_string(),
+            '\'' => "&#39;".to_string(),
+            _ => character.to_string(),
+        })
+        .collect()
 }
 
 fn safe_json_for_script<T: Serialize>(value: &T) -> Result<String> {
@@ -42,8 +45,17 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
         "NOT READY - Blocking issues detected"
     };
 
-    let high_conf_count = analysis.dependencies.iter().filter(|d| d.confidence >= 70).count();
+    let high_conf_count = analysis
+        .dependencies
+        .iter()
+        .filter(|d| d.confidence >= 70)
+        .count();
     let total_deps = analysis.dependencies.len();
+    let inventory_json = safe_json_for_script(&analysis.inventory)?;
+    let inventory_cards = format!(
+        "<div class='inventory-grid'><div><b>Websites</b><span>{}</span><small>{} active / {} inactive</small></div><div><b>Availability coverage</b><span>{}</span><small>snapshots with a web listener</small></div><div><b>Inbound connection observations</b><span>{}</span><small>not HTTP request analytics</small></div><div><b>Users</b><span>{}</span><small>observed runtime users</small></div><div><b>Databases</b><span>{}</span><small>inferred connections</small></div><div><b>Site content</b><span>{}</span><small>configured document roots</small></div><div><b>Storage</b><span>{}</span><small>inferred connections</small></div><div><b>Tech stack</b><span>{}</span><small>recognized application processes</small></div><div><b>Load balancers</b><span>{}</span><small>config-backed candidates</small></div></div>",
+        analysis.inventory.websites.len(), analysis.inventory.websites.iter().filter(|s| s.status == "active").count(), analysis.inventory.websites.iter().filter(|s| s.status == "inactive").count(),
+        analysis.inventory.websites.iter().map(|s| s.availability_observations).sum::<usize>(), analysis.inventory.websites.iter().map(|s| s.inbound_connection_observations).sum::<usize>(), analysis.inventory.users.len(), analysis.inventory.databases.len(), analysis.inventory.websites.iter().map(|s| s.content_paths.len()).sum::<usize>(), analysis.inventory.storage_connections.len(), analysis.inventory.tech_stack.len(), analysis.inventory.load_balancers.len());
 
     let deps_html = if total_deps == 0 {
         "<p style='color: #999; font-size: 12px;'>No outbound dependencies detected</p>".to_string()
@@ -268,6 +280,13 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
             margin-top: 15px;
         }}
 
+        .inventory-grid {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }}
+        .inventory-grid > div {{ background: white; border: 1px solid #ddd; border-radius: 6px; padding: 14px; }}
+        .inventory-grid b, .inventory-grid span, .inventory-grid small {{ display: block; }}
+        .inventory-grid b {{ color: #555; font-size: 12px; }}
+        .inventory-grid span {{ color: #667eea; font-size: 24px; font-weight: bold; margin: 5px 0; }}
+        .inventory-grid small {{ color: #888; font-size: 11px; }}
+
         .stat-box {{
             background: white;
             padding: 12px;
@@ -349,12 +368,17 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
                 </div>
             </div>
         </div>
+        <div class="section" style="margin: 0 30px 30px;">
+            <h2>Site & Infrastructure Inventory</h2>
+            {}
+        </div>
     </div>
 
     <script>
         const localHostname = {};
         const dependencies = {};
         const risks = {};
+        const inventory = {};
         const graphElement = document.getElementById('graph');
         const svg = document.getElementById('graph-svg');
         const svgNamespace = 'http://www.w3.org/2000/svg';
@@ -465,9 +489,11 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
         total_deps,
         high_conf_count,
         risks_html,
+        inventory_cards,
         safe_json_for_script(&hostname)?,
         deps_json,
-        risks_json
+        risks_json,
+        inventory_json
     );
 
     Ok(html)
@@ -509,6 +535,7 @@ mod tests {
             }],
             decommission_confidence: 85,
             probe_statuses: ProbeStatuses::default(),
+            inventory: SiteInventory::default(),
         };
 
         let html = render_dashboard("db<01", &analysis).unwrap();

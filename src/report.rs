@@ -1,9 +1,9 @@
+use crate::analysis::Analyzer;
+use crate::db::Database;
+use crate::graph::GraphRenderer;
+use crate::models::*;
 use anyhow::Result;
 use serde_json::json;
-use crate::db::Database;
-use crate::models::*;
-use crate::analysis::Analyzer;
-use crate::graph::GraphRenderer;
 
 pub struct Reporter<'a> {
     db: &'a Database,
@@ -21,7 +21,10 @@ impl<'a> Reporter<'a> {
         let analysis = analyzer.analyze(&hostname, 168)?;
 
         if analysis.total_snapshots == 0 {
-            println!("No observations found for {}. Run 'screamless observe' first.", hostname);
+            println!(
+                "No observations found for {}. Run 'screamless observe' first.",
+                hostname
+            );
             return Ok(());
         }
 
@@ -66,6 +69,8 @@ impl<'a> Reporter<'a> {
             },
             "snapshots": analysis.total_snapshots,
             "dependencies": analysis.dependencies,
+            "inbound_dependencies": analysis.inbound_dependencies,
+            "inventory": analysis.inventory,
             "risks": analysis.risks,
             "decommission_confidence": analysis.decommission_confidence,
             "probe_statuses": analysis.probe_statuses,
@@ -101,17 +106,10 @@ impl<'a> Reporter<'a> {
         self.print_readiness_assessment(&analysis)?;
         self.print_decommission_risks(&analysis)?;
 
-        println!(
-            "\n╔════════════════════════════════════════════════════╗"
-        );
+        println!("\n╔════════════════════════════════════════════════════╗");
         let readiness_str = format!("READINESS: {}%", analysis.decommission_confidence);
-        println!(
-            "║ {} ║",
-            readiness_str.center(48)
-        );
-        println!(
-            "╚════════════════════════════════════════════════════╝\n"
-        );
+        println!("║ {} ║", readiness_str.center(48));
+        println!("╚════════════════════════════════════════════════════╝\n");
 
         if analysis.decommission_confidence >= 80 {
             println!("✓ READY for decommission.\n");
@@ -133,7 +131,10 @@ impl<'a> Reporter<'a> {
             return Ok(());
         }
 
-        println!("OUTBOUND DEPENDENCIES ({} found)", analysis.dependencies.len());
+        println!(
+            "OUTBOUND DEPENDENCIES ({} found)",
+            analysis.dependencies.len()
+        );
 
         for dep in analysis.dependencies.iter().take(15) {
             let display_name = if let Some(ref hostname) = dep.hostname {
@@ -144,7 +145,8 @@ impl<'a> Reporter<'a> {
 
             println!("\n  {}:{}", display_name, dep.remote_port);
             println!("  Confidence: {}%", dep.confidence);
-            println!("  Connections: {} (first: {}, last: {})",
+            println!(
+                "  Connections: {} (first: {}, last: {})",
                 dep.connection_count,
                 dep.first_seen.format("%H:%M:%S"),
                 dep.last_seen.format("%H:%M:%S")
@@ -172,7 +174,8 @@ impl<'a> Reporter<'a> {
             if !dep.evidence.is_empty() {
                 println!("  Evidence:");
                 for ev in &dep.evidence {
-                    println!("    [{}] {}",
+                    println!(
+                        "    [{}] {}",
                         format!("{:?}", ev.level).to_uppercase(),
                         ev.description
                     );
@@ -181,7 +184,10 @@ impl<'a> Reporter<'a> {
         }
 
         if analysis.dependencies.len() > 15 {
-            println!("\n  ... and {} more dependencies", analysis.dependencies.len() - 15);
+            println!(
+                "\n  ... and {} more dependencies",
+                analysis.dependencies.len() - 15
+            );
         }
 
         println!();
@@ -193,11 +199,20 @@ impl<'a> Reporter<'a> {
             println!("DATA QUALITY: All collection probes complete\n");
         } else {
             println!("DATA QUALITY: INCOMPLETE - safety conclusions are blocked");
-            println!("  Network sockets: {:?}", analysis.probe_statuses.network_sockets.state);
-            println!("  Process attribution: {:?}", analysis.probe_statuses.process_attribution.state);
+            println!(
+                "  Network sockets: {:?}",
+                analysis.probe_statuses.network_sockets.state
+            );
+            println!(
+                "  Process attribution: {:?}",
+                analysis.probe_statuses.process_attribution.state
+            );
             println!("  Cron: {:?}", analysis.probe_statuses.cron.state);
             println!("  Systemd: {:?}", analysis.probe_statuses.systemd.state);
-            println!("  Config scan: {:?}", analysis.probe_statuses.config_scan.state);
+            println!(
+                "  Config scan: {:?}",
+                analysis.probe_statuses.config_scan.state
+            );
             println!("  DNS: {:?}\n", analysis.probe_statuses.dns.state);
         }
     }
@@ -208,7 +223,10 @@ impl<'a> Reporter<'a> {
             return Ok(());
         }
 
-        println!("INBOUND DEPENDENCIES (What depends on this server? - {} found)", analysis.inbound_dependencies.len());
+        println!(
+            "INBOUND DEPENDENCIES (What depends on this server? - {} found)",
+            analysis.inbound_dependencies.len()
+        );
 
         for inbound in analysis.inbound_dependencies.iter().take(15) {
             let severity = match inbound.impact_level {
@@ -220,7 +238,10 @@ impl<'a> Reporter<'a> {
 
             println!(
                 "\n  {} ({}:{})",
-                inbound.source_hostname.as_ref().unwrap_or(&inbound.source_ip),
+                inbound
+                    .source_hostname
+                    .as_ref()
+                    .unwrap_or(&inbound.source_ip),
                 inbound.source_ip,
                 severity
             );
@@ -283,9 +304,17 @@ impl<'a> Reporter<'a> {
 
     fn print_summary(&self, analysis: &AnalysisResult) -> Result<()> {
         println!("SUMMARY");
-        println!("  Total outbound dependencies: {}", analysis.dependencies.len());
-        println!("  High-confidence dependencies: {}",
-            analysis.dependencies.iter().filter(|d| d.confidence >= 70).count()
+        println!(
+            "  Total outbound dependencies: {}",
+            analysis.dependencies.len()
+        );
+        println!(
+            "  High-confidence dependencies: {}",
+            analysis
+                .dependencies
+                .iter()
+                .filter(|d| d.confidence >= 70)
+                .count()
         );
         println!("  Identified risks: {}", analysis.risks.len());
 
@@ -296,27 +325,34 @@ impl<'a> Reporter<'a> {
         let mut checks = Vec::new();
 
         if !analysis.dependencies.is_empty() {
-            let high_conf = analysis.dependencies.iter()
+            let high_conf = analysis
+                .dependencies
+                .iter()
                 .filter(|d| d.confidence >= 70)
                 .count();
             if high_conf > 0 {
-                checks.push(format!("[FAIL] {} confirmed outbound dependencies", high_conf));
+                checks.push(format!(
+                    "[FAIL] {} confirmed outbound dependencies",
+                    high_conf
+                ));
             } else {
-                checks.push(format!("[WARN] {} low-confidence outbound dependencies", analysis.dependencies.len()));
+                checks.push(format!(
+                    "[WARN] {} low-confidence outbound dependencies",
+                    analysis.dependencies.len()
+                ));
             }
         } else {
             checks.push("[PASS] No outbound dependencies detected".to_string());
         }
 
         if !analysis.inbound_dependencies.is_empty() {
-            let confirmed = analysis.inbound_dependencies.iter()
+            let confirmed = analysis
+                .inbound_dependencies
+                .iter()
                 .filter(|dependency| dependency.confidence >= 70)
                 .count();
             if confirmed > 0 {
-                checks.push(format!(
-                    "[FAIL] {} confirmed inbound dependents",
-                    confirmed
-                ));
+                checks.push(format!("[FAIL] {} confirmed inbound dependents", confirmed));
             } else {
                 checks.push(format!(
                     "[WARN] {} low-confidence inbound dependents",
@@ -325,18 +361,32 @@ impl<'a> Reporter<'a> {
             }
         }
 
-        let critical_one_time = analysis.observed_processes
+        let critical_one_time = analysis
+            .observed_processes
             .values()
-            .filter(|p| p.observed_once_in_window && (p.name.contains("backup") || p.name.contains("sync")))
+            .filter(|p| {
+                p.observed_once_in_window && (p.name.contains("backup") || p.name.contains("sync"))
+            })
             .count();
 
         if critical_one_time > 0 {
-            checks.push(format!("[WARN] {} critical process(es) seen only once", critical_one_time));
+            checks.push(format!(
+                "[WARN] {} critical process(es) seen only once",
+                critical_one_time
+            ));
         }
 
         if !analysis.risks.is_empty() {
-            let fails = analysis.risks.iter().filter(|r| matches!(r.severity, RiskSeverity::Fail)).count();
-            let warns = analysis.risks.iter().filter(|r| matches!(r.severity, RiskSeverity::Warn)).count();
+            let fails = analysis
+                .risks
+                .iter()
+                .filter(|r| matches!(r.severity, RiskSeverity::Fail))
+                .count();
+            let warns = analysis
+                .risks
+                .iter()
+                .filter(|r| matches!(r.severity, RiskSeverity::Warn))
+                .count();
 
             if fails > 0 {
                 checks.push(format!("[FAIL] {} critical issues", fails));
@@ -362,7 +412,8 @@ impl<'a> Reporter<'a> {
         let mut any_blocking = false;
 
         for dep in analysis.dependencies.iter().filter(|d| d.confidence >= 70) {
-            println!("  • {}:{} - {} confirmed connections from {}",
+            println!(
+                "  • {}:{} - {} confirmed connections from {}",
                 dep.remote_addr,
                 dep.remote_port,
                 dep.connection_count,
@@ -371,8 +422,15 @@ impl<'a> Reporter<'a> {
             any_blocking = true;
         }
 
-        for inbound in analysis.inbound_dependencies.iter().filter(|d| d.confidence >= 70) {
-            let source = inbound.source_hostname.as_deref().unwrap_or(&inbound.source_ip);
+        for inbound in analysis
+            .inbound_dependencies
+            .iter()
+            .filter(|d| d.confidence >= 70)
+        {
+            let source = inbound
+                .source_hostname
+                .as_deref()
+                .unwrap_or(&inbound.source_ip);
             println!(
                 "  • {} depends on this server ({}% confidence)",
                 source, inbound.confidence

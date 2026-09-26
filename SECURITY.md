@@ -9,6 +9,10 @@ configuration evidence. Treat generated databases and HTML reports as
 sensitive operational data. Review them before sharing and store them with
 appropriate filesystem permissions.
 
+Screamless enforces owner-only (`0600`) permissions for its SQLite database and
+generated dashboard files on Unix systems. Keep the containing directory
+restricted as well, and do not place these artifacts in a shared web root.
+
 The collector is local and polling-based. Missing privileges, failed probes,
 short-lived traffic, remote hosts, containers, and network namespaces can
 produce incomplete evidence. An incomplete probe is UNKNOWN, not evidence that

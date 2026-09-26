@@ -1,17 +1,16 @@
+mod analysis;
 mod cli;
-mod db;
 mod collector;
+mod config_scanner;
+mod dashboard;
+mod db;
+mod graph;
+mod infrastructure;
 mod models;
 mod report;
-mod analysis;
-mod config_scanner;
-mod graph;
-mod dashboard;
-mod infrastructure;
 
 use anyhow::Result;
 use clap::Parser;
-use tracing_subscriber;
 
 #[tokio::main]
 async fn main() -> Result<()> {

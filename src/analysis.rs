@@ -5,6 +5,9 @@ use std::collections::{HashMap, HashSet};
 use crate::db::Database;
 use crate::models::*;
 
+type RemoteDependencyKey = (String, u16, String);
+type RemoteObservation = (DateTime<Utc>, HashSet<String>);
+
 pub struct Analyzer<'a> {
     db: &'a Database,
 }
@@ -18,7 +21,9 @@ impl<'a> Analyzer<'a> {
         let now = Utc::now();
         let since = now - Duration::hours(hours as i64);
 
-        let snapshots = self.db.get_snapshots_since(hostname, since.timestamp())?;
+        let snapshots = self
+            .db
+            .get_snapshots_since(hostname, since.timestamp_millis())?;
 
         if snapshots.is_empty() {
             return Ok(AnalysisResult {
@@ -31,6 +36,7 @@ impl<'a> Analyzer<'a> {
                 risks: Vec::new(),
                 decommission_confidence: 0,
                 probe_statuses: ProbeStatuses::default(),
+                inventory: SiteInventory::default(),
             });
         }
 
@@ -45,7 +51,8 @@ impl<'a> Analyzer<'a> {
         let dependencies = self.infer_dependencies(&snapshots)?;
         let observed_processes = self.analyze_process_activity(&snapshots)?;
 
-        let inbound_dependencies = self.infer_inbound_dependencies(hostname, since.timestamp())?;
+        let inbound_dependencies =
+            self.infer_inbound_dependencies(hostname, since.timestamp_millis())?;
 
         let mut risks = self.assess_risks(
             &snapshots,
@@ -63,12 +70,14 @@ impl<'a> Analyzer<'a> {
             risks.push(RiskAssessment {
                 name: "Incomplete observation data".to_string(),
                 severity: RiskSeverity::Fail,
-                description: "One or more collection probes failed or had incomplete attribution".to_string(),
+                description: "One or more collection probes failed or had incomplete attribution"
+                    .to_string(),
                 evidence: Self::probe_status_summary(&probe_statuses),
             });
             decommission_confidence = decommission_confidence.min(49);
         }
 
+        let inventory = Self::build_inventory(&snapshots, &dependencies);
         Ok(AnalysisResult {
             observation_window_hours: hours,
             total_snapshots: snapshots.len(),
@@ -79,7 +88,271 @@ impl<'a> Analyzer<'a> {
             risks,
             decommission_confidence,
             probe_statuses,
+            inventory,
         })
+    }
+
+    fn build_inventory(
+        snapshots: &[ObservationSnapshot],
+        dependencies: &[Dependency],
+    ) -> SiteInventory {
+        use std::collections::BTreeSet;
+        let is_web_process = |name: &str| {
+            let normalized = name.to_ascii_lowercase();
+            matches!(
+                normalized.as_str(),
+                "nginx"
+                    | "apache2"
+                    | "httpd"
+                    | "caddy"
+                    | "lighttpd"
+                    | "haproxy"
+                    | "traefik"
+                    | "envoy"
+                    | "node"
+                    | "nodejs"
+                    | "gunicorn"
+                    | "uwsgi"
+            ) || normalized.starts_with("php-fpm")
+        };
+
+        let site_refs = snapshots
+            .iter()
+            .flat_map(|snapshot| snapshot.config_references.iter())
+            .filter(|reference| {
+                reference.context.starts_with("nginx site")
+                    || reference.context.starts_with("apache site")
+                    || reference.context.starts_with("caddy site")
+            })
+            .collect::<Vec<_>>();
+        let configured_sites = !site_refs.is_empty();
+        let mut websites = std::collections::BTreeMap::<String, WebsiteInventory>::new();
+
+        for reference in &site_refs {
+            let context_parts = reference.context.split("; ").collect::<Vec<_>>();
+            let content_paths = context_parts
+                .iter()
+                .find_map(|part| part.strip_prefix("root="))
+                .map(|path| vec![path.to_string()])
+                .unwrap_or_default();
+            let entry = websites
+                .entry(reference.hostname.clone())
+                .or_insert_with(|| WebsiteInventory {
+                    name: reference.hostname.clone(),
+                    status: "inactive".to_string(),
+                    ports: Vec::new(),
+                    availability_observations: 0,
+                    inbound_connection_observations: 0,
+                    content_paths: Vec::new(),
+                    tech_stack: Vec::new(),
+                });
+            if let Some(ports) = context_parts
+                .iter()
+                .find_map(|part| part.strip_prefix("ports="))
+            {
+                for port in ports.split(',').filter_map(|port| port.parse::<u16>().ok()) {
+                    if !entry.ports.contains(&port) {
+                        entry.ports.push(port);
+                    }
+                }
+            }
+            for path in content_paths {
+                if !entry.content_paths.contains(&path) {
+                    entry.content_paths.push(path);
+                }
+            }
+        }
+
+        let web_services = |snapshot: &ObservationSnapshot| {
+            snapshot
+                .listening_services
+                .iter()
+                .filter(|service| {
+                    is_web_process(&service.process_name) || matches!(service.port, 80 | 443)
+                })
+                .map(|service| (service.port, service.process_name.clone()))
+                .collect::<Vec<_>>()
+        };
+        let latest_web_services = snapshots.last().map(web_services).unwrap_or_default();
+        let latest_has_web = !latest_web_services.is_empty();
+
+        for snapshot in snapshots {
+            let services = web_services(snapshot);
+            let inbound_connections = snapshot
+                .network_connections
+                .iter()
+                .filter(|connection| {
+                    matches!(connection.state.as_str(), "ESTABLISHED" | "CLOSE-WAIT")
+                })
+                .collect::<Vec<_>>();
+            if configured_sites {
+                for site in websites.values_mut() {
+                    let matching_services = services
+                        .iter()
+                        .filter(|service| site.ports.is_empty() || site.ports.contains(&service.0))
+                        .collect::<Vec<_>>();
+                    if !matching_services.is_empty() {
+                        site.availability_observations += 1;
+                    }
+                    site.inbound_connection_observations += inbound_connections
+                        .iter()
+                        .filter(|connection| {
+                            site.ports.is_empty() || site.ports.contains(&connection.local_port)
+                        })
+                        .count();
+                    for service in matching_services {
+                        if !site.ports.contains(&service.0) {
+                            site.ports.push(service.0);
+                        }
+                        if !site.tech_stack.contains(&service.1) {
+                            site.tech_stack.push(service.1.clone());
+                        }
+                    }
+                }
+            } else {
+                for service in services {
+                    let key = format!("{}:{}", service.1, service.0);
+                    let entry = websites
+                        .entry(key.clone())
+                        .or_insert_with(|| WebsiteInventory {
+                            name: key,
+                            status: "inactive".to_string(),
+                            ports: Vec::new(),
+                            availability_observations: 0,
+                            inbound_connection_observations: 0,
+                            content_paths: Vec::new(),
+                            tech_stack: Vec::new(),
+                        });
+                    entry.availability_observations += 1;
+                    entry.inbound_connection_observations += inbound_connections
+                        .iter()
+                        .filter(|connection| connection.local_port == service.0)
+                        .count();
+                    if !entry.ports.contains(&service.0) {
+                        entry.ports.push(service.0);
+                    }
+                    if !entry.tech_stack.contains(&service.1) {
+                        entry.tech_stack.push(service.1.clone());
+                    }
+                }
+            }
+        }
+        for site in websites.values_mut() {
+            site.status = if latest_has_web
+                && latest_web_services
+                    .iter()
+                    .any(|service| site.ports.is_empty() || site.ports.contains(&service.0))
+            {
+                "active"
+            } else {
+                "inactive"
+            }
+            .to_string();
+        }
+
+        let mut users = BTreeSet::new();
+        let mut stack = BTreeSet::new();
+        for snapshot in snapshots {
+            for process in &snapshot.processes {
+                users.insert(process.user.clone());
+            }
+            for service in &snapshot.listening_services {
+                users.insert(service.user.clone());
+                if is_web_process(&service.process_name) {
+                    stack.insert(service.process_name.clone());
+                }
+            }
+        }
+        let classify = |dependency: &Dependency| {
+            let contexts = dependency
+                .config_references
+                .iter()
+                .map(|reference| reference.context.to_ascii_lowercase())
+                .collect::<Vec<_>>();
+            let storage = matches!(dependency.remote_port, 2049 | 445 | 139 | 111)
+                || dependency.protocol.eq_ignore_ascii_case("nfs")
+                || contexts.iter().any(|context| {
+                    context.contains("storage")
+                        || context.contains("nfs")
+                        || context.contains("s3")
+                        || context.contains("object")
+                });
+            let database = matches!(
+                dependency.remote_port,
+                3306 | 5432 | 1433 | 1521 | 27017 | 6379 | 5984 | 9200
+            ) || contexts.iter().any(|context| {
+                context.contains("database")
+                    || context.contains("redis")
+                    || context.contains("elasticsearch")
+                    || context.contains("cache")
+            });
+            (database, storage)
+        };
+        let mut databases = Vec::new();
+        let mut storage_connections = Vec::new();
+        for dependency in dependencies {
+            let (database, storage) = classify(dependency);
+            let target = dependency
+                .hostname
+                .clone()
+                .unwrap_or_else(|| dependency.remote_addr.clone());
+            let item = InventoryConnection {
+                target,
+                port: dependency.remote_port,
+                protocol: dependency.protocol.clone(),
+                usage_observations: dependency.connection_count,
+                evidence: "Observed outbound connection".to_string(),
+            };
+            if database {
+                databases.push(item.clone());
+            }
+            if storage {
+                storage_connections.push(item);
+            }
+        }
+        let has_proxy_config = snapshots
+            .iter()
+            .flat_map(|snapshot| snapshot.config_references.iter())
+            .any(|reference| {
+                reference.context == "proxy_pass"
+                    || reference.context == "nginx upstream"
+                    || reference.context == "apache proxy_pass"
+                    || reference.context == "haproxy backend"
+                    || reference.context == "traefik service"
+                    || reference.context == "caddy reverse_proxy"
+            });
+        let mut load_balancers = if has_proxy_config {
+            stack.iter().cloned().collect::<BTreeSet<_>>()
+        } else {
+            BTreeSet::new()
+        };
+        for reference in snapshots
+            .iter()
+            .flat_map(|snapshot| snapshot.config_references.iter())
+        {
+            let candidate = if reference.context.starts_with("haproxy") {
+                Some("haproxy")
+            } else if reference.context.starts_with("traefik") {
+                Some("traefik")
+            } else if reference.context.starts_with("caddy") {
+                Some("caddy")
+            } else {
+                None
+            };
+            if has_proxy_config {
+                if let Some(candidate) = candidate {
+                    load_balancers.insert(candidate.to_string());
+                }
+            }
+        }
+        SiteInventory {
+            websites: websites.into_values().collect(),
+            users: users.into_iter().collect(),
+            databases,
+            storage_connections,
+            tech_stack: stack.into_iter().collect(),
+            load_balancers: load_balancers.into_iter().collect(),
+        }
     }
 
     fn probe_status_summary(statuses: &ProbeStatuses) -> String {
@@ -122,7 +395,9 @@ impl<'a> Analyzer<'a> {
                 continue;
             }
 
-            let target_ips = snapshot.dns_names.iter()
+            let target_ips = snapshot
+                .dns_names
+                .iter()
                 .filter(|dns| dns.hostname.eq_ignore_ascii_case(target_hostname))
                 .flat_map(|dns| dns.ip_addresses.iter().cloned())
                 .collect::<HashSet<_>>();
@@ -131,10 +406,12 @@ impl<'a> Analyzer<'a> {
                 connection.remote_addr.eq_ignore_ascii_case(&target)
                     || target_ips.contains(&connection.remote_addr)
             }) {
-                let evidence = sources.entry(source.clone()).or_insert_with(|| SourceEvidence {
-                    complete: true,
-                    ..SourceEvidence::default()
-                });
+                let evidence = sources
+                    .entry(source.clone())
+                    .or_insert_with(|| SourceEvidence {
+                        complete: true,
+                        ..SourceEvidence::default()
+                    });
                 evidence.count += 1;
                 evidence.ports.insert(connection.remote_port);
                 evidence.processes.insert(connection.process_name.clone());
@@ -145,9 +422,23 @@ impl<'a> Analyzer<'a> {
         let mut inbound = Vec::new();
         for (source, evidence) in sources {
             let confidence = (55 + evidence.count.min(9) * 5).min(100) as u8;
-            let confidence = if evidence.complete { confidence } else { confidence.min(69) };
-            let port_list = evidence.ports.iter().map(u16::to_string).collect::<Vec<_>>().join(", ");
-            let process_list = evidence.processes.iter().cloned().collect::<Vec<_>>().join(", ");
+            let confidence = if evidence.complete {
+                confidence
+            } else {
+                confidence.min(69)
+            };
+            let port_list = evidence
+                .ports
+                .iter()
+                .map(u16::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            let process_list = evidence
+                .processes
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
 
             inbound.push(InboundDependency {
                 source_ip: "unknown".to_string(),
@@ -165,23 +456,26 @@ impl<'a> Analyzer<'a> {
             });
         }
 
-        inbound.sort_by(|a, b| b.confidence.cmp(&a.confidence));
+        inbound.sort_by_key(|item| std::cmp::Reverse(item.confidence));
         Ok(inbound)
     }
 
     fn infer_dependencies(&self, snapshots: &[ObservationSnapshot]) -> Result<Vec<Dependency>> {
-        let mut remote_hosts: HashMap<(String, u16, String), Vec<(DateTime<Utc>, HashSet<String>)>> =
-            HashMap::new();
+        let mut remote_hosts: HashMap<RemoteDependencyKey, Vec<RemoteObservation>> = HashMap::new();
 
         for snapshot in snapshots {
             for conn in &snapshot.network_connections {
-                let key = (conn.remote_addr.clone(), conn.remote_port, conn.protocol.clone());
+                let key = (
+                    conn.remote_addr.clone(),
+                    conn.remote_port,
+                    conn.protocol.clone(),
+                );
                 let mut processes = HashSet::new();
                 processes.insert(conn.process_name.clone());
 
                 remote_hosts
                     .entry(key)
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push((snapshot.timestamp, processes));
             }
         }
@@ -239,7 +533,8 @@ impl<'a> Analyzer<'a> {
                 .iter()
                 .filter(|cr| {
                     let hostname_matches = cr.hostname.eq_ignore_ascii_case(&remote_addr)
-                        || hostname.as_ref()
+                        || hostname
+                            .as_ref()
                             .is_some_and(|resolved| cr.hostname.eq_ignore_ascii_case(resolved));
                     let port_matches = cr.port.is_none() || cr.port == Some(remote_port);
                     hostname_matches && port_matches
@@ -278,7 +573,7 @@ impl<'a> Analyzer<'a> {
             });
         }
 
-        dependencies.sort_by(|a, b| b.connection_count.cmp(&a.connection_count));
+        dependencies.sort_by_key(|dependency| std::cmp::Reverse(dependency.connection_count));
         Ok(dependencies)
     }
 
@@ -292,7 +587,7 @@ impl<'a> Analyzer<'a> {
             for process in &snapshot.processes {
                 process_appearances
                     .entry(process.name.clone())
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(snapshot.timestamp);
             }
         }
@@ -338,13 +633,17 @@ impl<'a> Analyzer<'a> {
             risks.push(RiskAssessment {
                 name: "Active listening services".to_string(),
                 severity: RiskSeverity::Warn,
-                description: "Server is listening on ports (likely has inbound dependencies)".to_string(),
+                description: "Server is listening on ports (likely has inbound dependencies)"
+                    .to_string(),
                 evidence: "Listening services detected in observations".to_string(),
             });
         }
 
         for inbound in inbound_dependencies {
-            let source = inbound.source_hostname.as_deref().unwrap_or(&inbound.source_ip);
+            let source = inbound
+                .source_hostname
+                .as_deref()
+                .unwrap_or(&inbound.source_ip);
             risks.push(RiskAssessment {
                 name: "Confirmed inbound dependency".to_string(),
                 severity: if inbound.confidence >= 70 {
@@ -356,7 +655,9 @@ impl<'a> Analyzer<'a> {
                     "{} depends on this server ({}% confidence)",
                     source, inbound.confidence
                 ),
-                evidence: inbound.evidence.iter()
+                evidence: inbound
+                    .evidence
+                    .iter()
                     .map(|evidence| evidence.description.clone())
                     .collect::<Vec<_>>()
                     .join("; "),
@@ -368,19 +669,32 @@ impl<'a> Analyzer<'a> {
                 risks.push(RiskAssessment {
                     name: "One-time connection".to_string(),
                     severity: RiskSeverity::Info,
-                    description: format!("Connection to {}:{} observed only once", dep.remote_addr, dep.remote_port),
+                    description: format!(
+                        "Connection to {}:{} observed only once",
+                        dep.remote_addr, dep.remote_port
+                    ),
                     evidence: "Single observation of this connection in window".to_string(),
                 });
             }
         }
 
         for proc in observed_processes.values() {
-            if proc.observed_once_in_window && (proc.name.contains("backup") || proc.name.contains("sync") || proc.name.contains("update")) {
+            if proc.observed_once_in_window
+                && (proc.name.contains("backup")
+                    || proc.name.contains("sync")
+                    || proc.name.contains("update"))
+            {
                 risks.push(RiskAssessment {
                     name: "Critical process seen once".to_string(),
                     severity: RiskSeverity::Warn,
-                    description: format!("Process '{}' appeared only once in observation window", proc.name),
-                    evidence: format!("Last seen {}", proc.last_seen.format("%Y-%m-%d %H:%M:%S UTC")),
+                    description: format!(
+                        "Process '{}' appeared only once in observation window",
+                        proc.name
+                    ),
+                    evidence: format!(
+                        "Last seen {}",
+                        proc.last_seen.format("%Y-%m-%d %H:%M:%S UTC")
+                    ),
                 });
             }
         }
@@ -417,7 +731,10 @@ impl<'a> Analyzer<'a> {
         ((total_score * 100) / max_score) as u8
     }
 
-    fn build_ip_to_hostname_map(&self, snapshots: &[ObservationSnapshot]) -> HashMap<String, String> {
+    fn build_ip_to_hostname_map(
+        &self,
+        snapshots: &[ObservationSnapshot],
+    ) -> HashMap<String, String> {
         let mut map = HashMap::new();
 
         for snapshot in snapshots {
@@ -467,8 +784,7 @@ impl<'a> Analyzer<'a> {
         let one_time_critical = observed_processes
             .values()
             .filter(|p| {
-                p.observed_once_in_window
-                    && (p.name.contains("backup") || p.name.contains("sync"))
+                p.observed_once_in_window && (p.name.contains("backup") || p.name.contains("sync"))
             })
             .count();
 
@@ -489,7 +805,11 @@ impl<'a> Analyzer<'a> {
 mod tests {
     use super::Analyzer;
     use crate::db::Database;
-    use crate::models::{ImpactLevel, InboundDependency};
+    use crate::models::{
+        ConfigReference, ImpactLevel, InboundDependency, ListeningService, NetworkConnection,
+        ObservationSnapshot, ProbeStatuses, Process,
+    };
+    use chrono::Utc;
 
     #[test]
     fn confirmed_inbound_dependency_blocks_high_readiness() {
@@ -517,5 +837,58 @@ mod tests {
         assert!(score < 50);
         drop(db);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn inventory_uses_virtual_host_identity_and_inbound_socket_evidence() {
+        let snapshot = ObservationSnapshot {
+            timestamp: Utc::now(),
+            hostname: "web01".to_string(),
+            listening_services: vec![ListeningService {
+                port: 443,
+                protocol: "tcp".to_string(),
+                process_name: "nginx".to_string(),
+                pid: 10,
+                user: "www-data".to_string(),
+            }],
+            network_connections: vec![NetworkConnection {
+                local_addr: "10.0.0.1".to_string(),
+                local_port: 443,
+                remote_addr: "10.0.0.9".to_string(),
+                remote_port: 53122,
+                protocol: "tcp".to_string(),
+                state: "ESTABLISHED".to_string(),
+                pid: 10,
+                process_name: "nginx".to_string(),
+            }],
+            processes: vec![Process {
+                pid: 10,
+                name: "nginx".to_string(),
+                user: "www-data".to_string(),
+                cmdline: String::new(),
+            }],
+            cron_jobs: Vec::new(),
+            systemd_timers: Vec::new(),
+            dns_names: Vec::new(),
+            config_references: vec![ConfigReference {
+                file_path: "/etc/nginx/sites-enabled/example".to_string(),
+                hostname: "example.com".to_string(),
+                port: None,
+                context: "nginx site; root=/srv/example/public; ports=443".to_string(),
+                config_line: None,
+            }],
+            probe_statuses: ProbeStatuses::default(),
+        };
+
+        let inventory = Analyzer::build_inventory(&[snapshot], &[]);
+        assert_eq!(inventory.websites.len(), 1);
+        assert_eq!(inventory.websites[0].name, "example.com");
+        assert_eq!(inventory.websites[0].status, "active");
+        assert_eq!(
+            inventory.websites[0].content_paths,
+            vec!["/srv/example/public"]
+        );
+        assert_eq!(inventory.websites[0].inbound_connection_observations, 1);
+        assert!(inventory.users.contains(&"www-data".to_string()));
     }
 }

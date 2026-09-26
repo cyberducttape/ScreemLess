@@ -1,6 +1,7 @@
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use anyhow::Result;
 use serde::Serialize;
+use std::io::Write;
 use std::path::PathBuf;
 use tokio::time::{self, Duration};
 
@@ -96,27 +97,17 @@ pub enum Command {
 
 pub async fn run(args: Args) -> Result<()> {
     match args.command {
-        Command::Observe { duration, interval } => {
-            observe(&args.db, duration, interval).await
-        }
-        Command::Report { hostname, format } => {
-            report(&args.db, hostname, format)
-        }
-        Command::DecommissionCheck { hostname } => {
-            decommission_check(&args.db, hostname)
-        }
-        Command::Dashboard { hostname, output } => {
-            dashboard(&args.db, hostname, output)
-        }
-        Command::Infrastructure { servers, format } => {
-            infrastructure(&args.db, servers, format)
-        }
-        Command::Preflight { server, operation, json } => {
-            preflight(&args.db, server, operation, json)
-        }
-        Command::Snapshot => {
-            snapshot(&args.db).await
-        }
+        Command::Observe { duration, interval } => observe(&args.db, duration, interval).await,
+        Command::Report { hostname, format } => report(&args.db, hostname, format),
+        Command::DecommissionCheck { hostname } => decommission_check(&args.db, hostname),
+        Command::Dashboard { hostname, output } => dashboard(&args.db, hostname, output),
+        Command::Infrastructure { servers, format } => infrastructure(&args.db, servers, format),
+        Command::Preflight {
+            server,
+            operation,
+            json,
+        } => preflight(&args.db, server, operation, json),
+        Command::Snapshot => snapshot(&args.db).await,
     }
 }
 
@@ -127,8 +118,14 @@ async fn snapshot(db_path: &std::path::Path) -> Result<()> {
     let hostname = snapshot.hostname.clone();
 
     println!("  Hostname: {}", hostname);
-    println!("  Listening services: {}", snapshot.listening_services.len());
-    println!("  Network connections: {}", snapshot.network_connections.len());
+    println!(
+        "  Listening services: {}",
+        snapshot.listening_services.len()
+    );
+    println!(
+        "  Network connections: {}",
+        snapshot.network_connections.len()
+    );
     println!("  Processes: {}", snapshot.processes.len());
     println!("  Cron jobs: {}", snapshot.cron_jobs.len());
     println!("  Systemd timers: {}", snapshot.systemd_timers.len());
@@ -164,7 +161,8 @@ async fn observe(
             Ok(snapshot) => {
                 db.store_snapshot(&snapshot)?;
                 db.prune_snapshots_before(
-                    (chrono::Utc::now() - chrono::Duration::days(SNAPSHOT_RETENTION_DAYS)).timestamp(),
+                    (chrono::Utc::now() - chrono::Duration::days(SNAPSHOT_RETENTION_DAYS))
+                        .timestamp_millis(),
                 )?;
 
                 println!(
@@ -194,7 +192,7 @@ fn report(db_path: &std::path::Path, hostname: Option<String>, format: String) -
 
     match format.as_str() {
         "json" => reporter.report_json(&hostname)?,
-        "text" | _ => reporter.report_text(&hostname)?,
+        _ => reporter.report_text(&hostname)?,
     }
 
     Ok(())
@@ -210,8 +208,12 @@ fn decommission_check(db_path: &std::path::Path, hostname: Option<String>) -> Re
 fn parse_duration(s: &str) -> Result<Duration> {
     let re = regex::Regex::new(r"^(\d+)([smhd])$")?;
 
-    let caps = re.captures(s)
-        .ok_or_else(|| anyhow::anyhow!("Invalid duration format: {}. Use format like '1h', '30m', '1d'", s))?;
+    let caps = re.captures(s).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Invalid duration format: {}. Use format like '1h', '30m', '1d'",
+            s
+        )
+    })?;
 
     let value: u64 = caps[1].parse()?;
     let unit = &caps[2];
@@ -223,7 +225,8 @@ fn parse_duration(s: &str) -> Result<Duration> {
         "d" => 86400,
         _ => unreachable!(),
     };
-    let seconds = value.checked_mul(multiplier)
+    let seconds = value
+        .checked_mul(multiplier)
         .ok_or_else(|| anyhow::anyhow!("Duration is too large: {}", s))?;
     if seconds == 0 {
         return Err(anyhow::anyhow!("Duration must be greater than zero"));
@@ -232,7 +235,11 @@ fn parse_duration(s: &str) -> Result<Duration> {
     Ok(Duration::from_secs(seconds))
 }
 
-fn dashboard(db_path: &std::path::Path, hostname: Option<String>, output: Option<std::path::PathBuf>) -> Result<()> {
+fn dashboard(
+    db_path: &std::path::Path,
+    hostname: Option<String>,
+    output: Option<std::path::PathBuf>,
+) -> Result<()> {
     use crate::analysis::Analyzer;
 
     let db = Database::new(db_path)?;
@@ -248,15 +255,51 @@ fn dashboard(db_path: &std::path::Path, hostname: Option<String>, output: Option
 
     let analysis = analyzer.analyze(&hostname, 168)?;
 
-    let output_path = output.unwrap_or_else(|| std::path::PathBuf::from("screamless-dashboard.html"));
+    let output_path =
+        output.unwrap_or_else(|| std::path::PathBuf::from("screamless-dashboard.html"));
 
     let html = crate::dashboard::render_dashboard(&hostname, &analysis)?;
-    std::fs::write(&output_path, html)?;
+    write_private_file(&output_path, html.as_bytes())?;
 
     println!("Dashboard generated: {}", output_path.display());
     println!("Open in browser to view interactive dependency analysis.");
 
     Ok(())
+}
+
+fn write_private_file(path: &std::path::Path, contents: &[u8]) -> Result<()> {
+    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let name = path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("Output path has no filename: {}", path.display()))?
+        .to_string_lossy();
+    let temporary = parent.join(format!(".{}.{}.tmp", name, std::process::id()));
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let result = (|| -> Result<()> {
+        let mut file = options
+            .open(&temporary)
+            .map_err(anyhow::Error::from)
+            .with_context(|| {
+                format!("Unable to create temporary output {}", temporary.display())
+            })?;
+        file.write_all(contents)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&temporary, path)
+            .with_context(|| format!("Unable to replace output {}", path.display()))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
 }
 
 fn infrastructure(db_path: &std::path::Path, servers: String, format: String) -> Result<()> {
@@ -340,7 +383,10 @@ impl std::fmt::Display for CliExit {
 impl std::error::Error for CliExit {}
 
 pub fn error_exit_code(error: &anyhow::Error) -> u8 {
-    error.downcast_ref::<CliExit>().map(|exit| exit.code).unwrap_or(1)
+    error
+        .downcast_ref::<CliExit>()
+        .map(|exit| exit.code)
+        .unwrap_or(1)
 }
 
 #[derive(Serialize)]
@@ -364,16 +410,22 @@ fn preflight(
 ) -> Result<()> {
     use crate::analysis::Analyzer;
 
-    if !matches!(operation.as_str(), "restart" | "reboot" | "update" | "shutdown") {
+    if !matches!(
+        operation.as_str(),
+        "restart" | "reboot" | "update" | "shutdown"
+    ) {
         if json {
-            println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-                "server": server,
-                "operation": operation,
-                "status": "invalid_invocation",
-                "safe": false,
-                "exit_code": 3,
-                "warnings": ["Use restart, reboot, update, or shutdown"]
-            }))?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "server": server,
+                    "operation": operation,
+                    "status": "invalid_invocation",
+                    "safe": false,
+                    "exit_code": 3,
+                    "warnings": ["Use restart, reboot, update, or shutdown"]
+                }))?
+            );
         }
         return Err(anyhow::Error::new(CliExit {
             code: 3,
@@ -390,13 +442,16 @@ fn preflight(
 
     let mut safe = true;
     let mut warnings = Vec::new();
-    let insufficient_evidence = analysis.total_snapshots == 0 || !analysis.probe_statuses.all_complete();
+    let insufficient_evidence =
+        analysis.total_snapshots == 0 || !analysis.probe_statuses.all_complete();
 
     if analysis.total_snapshots == 0 {
         warnings.push("No observations are available for this server".to_string());
         safe = false;
     } else if !analysis.probe_statuses.all_complete() {
-        warnings.push("Required observation probes are incomplete; safety cannot be established".to_string());
+        warnings.push(
+            "Required observation probes are incomplete; safety cannot be established".to_string(),
+        );
         safe = false;
     }
 
@@ -416,7 +471,11 @@ fn preflight(
         }
         "update" => {
             if !analysis.dependencies.is_empty() {
-                let high_conf = analysis.dependencies.iter().filter(|d| d.confidence >= 70).count();
+                let high_conf = analysis
+                    .dependencies
+                    .iter()
+                    .filter(|d| d.confidence >= 70)
+                    .count();
                 if high_conf > 0 {
                     warnings.push(format!(
                         "{} high-confidence external dependencies",
@@ -445,7 +504,13 @@ fn preflight(
         _ => unreachable!("operation was validated before dispatch"),
     }
 
-    let exit_code = if safe { 0 } else if insufficient_evidence { 2 } else { 1 };
+    let exit_code = if safe {
+        0
+    } else if insufficient_evidence {
+        2
+    } else {
+        1
+    };
     let status = match exit_code {
         0 => "safe",
         1 => "unsafe",
@@ -454,17 +519,20 @@ fn preflight(
     };
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&PreflightResult {
-            server,
-            operation,
-            status: status.to_string(),
-            safe,
-            exit_code,
-            warnings: warnings.clone(),
-            outbound_dependencies: analysis.dependencies.len(),
-            inbound_dependencies: analysis.inbound_dependencies.len(),
-            probe_statuses: analysis.probe_statuses.clone(),
-        })?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&PreflightResult {
+                server,
+                operation,
+                status: status.to_string(),
+                safe,
+                exit_code,
+                warnings: warnings.clone(),
+                outbound_dependencies: analysis.dependencies.len(),
+                inbound_dependencies: analysis.inbound_dependencies.len(),
+                probe_statuses: analysis.probe_statuses.clone(),
+            })?
+        );
     } else {
         println!("\n╭──────────────────────────────────────────╮");
         println!("│   PREFLIGHT SAFETY CHECK                 │");

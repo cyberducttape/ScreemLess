@@ -21,15 +21,27 @@ pub struct ProbeStatus {
 
 impl ProbeStatus {
     pub fn complete() -> Self {
-        Self { state: ProbeState::Complete, details: None, unavailable: 0 }
+        Self {
+            state: ProbeState::Complete,
+            details: None,
+            unavailable: 0,
+        }
     }
 
     pub fn partial(details: impl Into<String>, unavailable: usize) -> Self {
-        Self { state: ProbeState::Partial, details: Some(details.into()), unavailable }
+        Self {
+            state: ProbeState::Partial,
+            details: Some(details.into()),
+            unavailable,
+        }
     }
 
     pub fn failed(details: impl Into<String>) -> Self {
-        Self { state: ProbeState::Failed, details: Some(details.into()), unavailable: 0 }
+        Self {
+            state: ProbeState::Failed,
+            details: Some(details.into()),
+            unavailable: 0,
+        }
     }
 
     pub fn is_complete(&self) -> bool {
@@ -38,10 +50,12 @@ impl ProbeStatus {
 }
 
 impl Default for ProbeStatus {
-    fn default() -> Self { Self::complete() }
+    fn default() -> Self {
+        Self::complete()
+    }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ProbeStatuses {
     pub network_sockets: ProbeStatus,
     pub process_attribution: ProbeStatus,
@@ -83,19 +97,6 @@ impl ProbeStatuses {
             if current.details.is_none() {
                 current.details = other.details.clone();
             }
-        }
-    }
-}
-
-impl Default for ProbeStatuses {
-    fn default() -> Self {
-        Self {
-            network_sockets: ProbeStatus::complete(),
-            process_attribution: ProbeStatus::complete(),
-            cron: ProbeStatus::complete(),
-            systemd: ProbeStatus::complete(),
-            config_scan: ProbeStatus::complete(),
-            dns: ProbeStatus::complete(),
         }
     }
 }
@@ -147,15 +148,6 @@ pub struct ConfigReference {
     pub port: Option<u16>,
     pub context: String,
     pub config_line: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServiceInfo {
-    pub name: String,
-    pub app_type: String,
-    pub version: Option<String>,
-    pub listening_ports: Vec<u16>,
-    pub config_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -234,6 +226,43 @@ pub struct AnalysisResult {
     pub decommission_confidence: u8,
     #[serde(default)]
     pub probe_statuses: ProbeStatuses,
+    #[serde(default)]
+    pub inventory: SiteInventory,
+}
+
+/// A server-side inventory derived from the same snapshots used for dependency analysis.
+/// Values are observations or conservative inferences; they are not claims from an
+/// external CMS, analytics platform, or cloud provider.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SiteInventory {
+    pub websites: Vec<WebsiteInventory>,
+    pub users: Vec<String>,
+    pub databases: Vec<InventoryConnection>,
+    pub storage_connections: Vec<InventoryConnection>,
+    pub tech_stack: Vec<String>,
+    pub load_balancers: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebsiteInventory {
+    pub name: String,
+    pub status: String,
+    pub ports: Vec<u16>,
+    #[serde(alias = "usage_observations")]
+    pub availability_observations: usize,
+    #[serde(default)]
+    pub inbound_connection_observations: usize,
+    pub content_paths: Vec<String>,
+    pub tech_stack: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InventoryConnection {
+    pub target: String,
+    pub port: u16,
+    pub protocol: String,
+    pub usage_observations: usize,
+    pub evidence: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

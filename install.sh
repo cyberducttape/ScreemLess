@@ -2,7 +2,7 @@
 # Screamless Installation Script
 # Downloads pre-built binary or builds from source
 
-set -e
+set -euo pipefail
 
 VERSION="1.0.0"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
@@ -31,9 +31,11 @@ if ! command -v cargo &> /dev/null; then
 fi
 
 echo "Building Screamless..."
-cd "$(mktemp -d)"
+BUILD_DIR="$(mktemp -d)"
+trap 'rm -rf "$BUILD_DIR"' EXIT
+cd "$BUILD_DIR"
 git clone --branch "$BRANCH" --depth 1 "$REPO" .
-cargo build --release
+cargo build --locked --release
 
 BINARY="target/release/screamless"
 
@@ -47,11 +49,9 @@ echo ""
 echo "Installing to $INSTALL_DIR..."
 if [ ! -w "$INSTALL_DIR" ]; then
     echo "Note: sudo required for installation"
-    sudo cp "$BINARY" "$INSTALL_DIR/"
-    sudo chmod +x "$INSTALL_DIR/screamless"
+    sudo install -D -m 0755 "$BINARY" "$INSTALL_DIR/screamless"
 else
-    cp "$BINARY" "$INSTALL_DIR/"
-    chmod +x "$INSTALL_DIR/screamless"
+    install -D -m 0755 "$BINARY" "$INSTALL_DIR/screamless"
 fi
 
 echo ""

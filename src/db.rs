@@ -1,9 +1,8 @@
-use rusqlite::{Connection, Result as SqlResult, types::Type};
 use crate::models::ObservationSnapshot;
-use serde_json;
+use rusqlite::{types::Type, Connection, Result as SqlResult};
 use std::path::Path;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 pub struct Database {
     conn: Connection,
@@ -11,11 +10,24 @@ pub struct Database {
 
 impl Database {
     pub fn new<P: AsRef<Path>>(path: P) -> SqlResult<Self> {
+        let path = path.as_ref();
         let conn = Connection::open(path)?;
         let db = Database { conn };
         db.conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+        db.conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        db.restrict_file_permissions(path)?;
         db.init_schema()?;
         Ok(db)
+    }
+
+    fn restrict_file_permissions(&self, path: &Path) -> SqlResult<()> {
+        #[cfg(unix)]
+        if path != Path::new(":memory:") {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        }
+        Ok(())
     }
 
     fn init_schema(&self) -> SqlResult<()> {
@@ -82,15 +94,24 @@ impl Database {
             "#,
         )?;
 
-        let version: i64 = self.conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        let version: i64 = self
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))?;
         if version > SCHEMA_VERSION {
             return Err(rusqlite::Error::InvalidQuery);
         }
         if version < SCHEMA_VERSION {
-            // Version 1 is the normalized snapshot schema above. Future changes must
-            // be added as explicit versioned migrations instead of silent mutations.
-            self.backfill_normalized_tables()?;
-            self.conn.execute_batch(&format!("PRAGMA user_version = {};", SCHEMA_VERSION))?;
+            if version < 1 {
+                self.backfill_normalized_tables()?;
+                self.conn.execute_batch("PRAGMA user_version = 1;")?;
+            }
+            if version < 2 {
+                // Version 1 stored whole seconds. Migrate those keys before
+                // switching to milliseconds to prevent same-second overwrites.
+                self.conn.execute_batch(
+                    "UPDATE snapshots SET timestamp = timestamp * 1000; PRAGMA user_version = 2;",
+                )?;
+            }
         }
         Ok(())
     }
@@ -104,13 +125,16 @@ impl Database {
         )?;
 
         let snapshots = {
-            let mut stmt = self.conn.prepare("SELECT id, data FROM snapshots ORDER BY id")?;
+            let mut stmt = self
+                .conn
+                .prepare("SELECT id, data FROM snapshots ORDER BY id")?;
             let rows = stmt.query_map([], |row| {
                 let id = row.get::<_, i64>(0)?;
                 let json = row.get::<_, String>(1)?;
-                let snapshot = serde_json::from_str::<ObservationSnapshot>(&json).map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(1, Type::Text, Box::new(error))
-                })?;
+                let snapshot =
+                    serde_json::from_str::<ObservationSnapshot>(&json).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(1, Type::Text, Box::new(error))
+                    })?;
                 Ok((id, snapshot))
             })?;
             rows.collect::<SqlResult<Vec<_>>>()?
@@ -143,7 +167,13 @@ impl Database {
                 self.conn.execute(
                     "INSERT INTO systemd_timers (snapshot_id, name, unit, enabled, active)
                      VALUES (?1, ?2, ?3, ?4, ?5)",
-                    rusqlite::params![snapshot_id, timer.name, timer.unit, timer.enabled, timer.active],
+                    rusqlite::params![
+                        snapshot_id,
+                        timer.name,
+                        timer.unit,
+                        timer.enabled,
+                        timer.active
+                    ],
                 )?;
             }
         }
@@ -154,7 +184,7 @@ impl Database {
         let snapshot_json = serde_json::to_string(&snapshot)
             .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
 
-        let timestamp = snapshot.timestamp.timestamp();
+        let timestamp = snapshot.timestamp.timestamp_millis();
         let tx = self.conn.transaction()?;
 
         tx.execute(
@@ -169,10 +199,22 @@ impl Database {
             rusqlite::params![&snapshot.hostname, timestamp],
             |row| row.get(0),
         )?;
-        tx.execute("DELETE FROM listening_services WHERE snapshot_id = ?1", [snapshot_id])?;
-        tx.execute("DELETE FROM network_connections WHERE snapshot_id = ?1", [snapshot_id])?;
-        tx.execute("DELETE FROM cron_jobs WHERE snapshot_id = ?1", [snapshot_id])?;
-        tx.execute("DELETE FROM systemd_timers WHERE snapshot_id = ?1", [snapshot_id])?;
+        tx.execute(
+            "DELETE FROM listening_services WHERE snapshot_id = ?1",
+            [snapshot_id],
+        )?;
+        tx.execute(
+            "DELETE FROM network_connections WHERE snapshot_id = ?1",
+            [snapshot_id],
+        )?;
+        tx.execute(
+            "DELETE FROM cron_jobs WHERE snapshot_id = ?1",
+            [snapshot_id],
+        )?;
+        tx.execute(
+            "DELETE FROM systemd_timers WHERE snapshot_id = ?1",
+            [snapshot_id],
+        )?;
 
         for service in &snapshot.listening_services {
             tx.execute(
@@ -200,7 +242,13 @@ impl Database {
             tx.execute(
                 "INSERT INTO systemd_timers (snapshot_id, name, unit, enabled, active)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params![snapshot_id, timer.name, timer.unit, timer.enabled, timer.active],
+                rusqlite::params![
+                    snapshot_id,
+                    timer.name,
+                    timer.unit,
+                    timer.enabled,
+                    timer.active
+                ],
             )?;
         }
 
@@ -209,16 +257,14 @@ impl Database {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn get_latest_snapshot(&self, hostname: &str) -> SqlResult<Option<ObservationSnapshot>> {
         let mut stmt = self.conn.prepare(
             "SELECT data FROM snapshots WHERE hostname = ?1
-             ORDER BY timestamp DESC LIMIT 1"
+             ORDER BY timestamp DESC LIMIT 1",
         )?;
 
-        let result = stmt.query_row(
-            rusqlite::params![hostname],
-            |row| row.get::<_, String>(0),
-        );
+        let result = stmt.query_row(rusqlite::params![hostname], |row| row.get::<_, String>(0));
 
         match result {
             Ok(json) => {
@@ -232,38 +278,44 @@ impl Database {
         }
     }
 
-    pub fn get_snapshots_since(&self, hostname: &str, since_timestamp: i64) -> SqlResult<Vec<ObservationSnapshot>> {
+    pub fn get_snapshots_since(
+        &self,
+        hostname: &str,
+        since_timestamp: i64,
+    ) -> SqlResult<Vec<ObservationSnapshot>> {
         let mut stmt = self.conn.prepare(
             "SELECT data FROM snapshots WHERE hostname = ?1 AND timestamp >= ?2
-             ORDER BY timestamp ASC"
+             ORDER BY timestamp ASC",
         )?;
 
-        let snapshots = stmt.query_map(
-            rusqlite::params![hostname, since_timestamp],
-            |row| {
+        let snapshots = stmt
+            .query_map(rusqlite::params![hostname, since_timestamp], |row| {
                 let json = row.get::<_, String>(0)?;
                 serde_json::from_str(&json).map_err(|error| {
                     rusqlite::Error::FromSqlConversionFailure(0, Type::Text, Box::new(error))
                 })
-            },
-        )?
+            })?
             .collect::<SqlResult<Vec<ObservationSnapshot>>>()?;
 
         Ok(snapshots)
     }
 
-    pub fn get_all_snapshots_since(&self, since_timestamp: i64) -> SqlResult<Vec<ObservationSnapshot>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT data FROM snapshots WHERE timestamp >= ?1 ORDER BY timestamp ASC",
-        )?;
+    pub fn get_all_snapshots_since(
+        &self,
+        since_timestamp: i64,
+    ) -> SqlResult<Vec<ObservationSnapshot>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT data FROM snapshots WHERE timestamp >= ?1 ORDER BY timestamp ASC")?;
 
-        let snapshots = stmt.query_map(rusqlite::params![since_timestamp], |row| {
-            let json = row.get::<_, String>(0)?;
-            serde_json::from_str(&json).map_err(|error| {
-                rusqlite::Error::FromSqlConversionFailure(0, Type::Text, Box::new(error))
-            })
-        })?
-        .collect::<SqlResult<Vec<ObservationSnapshot>>>()?;
+        let snapshots = stmt
+            .query_map(rusqlite::params![since_timestamp], |row| {
+                let json = row.get::<_, String>(0)?;
+                serde_json::from_str(&json).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(0, Type::Text, Box::new(error))
+                })
+            })?
+            .collect::<SqlResult<Vec<ObservationSnapshot>>>()?;
 
         Ok(snapshots)
     }
@@ -308,7 +360,8 @@ mod tests {
 
     #[test]
     fn stores_snapshot_data_and_normalized_rows_together() {
-        let path = std::env::temp_dir().join(format!("screamless-db-test-{}.db", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("screamless-db-test-{}.db", std::process::id()));
         let mut db = Database::new(&path).unwrap();
         let snapshot = ObservationSnapshot {
             timestamp: Utc::now(),
@@ -334,18 +387,30 @@ mod tests {
         };
 
         db.store_snapshot(&snapshot).unwrap();
-        let listener_count: i64 = db.conn.query_row(
-            "SELECT COUNT(*) FROM listening_services",
-            [],
-            |row| row.get(0),
-        ).unwrap();
-        let cron_count: i64 = db.conn.query_row(
-            "SELECT COUNT(*) FROM cron_jobs",
-            [],
-            |row| row.get(0),
-        ).unwrap();
-        assert_eq!(listener_count, 1);
-        assert_eq!(cron_count, 1);
+        let mut same_second = snapshot.clone();
+        same_second.timestamp += chrono::Duration::milliseconds(1);
+        db.store_snapshot(&same_second).unwrap();
+        let listener_count: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM listening_services", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let cron_count: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM cron_jobs", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(listener_count, 2);
+        assert_eq!(cron_count, 2);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
 
         drop(db);
         let _ = std::fs::remove_file(path);
@@ -353,14 +418,49 @@ mod tests {
 
     #[test]
     fn reports_corrupt_snapshot_data_as_an_error() {
-        let path = std::env::temp_dir().join(format!("screamless-db-corrupt-{}.db", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("screamless-db-corrupt-{}.db", std::process::id()));
         let db = Database::new(&path).unwrap();
-        db.conn.execute(
-            "INSERT INTO snapshots (hostname, timestamp, data) VALUES (?1, ?2, ?3)",
-            rusqlite::params!["broken-host", 1_i64, "not-json"],
-        ).unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO snapshots (hostname, timestamp, data) VALUES (?1, ?2, ?3)",
+                rusqlite::params!["broken-host", 1_i64, "not-json"],
+            )
+            .unwrap();
 
         assert!(db.get_all_snapshots_since(0).is_err());
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn migrates_second_precision_snapshot_keys_to_milliseconds() {
+        let path = std::env::temp_dir().join(format!(
+            "screamless-db-migration-test-{}.db",
+            std::process::id()
+        ));
+        let db = Database::new(&path).unwrap();
+        drop(db);
+
+        let raw = rusqlite::Connection::open(&path).unwrap();
+        raw.execute(
+            "INSERT INTO snapshots (hostname, timestamp, data) VALUES (?1, ?2, ?3)",
+            rusqlite::params!["legacy-host", 1_700_000_000_i64, "{}"],
+        )
+        .unwrap();
+        raw.execute_batch("PRAGMA user_version = 1;").unwrap();
+        drop(raw);
+
+        let db = Database::new(&path).unwrap();
+        let timestamp: i64 = db
+            .conn
+            .query_row(
+                "SELECT timestamp FROM snapshots WHERE hostname = 'legacy-host'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(timestamp, 1_700_000_000_000_i64);
         drop(db);
         let _ = std::fs::remove_file(path);
     }

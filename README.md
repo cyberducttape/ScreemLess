@@ -99,6 +99,15 @@ Cascade risk: MEDIUM (2 systems lose access, 1 degrades)
 | **Snapshot-database mapping** | ✅ Phase 5 (requires local data from each host) |
 | Pre-flight safety checks | ✅ Phase 7 |
 | Cascade failure analysis | ✅ Phase 5 |
+| Website and infrastructure inventory | ✅ Config-backed, evidence-labeled |
+
+The inventory shown in JSON reports and the dashboard includes configured
+virtual hosts, active/inactive listener status, document roots, observed users,
+recognized application processes, inferred database/storage connections, and
+load-balancer candidates backed by upstream/proxy configuration. Reverse-proxy
+configuration is parsed for Nginx, Apache, HAProxy, Traefik, and Caddy. Inbound site
+traffic is reported as observed established-socket connections; it is not HTTP
+request or visitor analytics.
 
 ## Commands
 
@@ -261,6 +270,10 @@ RECOMMENDATION:
 ## Security and Contributing
 
 See [SECURITY.md](SECURITY.md) for operational limitations and [CONTRIBUTING.md](CONTRIBUTING.md) for development guidance.
+
+Pull requests are expected to pass formatting, Clippy with warnings denied,
+all tests, and a locked release build. Generated databases and dashboards are
+written with owner-only permissions and dashboard writes are atomic.
 
 ## License
 

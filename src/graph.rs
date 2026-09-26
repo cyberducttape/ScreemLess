@@ -1,4 +1,4 @@
-use crate::models::{Dependency, AnalysisResult};
+use crate::models::{AnalysisResult, Dependency};
 
 pub struct GraphRenderer;
 
@@ -21,10 +21,7 @@ impl GraphRenderer {
             std::collections::BTreeMap::new();
 
         for dep in &analysis.dependencies {
-            group_by_port
-                .entry(dep.remote_port)
-                .or_insert_with(Vec::new)
-                .push(dep);
+            group_by_port.entry(dep.remote_port).or_default().push(dep);
         }
 
         let mut is_first_group = true;
@@ -55,10 +52,7 @@ impl GraphRenderer {
 
                 if !dep.processes.is_empty() {
                     let procs = dep.processes.join(", ");
-                    output.push_str(&format!(
-                        "  {}   └─ via: {}\n",
-                        connection, procs
-                    ));
+                    output.push_str(&format!("  {}   └─ via: {}\n", connection, procs));
                 }
             }
         }
@@ -66,6 +60,7 @@ impl GraphRenderer {
         output
     }
 
+    #[allow(dead_code)]
     pub fn render_summary_stats(analysis: &AnalysisResult) -> String {
         let total = analysis.dependencies.len();
         let high_conf = analysis

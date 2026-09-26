@@ -1,8 +1,8 @@
-use std::collections::{HashMap, HashSet};
 use crate::models::{
     AnalysisResult, Dependency, Evidence, EvidenceLevel, ImpactLevel, InboundDependency,
     ServerDependencyChain,
 };
+use std::collections::{HashMap, HashSet};
 
 pub struct InfrastructureMapper;
 
@@ -15,9 +15,13 @@ impl InfrastructureMapper {
 
         for (server_name, (analysis, _)) in servers {
             let outbound_deps = analysis.dependencies.clone();
-            let inbound_deps = inferred_inbound.get(server_name).cloned().unwrap_or_default();
+            let inbound_deps = inferred_inbound
+                .get(server_name)
+                .cloned()
+                .unwrap_or_default();
 
-            let is_single_point_of_failure = Self::is_critical_service(server_name, &outbound_deps, &inbound_deps);
+            let is_single_point_of_failure =
+                Self::is_critical_service(server_name, &outbound_deps, &inbound_deps);
             let total_impact = Self::calculate_total_impact(&inbound_deps);
 
             chains.insert(
@@ -47,16 +51,20 @@ impl InfrastructureMapper {
                     .as_deref()
                     .filter(|hostname| servers.contains_key(*hostname))
                     .or_else(|| {
-                        servers.contains_key(&dependency.remote_addr)
+                        servers
+                            .contains_key(&dependency.remote_addr)
                             .then_some(dependency.remote_addr.as_str())
                     });
                 let Some(target) = target else { continue };
-                if target == source { continue; }
+                if target == source {
+                    continue;
+                }
 
                 let entry = inbound.entry(target.to_string()).or_default();
-                if let Some(existing) = entry.iter_mut().find(|edge| {
-                    edge.source_hostname.as_deref() == Some(source.as_str())
-                }) {
+                if let Some(existing) = entry
+                    .iter_mut()
+                    .find(|edge| edge.source_hostname.as_deref() == Some(source.as_str()))
+                {
                     existing.confidence = existing.confidence.max(dependency.confidence);
                     existing.evidence.push(Evidence {
                         level: EvidenceLevel::Med,
@@ -78,7 +86,9 @@ impl InfrastructureMapper {
                             },
                             description: format!(
                                 "Observed outbound {} connection to port {} ({} observation(s))",
-                                dependency.protocol, dependency.remote_port, dependency.connection_count
+                                dependency.protocol,
+                                dependency.remote_port,
+                                dependency.connection_count
                             ),
                         }],
                         detection_methods: vec!["central_outbound_observation".to_string()],
@@ -164,13 +174,14 @@ impl InfrastructureMapper {
     ) -> bool {
         // A service is critical if many others depend on it
         // and those dependents have few alternatives
-        inbound.len() > 3 && inbound.iter().any(|dep| {
-            dep.confidence >= 70
-                || matches!(
-                    dep.impact_level,
-                    crate::models::ImpactLevel::Critical | crate::models::ImpactLevel::High
-                )
-        })
+        inbound.len() > 3
+            && inbound.iter().any(|dep| {
+                dep.confidence >= 70
+                    || matches!(
+                        dep.impact_level,
+                        crate::models::ImpactLevel::Critical | crate::models::ImpactLevel::High
+                    )
+            })
     }
 
     fn calculate_total_impact(inbound: &[InboundDependency]) -> u8 {
@@ -188,6 +199,7 @@ impl InfrastructureMapper {
         (impact.min(100)) as u8
     }
 
+    #[allow(dead_code)]
     pub fn shutdown_impact_analysis(
         server: &str,
         chains: &HashMap<String, ServerDependencyChain>,
@@ -198,15 +210,13 @@ impl InfrastructureMapper {
         if let Some(chain) = chains.get(server) {
             for inbound in &chain.inbound_deps {
                 if let Some(dependent) = &inbound.source_hostname {
-                    affected_servers.push((
-                        dependent.clone(),
-                        inbound.impact_level.clone(),
-                    ));
+                    affected_servers.push((dependent.clone(), inbound.impact_level.clone()));
 
                     // Check if the dependent has no alternatives
                     if let Some(dep_chain) = chains.get(dependent) {
                         if dep_chain.outbound_deps.iter().all(|d| {
-                            d.remote_addr == chain.server_name || d.hostname.as_ref() == Some(&chain.server_name)
+                            d.remote_addr == chain.server_name
+                                || d.hostname.as_ref() == Some(&chain.server_name)
                         }) {
                             cascade_risk = true;
                         }
@@ -236,6 +246,7 @@ impl InfrastructureMapper {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ShutdownImpact {
     pub server: String,
@@ -262,6 +273,7 @@ mod tests {
             risks: Vec::new(),
             decommission_confidence: 100,
             probe_statuses: ProbeStatuses::default(),
+            inventory: crate::models::SiteInventory::default(),
         }
     }
 
@@ -283,13 +295,19 @@ mod tests {
         };
 
         let mut servers = std::collections::HashMap::new();
-        servers.insert("web01".to_string(), (analysis(vec![dependency]), Vec::new()));
+        servers.insert(
+            "web01".to_string(),
+            (analysis(vec![dependency]), Vec::new()),
+        );
         servers.insert("db01".to_string(), (analysis(Vec::new()), Vec::new()));
 
         let graph = InfrastructureMapper::build_full_dependency_graph(&servers);
         let inbound = &graph["db01"].inbound_deps;
         assert_eq!(inbound.len(), 1);
         assert_eq!(inbound[0].source_hostname.as_deref(), Some("web01"));
-        assert_eq!(inbound[0].detection_methods, vec!["central_outbound_observation"]);
+        assert_eq!(
+            inbound[0].detection_methods,
+            vec!["central_outbound_observation"]
+        );
     }
 }

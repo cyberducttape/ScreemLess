@@ -7,13 +7,16 @@ use std::process::{Command, Output};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration as StdDuration, Instant};
 
-use crate::models::*;
 use crate::config_scanner::ConfigScanner;
+use crate::models::*;
 
 pub struct Collector;
 
-static CONFIG_DNS_CACHE: OnceLock<Mutex<Option<(Instant, Vec<DnsName>, Vec<ConfigReference>)>>> =
-    OnceLock::new();
+static CONFIG_DNS_CACHE: OnceLock<ConfigDnsCache> = OnceLock::new();
+static PASSWD_CACHE: OnceLock<HashMap<u32, String>> = OnceLock::new();
+
+type ProcessAttribution = HashMap<u32, (String, u32, String)>;
+type ConfigDnsCache = Mutex<Option<(Instant, Vec<DnsName>, Vec<ConfigReference>)>>;
 
 impl Collector {
     pub async fn collect_snapshot() -> Result<ObservationSnapshot> {
@@ -24,32 +27,35 @@ impl Collector {
         let (processes, pid_to_process) = match Self::collect_process_inventory() {
             Ok(inventory) => inventory,
             Err(error) => {
-                probe_statuses.process_attribution = ProbeStatus::partial(
-                    format!("process inventory unavailable: {}", error),
-                    0,
-                );
+                probe_statuses.process_attribution =
+                    ProbeStatus::partial(format!("process inventory unavailable: {}", error), 0);
                 (Vec::new(), HashMap::new())
             }
         };
 
-        let (listening_services, listening_unavailable) = match Self::collect_listening_services(&pid_to_process) {
-            Ok(result) => result,
-            Err(error) => {
-                probe_statuses.network_sockets = ProbeStatus::failed(error.to_string());
-                (Vec::new(), 0)
-            }
-        };
-        let (network_connections, connection_unavailable) = match Self::collect_network_connections(&pid_to_process) {
-            Ok(result) => result,
-            Err(error) => {
-                probe_statuses.network_sockets = ProbeStatus::failed(error.to_string());
-                (Vec::new(), 0)
-            }
-        };
+        let (listening_services, listening_unavailable) =
+            match Self::collect_listening_services(&pid_to_process) {
+                Ok(result) => result,
+                Err(error) => {
+                    probe_statuses.network_sockets = ProbeStatus::failed(error.to_string());
+                    (Vec::new(), 0)
+                }
+            };
+        let (network_connections, connection_unavailable) =
+            match Self::collect_network_connections(&pid_to_process) {
+                Ok(result) => result,
+                Err(error) => {
+                    probe_statuses.network_sockets = ProbeStatus::failed(error.to_string());
+                    (Vec::new(), 0)
+                }
+            };
         let socket_unavailable = listening_unavailable + connection_unavailable;
         if socket_unavailable > 0 {
             probe_statuses.process_attribution = ProbeStatus::partial(
-                format!("process attribution unavailable for {} sockets", socket_unavailable),
+                format!(
+                    "process attribution unavailable for {} sockets",
+                    socket_unavailable
+                ),
                 socket_unavailable,
             );
         }
@@ -156,33 +162,31 @@ impl Collector {
 
         for line in stdout.lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 4 {
-                if Self::is_connection_line(&parts) {
-                    let endpoints = Self::find_endpoints(&parts);
-                    if let [local, remote, ..] = endpoints.as_slice() {
-                        if remote.1 == 0 {
-                            continue;
-                        }
-                        let pid = Self::extract_pid(parts.last().copied());
-                        if pid == 0 || !pid_to_process.contains_key(&pid) {
-                            unavailable += 1;
-                        }
-                        let process_name = pid_to_process
-                            .get(&pid)
-                            .map(|(name, _, _)| name.clone())
-                            .unwrap_or_else(|| "unknown".to_string());
-
-                        connections.push(NetworkConnection {
-                            local_addr: local.0.clone(),
-                            local_port: local.1,
-                            remote_addr: remote.0.clone(),
-                            remote_port: remote.1,
-                            protocol: Self::socket_protocol(&parts),
-                            state: Self::socket_state(&parts),
-                            pid,
-                            process_name,
-                        });
+            if parts.len() >= 4 && Self::is_connection_line(&parts) {
+                let endpoints = Self::find_endpoints(&parts);
+                if let [local, remote, ..] = endpoints.as_slice() {
+                    if remote.1 == 0 {
+                        continue;
                     }
+                    let pid = Self::extract_pid(parts.last().copied());
+                    if pid == 0 || !pid_to_process.contains_key(&pid) {
+                        unavailable += 1;
+                    }
+                    let process_name = pid_to_process
+                        .get(&pid)
+                        .map(|(name, _, _)| name.clone())
+                        .unwrap_or_else(|| "unknown".to_string());
+
+                    connections.push(NetworkConnection {
+                        local_addr: local.0.clone(),
+                        local_port: local.1,
+                        remote_addr: remote.0.clone(),
+                        remote_port: remote.1,
+                        protocol: Self::socket_protocol(&parts),
+                        state: Self::socket_state(&parts),
+                        pid,
+                        process_name,
+                    });
                 }
             }
         }
@@ -224,20 +228,22 @@ impl Collector {
     }
 
     fn find_endpoints(parts: &[&str]) -> Vec<(String, u16)> {
-        parts.iter()
+        parts
+            .iter()
             .filter_map(|part| Self::parse_addr_port(part))
             .collect()
     }
 
     fn socket_protocol(parts: &[&str]) -> String {
-        parts.iter()
+        parts
+            .iter()
             .find_map(|part| match *part {
                 "tcp" | "tcp6" => Some("tcp"),
                 "udp" | "udp6" => Some("udp"),
                 _ => None,
             })
             .or_else(|| {
-                if parts.iter().any(|part| *part == "UNCONN") {
+                if parts.contains(&"UNCONN") {
                     Some("udp")
                 } else {
                     Some("tcp")
@@ -248,8 +254,14 @@ impl Collector {
     }
 
     fn socket_state(parts: &[&str]) -> String {
-        parts.iter()
-            .find(|part| matches!(**part, "LISTEN" | "ESTAB" | "ESTABLISHED" | "UNCONN" | "CLOSE-WAIT"))
+        parts
+            .iter()
+            .find(|part| {
+                matches!(
+                    **part,
+                    "LISTEN" | "ESTAB" | "ESTABLISHED" | "UNCONN" | "CLOSE-WAIT"
+                )
+            })
             .map(|state| match *state {
                 "ESTAB" => "ESTABLISHED",
                 other => other,
@@ -259,7 +271,12 @@ impl Collector {
     }
 
     fn is_connection_line(parts: &[&str]) -> bool {
-        parts.iter().any(|part| matches!(*part, "ESTAB" | "ESTABLISHED" | "UNCONN" | "CONNECTED" | "udp" | "udp6"))
+        parts.iter().any(|part| {
+            matches!(
+                *part,
+                "ESTAB" | "ESTABLISHED" | "UNCONN" | "CONNECTED" | "udp" | "udp6"
+            )
+        })
     }
 
     fn extract_pid(process_field: Option<&str>) -> u32 {
@@ -268,17 +285,23 @@ impl Collector {
             None => return 0,
         };
 
-        if let Some(pid) = field.split("pid=").nth(1)
+        if let Some(pid) = field
+            .split("pid=")
+            .nth(1)
             .and_then(|value| value.split(|c: char| !c.is_ascii_digit()).next())
             .and_then(|value| value.parse().ok())
         {
             return pid;
         }
 
-        field.split('/').next().and_then(|value| value.parse().ok()).unwrap_or(0)
+        field
+            .split('/')
+            .next()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0)
     }
 
-    fn collect_process_inventory() -> Result<(Vec<Process>, HashMap<u32, (String, u32, String)>)> {
+    fn collect_process_inventory() -> Result<(Vec<Process>, ProcessAttribution)> {
         let mut processes = Vec::new();
         let mut pid_to_process = HashMap::new();
 
@@ -289,7 +312,7 @@ impl Collector {
             };
 
             if let (Ok(stat), Ok(status)) = (process.stat(), process.status()) {
-                let user = status.ruid.to_string();
+                let user = Self::username_for_uid(status.ruid);
 
                 processes.push(Process {
                     pid: process.pid() as u32,
@@ -309,19 +332,47 @@ impl Collector {
         Ok((processes, pid_to_process))
     }
 
+    fn username_for_uid(uid: u32) -> String {
+        let users = PASSWD_CACHE.get_or_init(|| {
+            fs::read_to_string("/etc/passwd")
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| {
+                    let fields = line.split(':').collect::<Vec<_>>();
+                    if fields.len() > 2 {
+                        fields[2]
+                            .parse::<u32>()
+                            .ok()
+                            .map(|uid| (uid, fields[0].to_string()))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        });
+        users.get(&uid).cloned().unwrap_or_else(|| uid.to_string())
+    }
+
     fn collect_cron_jobs() -> Result<(Vec<CronJob>, usize)> {
         let mut cron_jobs = Vec::new();
         let mut unavailable = 0;
 
-        Self::collect_cron_file(Path::new("/etc/crontab"), true, &mut cron_jobs, &mut unavailable);
+        Self::collect_cron_file(
+            Path::new("/etc/crontab"),
+            true,
+            &mut cron_jobs,
+            &mut unavailable,
+        );
 
         match fs::read_dir("/etc/cron.d") {
-            Ok(entries) => for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_file() {
-                    Self::collect_cron_file(&path, true, &mut cron_jobs, &mut unavailable);
+            Ok(entries) => {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_file() {
+                        Self::collect_cron_file(&path, true, &mut cron_jobs, &mut unavailable);
+                    }
                 }
-            },
+            }
             Err(error) if error.kind() != std::io::ErrorKind::NotFound => unavailable += 1,
             Err(_) => {}
         }
@@ -333,16 +384,18 @@ impl Collector {
             ("/etc/cron.monthly", "@monthly"),
         ] {
             match fs::read_dir(directory) {
-                Ok(entries) => for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_file() {
-                        cron_jobs.push(CronJob {
-                            schedule: schedule.to_string(),
-                            command: "[redacted]".to_string(),
-                            source: path.display().to_string(),
-                        });
+                Ok(entries) => {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.is_file() {
+                            cron_jobs.push(CronJob {
+                                schedule: schedule.to_string(),
+                                command: "[redacted]".to_string(),
+                                source: path.display().to_string(),
+                            });
+                        }
                     }
-                },
+                }
                 Err(error) if error.kind() != std::io::ErrorKind::NotFound => unavailable += 1,
                 Err(_) => {}
             }
@@ -387,15 +440,19 @@ impl Collector {
             if fields.first().is_some_and(|field| field.contains('=')) {
                 continue;
             }
-            let (schedule, command_start) = if fields.first().is_some_and(|field| field.starts_with('@')) {
-                if fields.len() < 2 { continue; }
-                (fields[0].to_string(), 1)
-            } else {
-                let required = if has_user_field { 7 } else { 6 };
-                if fields.len() < required { continue; }
-                let end = if has_user_field { 5 } else { 5 };
-                (fields[..5].join(" "), end + usize::from(has_user_field))
-            };
+            let (schedule, command_start) =
+                if fields.first().is_some_and(|field| field.starts_with('@')) {
+                    if fields.len() < 2 {
+                        continue;
+                    }
+                    (fields[0].to_string(), 1)
+                } else {
+                    let required = if has_user_field { 7 } else { 6 };
+                    if fields.len() < required {
+                        continue;
+                    }
+                    (fields[..5].join(" "), 5 + usize::from(has_user_field))
+                };
 
             if command_start < fields.len() {
                 cron_jobs.push(CronJob {
@@ -412,19 +469,21 @@ impl Collector {
         let mut timers = Vec::new();
 
         let output = Command::new("systemctl")
-            .args(&["list-timers", "--all", "--output=json"])
+            .args(["list-timers", "--all", "--output=json"])
             .output()
             .context("Failed to run systemctl list-timers")?;
 
         if output.status.success() {
             let json = serde_json::from_slice::<serde_json::Value>(&output.stdout)
                 .context("systemd returned invalid JSON")?;
-            let timers_array = json.as_array()
+            let timers_array = json
+                .as_array()
                 .or_else(|| json.get("timers").and_then(|t| t.as_array()))
                 .ok_or_else(|| anyhow!("systemd JSON did not contain a timer list"))?;
             for timer_obj in timers_array {
                 if let Some(unit) = timer_obj.get("unit").and_then(|u| u.as_str()) {
-                    let active = timer_obj.get("active")
+                    let active = timer_obj
+                        .get("active")
                         .and_then(|a| a.as_str())
                         .map(|a| a == "active")
                         .unwrap_or(true);
@@ -465,12 +524,8 @@ impl Collector {
             if seen.insert(config_ref.hostname.clone()) {
                 use std::net::ToSocketAddrs;
 
-                let ip_addresses = match format!("{}:80", config_ref.hostname)
-                    .to_socket_addrs()
-                {
-                    Ok(addrs) => addrs
-                        .map(|addr| addr.ip().to_string())
-                        .collect(),
+                let ip_addresses = match format!("{}:80", config_ref.hostname).to_socket_addrs() {
+                    Ok(addrs) => addrs.map(|addr| addr.ip().to_string()).collect(),
                     Err(_) => vec![],
                 };
                 if ip_addresses.is_empty() {
@@ -506,7 +561,10 @@ mod tests {
 
     #[test]
     fn extracts_pid_from_ss_process_metadata() {
-        assert_eq!(Collector::extract_pid(Some("users:((\"nginx\",pid=1234,fd=7))")), 1234);
+        assert_eq!(
+            Collector::extract_pid(Some("users:((\"nginx\",pid=1234,fd=7))")),
+            1234
+        );
         assert_eq!(Collector::extract_pid(Some("1234/nginx")), 1234);
         assert_eq!(Collector::extract_pid(None), 0);
     }
@@ -514,26 +572,24 @@ mod tests {
     #[test]
     fn finds_local_and_remote_ss_endpoints() {
         let fields = ["tcp", "ESTAB", "0", "127.0.0.1:42000", "[::1]:5432"];
-        assert_eq!(Collector::find_endpoints(&fields), vec![
-            ("127.0.0.1".to_string(), 42000),
-            ("::1".to_string(), 5432),
-        ]);
+        assert_eq!(
+            Collector::find_endpoints(&fields),
+            vec![("127.0.0.1".to_string(), 42000), ("::1".to_string(), 5432),]
+        );
     }
 
     #[test]
     fn accepts_modern_ss_state_first_format() {
         let fields = "ESTAB 0 0 127.0.0.1:36886 127.0.0.1:55059";
         let parts: Vec<&str> = fields.split_whitespace().collect();
-        assert!(parts.iter().any(|part| *part == "ESTAB"));
+        assert!(parts.contains(&"ESTAB"));
         assert_eq!(Collector::find_endpoints(&parts).len(), 2);
     }
 
     #[test]
     fn parses_cron_schedule_without_persisting_command_body() {
-        let path = std::env::temp_dir().join(format!(
-            "screamless-cron-test-{}",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("screamless-cron-test-{}", std::process::id()));
         std::fs::write(&path, "0 2 * * * root /usr/bin/backup --token=secret\n").unwrap();
         let mut jobs = Vec::new();
         let mut unavailable = 0;
