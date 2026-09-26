@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Count inaccessible `/proc` process entries as incomplete attribution while
+  ignoring normal process-exit races; reset fast-probe status each sample so
+  recovered socket/process probes do not remain stale or force slow retries.
 - Recognize transitional TCP connection states and mark malformed socket rows as
   partial collection instead of silently treating them as complete evidence.
 - Report website listener state as unknown when the latest socket probe is

@@ -27,7 +27,12 @@ type ConfigDnsCache = Mutex<
         ConfigScanAudit,
     )>,
 >;
-type ProcessInventory = (Vec<Process>, ProcessAttribution, Vec<SoftwareInventory>);
+type ProcessInventory = (
+    Vec<Process>,
+    ProcessAttribution,
+    Vec<SoftwareInventory>,
+    usize,
+);
 
 const SLOW_REFRESH_INTERVAL: StdDuration =
     StdDuration::from_secs(SLOW_INVENTORY_REFRESH_INTERVAL_SECONDS as u64);
@@ -76,18 +81,28 @@ impl Collector {
         } else {
             state.slow_probe_statuses.clone()
         };
+        // These probes run for every snapshot. Carrying a previous failure
+        // forward would make a recovered probe look unhealthy indefinitely.
+        Self::reset_fast_probe_statuses(&mut probe_statuses);
 
-        let (processes, pid_to_process, observed_software) =
-            match Self::collect_process_inventory(refresh_slow) {
-                Ok(inventory) => inventory,
-                Err(error) => {
-                    probe_statuses.process_attribution = ProbeStatus::partial(
-                        format!("process inventory unavailable: {}", error),
-                        0,
-                    );
-                    (Vec::new(), HashMap::new(), Vec::new())
-                }
-            };
+        let (
+            processes,
+            pid_to_process,
+            observed_software,
+            process_inventory_unavailable,
+            process_inventory_error,
+        ) = match Self::collect_process_inventory(refresh_slow) {
+            Ok((processes, pid_to_process, software, unavailable)) => {
+                (processes, pid_to_process, software, unavailable, None)
+            }
+            Err(error) => (
+                Vec::new(),
+                HashMap::new(),
+                Vec::new(),
+                1,
+                Some(error.to_string()),
+            ),
+        };
         if refresh_slow {
             state.software = observed_software;
         }
@@ -116,14 +131,12 @@ impl Collector {
             );
         }
         let socket_unavailable = listening_unavailable + connection_unavailable;
-        if socket_unavailable > 0 {
-            probe_statuses.process_attribution = ProbeStatus::partial(
-                format!(
-                    "process attribution unavailable for {} sockets",
-                    socket_unavailable
-                ),
-                socket_unavailable,
-            );
+        if let Some(status) = Self::process_attribution_status(
+            process_inventory_unavailable,
+            socket_unavailable,
+            process_inventory_error.as_deref(),
+        ) {
+            probe_statuses.process_attribution = status;
         }
 
         if refresh_slow {
@@ -259,8 +272,7 @@ impl Collector {
     }
 
     fn slow_refresh_interval(statuses: &ProbeStatuses) -> StdDuration {
-        if statuses.process_attribution.is_complete()
-            && statuses.cron.is_complete()
+        if statuses.cron.is_complete()
             && statuses.systemd.is_complete()
             && statuses.config_scan.is_complete()
             && statuses.dns.is_complete()
@@ -269,6 +281,31 @@ impl Collector {
         } else {
             SLOW_REFRESH_RETRY_INTERVAL
         }
+    }
+
+    fn reset_fast_probe_statuses(statuses: &mut ProbeStatuses) {
+        statuses.network_sockets = ProbeStatus::complete();
+        statuses.process_attribution = ProbeStatus::complete();
+    }
+
+    fn process_attribution_status(
+        unavailable_process_entries: usize,
+        unavailable_sockets: usize,
+        inventory_error: Option<&str>,
+    ) -> Option<ProbeStatus> {
+        let unavailable = unavailable_process_entries + unavailable_sockets;
+        if unavailable == 0 {
+            return None;
+        }
+
+        let details = match inventory_error {
+            Some(error) => format!("process inventory unavailable: {}", error),
+            None => format!(
+                "process inventory unavailable for {} entry/entries and process attribution unavailable for {} socket(s)",
+                unavailable_process_entries, unavailable_sockets
+            ),
+        };
+        Some(ProbeStatus::partial(details, unavailable))
     }
 
     fn collect_host_identity(hostname: &str) -> HostIdentity {
@@ -817,35 +854,52 @@ impl Collector {
         let mut processes = Vec::new();
         let mut pid_to_process = HashMap::new();
         let mut software_candidates = HashMap::<String, (u32, String)>::new();
+        let mut unavailable = 0;
 
         for proc_entry in procfs::process::all_processes()? {
             let process = match proc_entry {
                 Ok(p) => p,
-                Err(_) => continue,
+                Err(error) => {
+                    unavailable += usize::from(Self::process_error_requires_partial(&error));
+                    continue;
+                }
             };
 
-            if let (Ok(stat), Ok(status)) = (process.stat(), process.status()) {
-                let user = Self::username_for_uid(status.ruid);
-                let process_name = stat.comm.clone();
+            let (stat, status) = match (process.stat(), process.status()) {
+                (Ok(stat), Ok(status)) => (stat, status),
+                (stat, status) => {
+                    unavailable += usize::from(
+                        stat.as_ref()
+                            .err()
+                            .is_some_and(Self::process_error_requires_partial)
+                            || status
+                                .as_ref()
+                                .err()
+                                .is_some_and(Self::process_error_requires_partial),
+                    );
+                    continue;
+                }
+            };
+            let user = Self::username_for_uid(status.ruid);
+            let process_name = stat.comm.clone();
 
-                processes.push(Process {
-                    pid: process.pid() as u32,
-                    name: process_name.clone(),
-                    user: user.clone(),
-                    // Command lines frequently contain credentials. The executable name
-                    // above is sufficient for dependency attribution.
-                    cmdline: String::new(),
-                });
-                pid_to_process.insert(
-                    process.pid() as u32,
-                    (process_name.clone(), process.pid() as u32, user),
-                );
-                if include_software && Self::is_known_software(&process_name) {
-                    if let Ok(executable) = fs::read_link(format!("/proc/{}/exe", process.pid())) {
-                        software_candidates
-                            .entry(Self::software_name(&process_name))
-                            .or_insert((process.pid() as u32, executable.display().to_string()));
-                    }
+            processes.push(Process {
+                pid: process.pid() as u32,
+                name: process_name.clone(),
+                user: user.clone(),
+                // Command lines frequently contain credentials. The executable name
+                // above is sufficient for dependency attribution.
+                cmdline: String::new(),
+            });
+            pid_to_process.insert(
+                process.pid() as u32,
+                (process_name.clone(), process.pid() as u32, user),
+            );
+            if include_software && Self::is_known_software(&process_name) {
+                if let Ok(executable) = fs::read_link(format!("/proc/{}/exe", process.pid())) {
+                    software_candidates
+                        .entry(Self::software_name(&process_name))
+                        .or_insert((process.pid() as u32, executable.display().to_string()));
                 }
             }
         }
@@ -855,7 +909,15 @@ impl Collector {
             .map(|(name, (pid, executable))| Self::collect_software_version(name, pid, executable))
             .collect();
 
-        Ok((processes, pid_to_process, software))
+        Ok((processes, pid_to_process, software, unavailable))
+    }
+
+    fn process_error_requires_partial(error: &procfs::ProcError) -> bool {
+        match error {
+            procfs::ProcError::NotFound(_) => false,
+            procfs::ProcError::Io(error, _) if error.kind() == io::ErrorKind::NotFound => false,
+            _ => true,
+        }
     }
 
     fn is_known_software(process_name: &str) -> bool {
@@ -1341,8 +1403,45 @@ mod tests {
         };
         assert_eq!(
             Collector::slow_refresh_interval(&statuses),
-            Duration::from_secs(5 * 60)
+            Duration::from_secs(60 * 60)
         );
+    }
+
+    #[test]
+    fn fast_probe_statuses_reset_without_discarding_slow_probe_gaps() {
+        let mut statuses = ProbeStatuses {
+            network_sockets: crate::models::ProbeStatus::failed("ss failed"),
+            process_attribution: crate::models::ProbeStatus::partial("restricted", 2),
+            dns: crate::models::ProbeStatus::partial("DNS timeout", 1),
+            ..ProbeStatuses::default()
+        };
+
+        Collector::reset_fast_probe_statuses(&mut statuses);
+
+        assert!(statuses.network_sockets.is_complete());
+        assert!(statuses.process_attribution.is_complete());
+        assert_eq!(statuses.dns.state, crate::models::ProbeState::Partial);
+    }
+
+    #[test]
+    fn process_inventory_counts_permission_failures_but_not_exit_races() {
+        assert!(!Collector::process_error_requires_partial(
+            &procfs::ProcError::NotFound(None)
+        ));
+        assert!(Collector::process_error_requires_partial(
+            &procfs::ProcError::PermissionDenied(None)
+        ));
+        assert!(Collector::process_error_requires_partial(
+            &procfs::ProcError::Incomplete(None)
+        ));
+    }
+
+    #[test]
+    fn process_attribution_gap_counts_inventory_and_socket_failures() {
+        let status = Collector::process_attribution_status(2, 3, None).unwrap();
+        assert_eq!(status.unavailable, 5);
+        assert!(status.details.unwrap().contains("2 entry/entries"));
+        assert!(Collector::process_attribution_status(0, 0, None).is_none());
     }
 
     #[test]
