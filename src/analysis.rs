@@ -57,6 +57,9 @@ impl<'a> Analyzer<'a> {
 
         let mut analyses = HashMap::with_capacity(hostnames.len());
         for hostname in hostnames {
+            if analyses.contains_key(hostname) {
+                continue;
+            }
             let snapshots = by_host.remove(hostname).unwrap_or_default();
             let analysis = self.analyze_from_snapshots(
                 hostname,
@@ -1605,7 +1608,10 @@ mod tests {
         db.store_snapshot(&target).unwrap();
 
         let analyses = Analyzer::new(&db)
-            .analyze_many(&["db01".to_string(), "web01".to_string()], 1)
+            .analyze_many(
+                &["db01".to_string(), "web01".to_string(), "db01".to_string()],
+                1,
+            )
             .unwrap();
         let inbound = &analyses["db01"].inbound_dependencies;
         assert_eq!(inbound.len(), 1);
