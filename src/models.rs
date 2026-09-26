@@ -297,6 +297,14 @@ pub struct ObservationCoverage {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SiteInventory {
     pub websites: Vec<WebsiteInventory>,
+    /// Host-level samples with at least one observed web listener. This is not
+    /// a per-site availability or request count.
+    #[serde(default)]
+    pub web_listener_observations: usize,
+    /// Host-level established socket observations to web-listener ports.
+    /// Shared virtual-host listeners are counted once, not once per site.
+    #[serde(default)]
+    pub listener_activity_observations: usize,
     pub users: Vec<String>,
     pub databases: Vec<InventoryConnection>,
     pub storage_connections: Vec<InventoryConnection>,

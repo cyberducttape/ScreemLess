@@ -463,6 +463,27 @@ impl<'a> Analyzer<'a> {
                 .map(|service| (service.port, service.process_name.clone()))
                 .collect::<Vec<_>>()
         };
+        let web_listener_observations = snapshots
+            .iter()
+            .filter(|snapshot| !web_services(snapshot).is_empty())
+            .count();
+        let listener_activity_observations = snapshots
+            .iter()
+            .map(|snapshot| {
+                let listener_ports = web_services(snapshot)
+                    .into_iter()
+                    .map(|(port, _)| port)
+                    .collect::<BTreeSet<_>>();
+                snapshot
+                    .network_connections
+                    .iter()
+                    .filter(|connection| {
+                        matches!(connection.state.as_str(), "ESTABLISHED" | "CLOSE-WAIT")
+                            && listener_ports.contains(&connection.local_port)
+                    })
+                    .count()
+            })
+            .sum();
         let latest_web_services = snapshots.last().map(web_services).unwrap_or_default();
         let latest_has_web = !latest_web_services.is_empty();
 
@@ -645,6 +666,8 @@ impl<'a> Analyzer<'a> {
         }
         SiteInventory {
             websites: websites.into_values().collect(),
+            web_listener_observations,
+            listener_activity_observations,
             users: users.into_iter().collect(),
             databases,
             storage_connections,
@@ -2100,6 +2123,8 @@ mod tests {
             vec!["/srv/example/public"]
         );
         assert_eq!(inventory.websites[0].listener_activity_observations, 1);
+        assert_eq!(inventory.web_listener_observations, 2);
+        assert_eq!(inventory.listener_activity_observations, 1);
         assert!(inventory.users.contains(&"www-data".to_string()));
 
         let mut shared_port_snapshot = snapshot.clone();
@@ -2118,6 +2143,8 @@ mod tests {
             .websites
             .iter()
             .all(|site| site.listener_activity_observations == 0));
+        assert_eq!(shared_port_inventory.web_listener_observations, 1);
+        assert_eq!(shared_port_inventory.listener_activity_observations, 1);
 
         let mut proxy_snapshot = snapshot;
         proxy_snapshot.config_references.push(ConfigReference {
