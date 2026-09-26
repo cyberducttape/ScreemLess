@@ -151,39 +151,7 @@ impl ConfigScanner {
     }
 
     pub fn scan_with_audit() -> Result<(Vec<ConfigReference>, ConfigScanAudit)> {
-        let paths_searched = vec![
-            "/etc/nginx",
-            "/etc/apache2/sites-enabled",
-            "/etc/apache2 (sites-available files only through enabled links)",
-            "/etc/httpd/conf.d",
-            "/etc/httpd/sites-enabled",
-            "/etc/haproxy",
-            "/etc/traefik",
-            "/etc/caddy",
-            "/etc/php",
-            "/etc/php-fpm.d",
-            "/etc/mysql/my.cnf",
-            "/etc/postgresql/postgresql.conf",
-            "/etc/mariadb/my.cnf",
-            "/var/www/*",
-            "/opt/*",
-            "/app",
-            "/srv/*",
-            "/home/*",
-            "/etc/environment",
-            "/root/.env",
-            "/home/*/.env",
-            "/var/www/*/.env",
-            "/opt/*/.env",
-            "/app/config/*",
-            "/etc/app/config.ini",
-            "/var/www/*/wp-config.php",
-            "/opt/*/config.ini|config.yaml|config.json",
-            "/app/.env",
-            "/app/config/*.yaml|*.yml",
-            "/srv/*/config.yaml",
-            "/home/*/app/.env",
-        ];
+        let paths_searched = Self::searched_path_descriptions();
         let mut context = ScanContext::default();
         let references = Self::scan_with_context(&mut context);
         context.audit.scanner_version = "config-scanner/3".to_string();
@@ -191,6 +159,32 @@ impl ConfigScanner {
         context.audit.syntax_validation =
             "not performed; extraction uses pattern-based directives".to_string();
         Ok((references, context.audit))
+    }
+
+    fn searched_path_descriptions() -> Vec<&'static str> {
+        vec![
+            "/etc/nginx/** (recursive; disabled sites-available files excluded)",
+            "/etc/apache2/** and /etc/httpd/** (recursive; sites-available files included only through enabled links)",
+            "/etc/haproxy/** (recursive)",
+            "/etc/traefik/** (recursive)",
+            "/etc/caddy/** (recursive)",
+            "/etc/php/**/*.conf and /etc/php-fpm.d/**/*.conf (recursive)",
+            "/var/www/*/wp-config.php",
+            "/var/www/*/.env",
+            "/opt/*/config.ini|config.yaml|config.json",
+            "/etc/app/config.ini",
+            "/app/.env",
+            "/app/config/*.yaml|*.yml",
+            "/srv/*/config.yaml",
+            "/home/*/app/.env",
+            "/etc/environment",
+            "/root/.env",
+            "/home/*/.env",
+            "/opt/*/.env",
+            "/etc/mysql/my.cnf",
+            "/etc/postgresql/postgresql.conf",
+            "/etc/mariadb/my.cnf",
+        ]
     }
 
     fn scan_nginx(context: &mut ScanContext) -> Result<Vec<ConfigReference>> {
@@ -1283,6 +1277,19 @@ mod tests {
             serde_json::to_value(current).unwrap()["syntax_unsupported"],
             serde_json::Value::Null
         );
+    }
+
+    #[test]
+    fn scan_audit_describes_actual_recursive_roots_and_config_globs() {
+        let paths = ConfigScanner::searched_path_descriptions();
+        assert!(paths.iter().any(|path| path.starts_with("/etc/nginx/**")));
+        assert!(paths
+            .iter()
+            .any(|path| path.contains("/etc/apache2/** and /etc/httpd/**")));
+        assert!(paths.iter().any(|path| path.contains("/etc/php/**/*.conf")));
+        assert!(paths.contains(&"/var/www/*/wp-config.php"));
+        assert!(!paths.contains(&"/var/www/*"));
+        assert!(!paths.contains(&"/opt/*"));
     }
 
     #[test]
