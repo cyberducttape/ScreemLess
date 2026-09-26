@@ -26,7 +26,7 @@ struct SourceEvidence {
 #[derive(Default)]
 struct InboundGraphBuilder {
     endpoint_targets: HashMap<String, HashSet<String>>,
-    aliases: HashMap<String, String>,
+    aliases: HashMap<String, HashSet<String>>,
     dns_addresses: HashMap<String, HashSet<String>>,
     graph: HashMap<String, HashMap<String, SourceEvidence>>,
     ambiguous_endpoints: HashMap<String, BTreeSet<String>>,
@@ -52,7 +52,10 @@ impl InboundGraphBuilder {
             .filter(|name| !name.is_empty())
         {
             let normalized = name.to_ascii_lowercase();
-            self.aliases.insert(normalized.clone(), canonical.clone());
+            self.aliases
+                .entry(normalized.clone())
+                .or_default()
+                .insert(canonical.clone());
             self.endpoint_targets
                 .entry(normalized)
                 .or_default()
@@ -82,12 +85,18 @@ impl InboundGraphBuilder {
 
     fn finish_endpoint_index(&mut self) {
         for (hostname, addresses) in std::mem::take(&mut self.dns_addresses) {
-            let target = self.aliases.get(&hostname).cloned().unwrap_or(hostname);
+            let targets = self
+                .aliases
+                .get(&hostname)
+                .cloned()
+                .unwrap_or_else(|| [hostname].into_iter().collect());
             for address in addresses {
-                self.endpoint_targets
-                    .entry(address)
-                    .or_default()
-                    .insert(target.clone());
+                for target in &targets {
+                    self.endpoint_targets
+                        .entry(address.clone())
+                        .or_default()
+                        .insert(target.clone());
+                }
             }
         }
     }
@@ -2140,6 +2149,54 @@ mod tests {
         assert_eq!(graph["db01"].len(), 1);
         assert_eq!(graph["db01"][0].source_hostname.as_deref(), Some("web01"));
         assert!(graph["db01"][0].evidence[0].description.contains("5432"));
+    }
+
+    #[test]
+    fn colliding_dns_aliases_remain_ambiguous_in_the_fleet_graph() {
+        let now = Utc::now();
+        let mut db01 = test_snapshot(now);
+        db01.hostname = "db01".to_string();
+        db01.host_identity.hostname = "db01".to_string();
+        db01.host_identity.dns_aliases = vec!["shared-db.internal".to_string()];
+
+        let mut db02 = test_snapshot(now);
+        db02.hostname = "db02".to_string();
+        db02.host_identity.hostname = "db02".to_string();
+        db02.host_identity.dns_aliases = vec!["shared-db.internal".to_string()];
+
+        let mut client = test_snapshot(now);
+        client.hostname = "worker01".to_string();
+        client.host_identity.hostname = "worker01".to_string();
+        client.dns_names.push(DnsName {
+            hostname: "shared-db.internal".to_string(),
+            ip_addresses: vec!["192.0.2.80".to_string()],
+            timestamp: now,
+        });
+        client.network_connections.push(NetworkConnection {
+            local_addr: "192.0.2.10".to_string(),
+            local_port: 50_000,
+            remote_addr: "192.0.2.80".to_string(),
+            remote_port: 5432,
+            protocol: "tcp".to_string(),
+            state: "ESTABLISHED".to_string(),
+            pid: 7,
+            process_name: "worker".to_string(),
+        });
+
+        let mut builder = InboundGraphBuilder::default();
+        for snapshot in [&db01, &db02, &client] {
+            builder.add_endpoint_snapshot(snapshot);
+        }
+        builder.finish_endpoint_index();
+        builder.add_connection_snapshot(&client);
+        let (graph, ambiguous) = builder.finish();
+
+        assert!(!graph.contains_key("db01"));
+        assert!(!graph.contains_key("db02"));
+        assert!(ambiguous["db01"]
+            .iter()
+            .any(|note| note.contains("db01, db02")));
+        assert!(ambiguous.contains_key("db02"));
     }
 
     #[test]
