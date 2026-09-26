@@ -1441,7 +1441,11 @@ impl<'a> Analyzer<'a> {
         let slow_inventory_samples = window_snapshots
             .iter()
             .copied()
-            .filter(|snapshot| snapshot.includes_slow_inventory())
+            // Legacy snapshots may inline cached inventory on every sample,
+            // but do not say when that inventory was refreshed. Only count
+            // explicit refresh markers as refreshes; absence of the marker is
+            // uncertainty, not proof of a fresh inventory collection.
+            .filter(|snapshot| snapshot.slow_inventory_refreshed == Some(true))
             .collect::<Vec<_>>();
         let expected_slow_inventory_refreshes = ((requested_seconds as f64
             / SLOW_INVENTORY_REFRESH_INTERVAL_SECONDS as f64)
@@ -1782,7 +1786,11 @@ mod tests {
     fn full_window_samples_receive_full_temporal_coverage() {
         let now = Utc::now();
         let snapshots = (0..=60)
-            .map(|minute| test_snapshot(now - chrono::Duration::minutes(60 - minute)))
+            .map(|minute| {
+                let mut snapshot = test_snapshot(now - chrono::Duration::minutes(60 - minute));
+                snapshot.slow_inventory_refreshed = Some(minute == 0);
+                snapshot
+            })
             .collect::<Vec<_>>();
 
         let coverage = Analyzer::build_observation_coverage(&snapshots, now, 1);
@@ -1819,6 +1827,26 @@ mod tests {
         assert_eq!(hourly_coverage.slow_inventory_refreshes, 168);
         assert_eq!(hourly_coverage.slow_inventory_coverage_percent, 100.0);
         assert_eq!(hourly_coverage.evidence_quality, "HIGH");
+    }
+
+    #[test]
+    fn legacy_inline_inventory_is_not_counted_as_a_fresh_refresh() {
+        let now = Utc::now();
+        let mut legacy = test_snapshot(now - chrono::Duration::minutes(1));
+        legacy.slow_inventory_refreshed = None;
+        legacy.dns_names.push(crate::models::DnsName {
+            hostname: "db01".to_string(),
+            ip_addresses: vec!["10.0.0.2".to_string()],
+            timestamp: legacy.timestamp,
+        });
+        legacy.probe_statuses.dns = crate::models::ProbeStatus::complete();
+
+        let coverage = Analyzer::build_observation_coverage(&[legacy], now, 168);
+        assert_eq!(coverage.expected_slow_inventory_refreshes, 168);
+        assert_eq!(coverage.slow_inventory_refreshes, 0);
+        assert_eq!(coverage.slow_inventory_coverage_percent, 0.0);
+        assert_eq!(coverage.probe_coverage["dns"], 0.0);
+        assert_eq!(coverage.evidence_quality, "LOW");
     }
 
     #[test]

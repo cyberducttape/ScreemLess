@@ -441,14 +441,6 @@ pub struct ObservationSnapshot {
     pub probe_statuses: ProbeStatuses,
 }
 
-impl ObservationSnapshot {
-    /// Legacy snapshots stored cached inventory on every sample. New snapshots
-    /// use an explicit refresh marker and omit those fields between refreshes.
-    pub fn includes_slow_inventory(&self) -> bool {
-        self.slow_inventory_refreshed.unwrap_or(true)
-    }
-}
-
 /// Stable local identity and address inventory used to correlate raw socket
 /// addresses with the machine that owns them.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
