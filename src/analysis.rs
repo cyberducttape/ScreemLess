@@ -1,6 +1,7 @@
 use anyhow::Result;
 use chrono::{DateTime, Duration, Utc};
 use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
 
 use crate::db::Database;
 use crate::models::*;
@@ -65,6 +66,7 @@ impl<'a> Analyzer<'a> {
             &dependencies,
             &inbound_dependencies,
             &observed_processes,
+            hours,
         );
         if !probe_statuses.all_complete() {
             risks.push(RiskAssessment {
@@ -163,6 +165,13 @@ impl<'a> Analyzer<'a> {
             }
         }
 
+        let mut site_port_owners = HashMap::<u16, usize>::new();
+        for site in websites.values() {
+            for port in &site.ports {
+                *site_port_owners.entry(*port).or_default() += 1;
+            }
+        }
+
         let web_services = |snapshot: &ObservationSnapshot| {
             snapshot
                 .listening_services
@@ -194,10 +203,14 @@ impl<'a> Analyzer<'a> {
                     if !matching_services.is_empty() {
                         site.availability_observations += 1;
                     }
+                    // A socket port cannot identify which virtual host received
+                    // the request. Do not duplicate traffic across sites sharing
+                    // that port; only attribute it when the port is unambiguous.
                     site.inbound_connection_observations += inbound_connections
                         .iter()
                         .filter(|connection| {
-                            site.ports.is_empty() || site.ports.contains(&connection.local_port)
+                            site_port_owners.get(&connection.local_port) == Some(&1)
+                                && site.ports.contains(&connection.local_port)
                         })
                         .count();
                     for service in matching_services {
@@ -327,22 +340,7 @@ impl<'a> Analyzer<'a> {
                 storage_connections.push(item);
             }
         }
-        let has_proxy_config = snapshots
-            .iter()
-            .flat_map(|snapshot| snapshot.config_references.iter())
-            .any(|reference| {
-                reference.context == "proxy_pass"
-                    || reference.context == "nginx upstream"
-                    || reference.context == "apache proxy_pass"
-                    || reference.context == "haproxy backend"
-                    || reference.context == "traefik service"
-                    || reference.context == "caddy reverse_proxy"
-            });
-        let mut load_balancers = if has_proxy_config {
-            stack.iter().cloned().collect::<BTreeSet<_>>()
-        } else {
-            BTreeSet::new()
-        };
+        let mut load_balancers = BTreeSet::new();
         for reference in snapshots
             .iter()
             .flat_map(|snapshot| snapshot.config_references.iter())
@@ -351,15 +349,17 @@ impl<'a> Analyzer<'a> {
                 Some("haproxy")
             } else if reference.context.starts_with("traefik") {
                 Some("traefik")
-            } else if reference.context.starts_with("caddy") {
+            } else if reference.context == "caddy reverse_proxy" {
                 Some("caddy")
+            } else if reference.context == "proxy_pass" || reference.context == "nginx upstream" {
+                Some("nginx")
+            } else if reference.context == "apache proxy_pass" {
+                Some("apache")
             } else {
                 None
             };
-            if has_proxy_config {
-                if let Some(candidate) = candidate {
-                    load_balancers.insert(candidate.to_string());
-                }
+            if let Some(candidate) = candidate {
+                load_balancers.insert(candidate.to_string());
             }
         }
         SiteInventory {
@@ -405,6 +405,15 @@ impl<'a> Analyzer<'a> {
 
         let snapshots = self.db.get_all_snapshots_since(since_timestamp)?;
         let target = target_hostname.to_ascii_lowercase();
+        let mut target_ips = snapshots
+            .iter()
+            .flat_map(|snapshot| snapshot.dns_names.iter())
+            .filter(|dns| dns.hostname.eq_ignore_ascii_case(target_hostname))
+            .flat_map(|dns| dns.ip_addresses.iter().cloned())
+            .collect::<HashSet<_>>();
+        if target.parse::<IpAddr>().is_ok() {
+            target_ips.insert(target.clone());
+        }
         let mut sources: HashMap<String, SourceEvidence> = HashMap::new();
 
         for snapshot in snapshots {
@@ -412,13 +421,6 @@ impl<'a> Analyzer<'a> {
             if source.eq_ignore_ascii_case(target_hostname) {
                 continue;
             }
-
-            let target_ips = snapshot
-                .dns_names
-                .iter()
-                .filter(|dns| dns.hostname.eq_ignore_ascii_case(target_hostname))
-                .flat_map(|dns| dns.ip_addresses.iter().cloned())
-                .collect::<HashSet<_>>();
 
             for connection in snapshot.network_connections.iter().filter(|connection| {
                 connection.remote_addr.eq_ignore_ascii_case(&target)
@@ -743,10 +745,21 @@ impl<'a> Analyzer<'a> {
             return 0;
         }
 
-        let total_score: u16 = evidence.iter().map(|e| u16::from(e.level.score())).sum();
-        let max_score = (evidence.len() as u16) * 3;
-
-        ((total_score * 100) / max_score) as u8
+        // Confidence is intentionally monotonic: adding corroborating evidence
+        // cannot lower the result. Strength is represented by the strongest
+        // signal, while diversity and repeated observations add support.
+        let strongest = evidence
+            .iter()
+            .map(|item| u16::from(item.level.score()))
+            .max()
+            .unwrap_or(0);
+        let diversity = evidence
+            .iter()
+            .map(|item| item.level.clone())
+            .collect::<HashSet<_>>()
+            .len() as u16;
+        let frequency = (evidence.len().min(5) as u16) * 4;
+        (strongest * 20 + diversity * 10 + frequency).min(100) as u8
     }
 
     fn build_ip_to_hostname_map(
@@ -772,6 +785,7 @@ impl<'a> Analyzer<'a> {
         dependencies: &[Dependency],
         inbound_dependencies: &[InboundDependency],
         observed_processes: &HashMap<String, ProcessActivity>,
+        requested_hours: u32,
     ) -> u8 {
         let mut score = 100u16;
 
@@ -815,7 +829,23 @@ impl<'a> Analyzer<'a> {
             score = score.saturating_sub(20);
         }
 
-        score.min(100) as u8
+        let observed_hours = snapshots
+            .last()
+            .and_then(|last| {
+                snapshots
+                    .first()
+                    .map(|first| last.timestamp - first.timestamp)
+            })
+            .map(|span| span.num_minutes().max(0) as f64 / 60.0)
+            .unwrap_or(0.0);
+        let requested_hours = f64::from(requested_hours.max(1));
+        let coverage_cap = if snapshots.len() < 3 {
+            25.0
+        } else {
+            ((observed_hours / requested_hours).min(1.0) * 100.0).round()
+        };
+
+        score.min(coverage_cap.max(25.0) as u16).min(100) as u8
     }
 }
 
@@ -824,8 +854,8 @@ mod tests {
     use super::Analyzer;
     use crate::db::Database;
     use crate::models::{
-        ConfigReference, ImpactLevel, InboundDependency, ListeningService, NetworkConnection,
-        ObservationSnapshot, ProbeStatuses, Process,
+        ConfigReference, Evidence, EvidenceLevel, ImpactLevel, InboundDependency, ListeningService,
+        NetworkConnection, ObservationSnapshot, ProbeStatuses, Process,
     };
     use chrono::Utc;
 
@@ -851,10 +881,34 @@ mod tests {
             &[],
             &inbound,
             &std::collections::HashMap::new(),
+            168,
         );
         assert!(score < 50);
         drop(db);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn confidence_does_not_drop_when_corroborating_evidence_is_added() {
+        let high = vec![
+            Evidence {
+                level: EvidenceLevel::High,
+                description: "first".to_string(),
+            },
+            Evidence {
+                level: EvidenceLevel::High,
+                description: "second".to_string(),
+            },
+        ];
+        let mut corroborated = high.clone();
+        corroborated.push(Evidence {
+            level: EvidenceLevel::Med,
+            description: "independent corroboration".to_string(),
+        });
+
+        assert!(
+            Analyzer::calculate_confidence(&corroborated) >= Analyzer::calculate_confidence(&high)
+        );
     }
 
     #[test]

@@ -26,7 +26,7 @@ Most servers have **no documentation**. You inherit them. Nobody knows why they 
 2. **What connects to this server** (inbound dependencies) 
 3. **Evidence and confidence for each** (with data-quality warnings)
 4. **Impact if you shut it down** (cascade analysis)
-5. **Potential single points of failure** (among observed hosts)
+5. **High-fan-in services** (redundancy is not inferred)
 
 ## Quick Start
 
@@ -152,7 +152,7 @@ screamless infrastructure --servers prod-db01
 ### 4. **Infrastructure Planning**
 ```bash
 screamless infrastructure --servers web01,web02,web03,db01,cache01
-# Shows: observed relationships and potential single points of failure
+# Shows: observed relationships and high-fan-in services
 ```
 
 ### 5. **Compliance/Audit**

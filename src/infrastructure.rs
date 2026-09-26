@@ -20,7 +20,7 @@ impl InfrastructureMapper {
                 .cloned()
                 .unwrap_or_default();
 
-            let is_single_point_of_failure =
+            let is_high_fan_in =
                 Self::is_critical_service(server_name, &outbound_deps, &inbound_deps);
             let total_impact = Self::calculate_total_impact(&inbound_deps);
 
@@ -31,7 +31,7 @@ impl InfrastructureMapper {
                     outbound_deps,
                     inbound_deps,
                     total_impact,
-                    is_single_point_of_failure,
+                    is_high_fan_in,
                 },
             );
         }
@@ -137,7 +137,7 @@ impl InfrastructureMapper {
             // Follow outbound dependencies
             for dep in &chain.outbound_deps {
                 if let Some(hostname) = &dep.hostname {
-                    if !visited.contains(hostname) {
+                    if chains.contains_key(hostname) && !visited.contains(hostname) {
                         cluster.extend(Self::dfs_cluster(hostname, chains, visited));
                     }
                 }
@@ -147,7 +147,7 @@ impl InfrastructureMapper {
             for inbound in &chain.inbound_deps {
                 let source = &inbound.source_hostname;
                 if let Some(hostname) = source {
-                    if !visited.contains(hostname) {
+                    if chains.contains_key(hostname) && !visited.contains(hostname) {
                         cluster.extend(Self::dfs_cluster(hostname, chains, visited));
                     }
                 }
@@ -157,12 +157,12 @@ impl InfrastructureMapper {
         cluster
     }
 
-    pub fn find_single_points_of_failure(
+    pub fn find_high_fan_in_services(
         chains: &HashMap<String, ServerDependencyChain>,
     ) -> Vec<String> {
         chains
             .iter()
-            .filter(|(_, chain)| chain.is_single_point_of_failure)
+            .filter(|(_, chain)| chain.is_high_fan_in)
             .map(|(name, _)| name.clone())
             .collect()
     }
@@ -172,8 +172,8 @@ impl InfrastructureMapper {
         _outbound: &[Dependency],
         inbound: &[InboundDependency],
     ) -> bool {
-        // A service is critical if many others depend on it
-        // and those dependents have few alternatives
+        // This is only a high-fan-in heuristic. Redundancy and alternate paths
+        // are not collected, so it is not proof of a single point of failure.
         inbound.len() > 3
             && inbound.iter().any(|dep| {
                 dep.confidence >= 70

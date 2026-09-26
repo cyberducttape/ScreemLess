@@ -312,27 +312,51 @@ fn infrastructure(db_path: &std::path::Path, servers: String, format: String) ->
 
     let server_list: Vec<&str> = servers.split(',').map(|s| s.trim()).collect();
     let mut server_analyses = HashMap::new();
+    let mut errors = Vec::new();
+    let json_output = format.eq_ignore_ascii_case("json");
 
-    println!("\nAnalyzing {} servers...\n", server_list.len());
+    if !json_output {
+        println!("\nAnalyzing {} servers...\n", server_list.len());
+    }
 
     for server in server_list {
         match analyzer.analyze(server, 168) {
             Ok(analysis) => {
-                println!("  ✓ {}", server);
+                if !json_output {
+                    println!("  ✓ {}", server);
+                }
                 server_analyses.insert(
                     server.to_string(),
                     (analysis.clone(), analysis.inbound_dependencies.clone()),
                 );
             }
             Err(e) => {
-                eprintln!("  ✗ {}: {}", server, e);
+                errors.push(serde_json::json!({"server": server, "error": e.to_string()}));
+                if !json_output {
+                    eprintln!("  ✗ {}: {}", server, e);
+                }
             }
         }
     }
 
     let chains = InfrastructureMapper::build_full_dependency_graph(&server_analyses);
-    let single_points = InfrastructureMapper::find_single_points_of_failure(&chains);
+    let high_fan_in = InfrastructureMapper::find_high_fan_in_services(&chains);
     let clusters = InfrastructureMapper::find_dependency_clusters(&chains);
+
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "servers_analyzed": server_analyses.len(),
+                "analyses": server_analyses,
+                "dependency_chains": chains,
+                "high_fan_in_services": high_fan_in,
+                "clusters": clusters,
+                "errors": errors,
+            }))?
+        );
+        return Ok(());
+    }
 
     println!("\n╭──────────────────────────────────────────╮");
     println!("│   INFRASTRUCTURE DEPENDENCY MAP          │");
@@ -340,10 +364,10 @@ fn infrastructure(db_path: &std::path::Path, servers: String, format: String) ->
 
     println!("Servers analyzed: {}\n", server_analyses.len());
 
-    if !single_points.is_empty() {
-        println!("⚠️  SINGLE POINTS OF FAILURE:");
-        for server in single_points {
-            println!("  ✗ {} (shutdown would impact multiple services)", server);
+    if !high_fan_in.is_empty() {
+        println!("⚠️  HIGH-FAN-IN SERVICES (not proof of a single point of failure):");
+        for server in high_fan_in {
+            println!("  - {} (multiple observed dependents)", server);
         }
         println!();
     }
@@ -359,10 +383,6 @@ fn infrastructure(db_path: &std::path::Path, servers: String, format: String) ->
                 println!("    - ... and {} more", cluster.len() - 5);
             }
         }
-    }
-
-    if format == "json" {
-        println!("\n{}", serde_json::to_string_pretty(&server_analyses)?);
     }
 
     Ok(())
@@ -462,10 +482,6 @@ fn preflight(
                     "{} servers depend on this one (will lose connectivity during restart)",
                     analysis.inbound_dependencies.len()
                 ));
-                safe = false;
-            }
-            if analysis.decommission_confidence < 70 {
-                warnings.push("Active dependencies detected, restart may cause issues".to_string());
                 safe = false;
             }
         }

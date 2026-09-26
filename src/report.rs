@@ -66,7 +66,8 @@ impl<'a> Reporter<'a> {
             "observation_period": {
                 "start": analysis.observation_span.0.to_rfc3339(),
                 "end": analysis.observation_span.1.to_rfc3339(),
-                "hours": analysis.observation_window_hours,
+                "requested_hours": analysis.observation_window_hours,
+                "observed_hours": Self::observed_hours(&analysis),
             },
             "snapshots": analysis.total_snapshots,
             "dependencies": analysis.dependencies,
@@ -93,8 +94,10 @@ impl<'a> Reporter<'a> {
 
         println!("Server: {}", hostname);
         println!(
-            "Observation: {} snapshots over {} hours\n",
-            analysis.total_snapshots, analysis.observation_window_hours
+            "Observation: {} snapshots across {:.1} observed hours (requested window: {} hours)\n",
+            analysis.total_snapshots,
+            Self::observed_hours(&analysis),
+            analysis.observation_window_hours
         );
 
         if analysis.total_snapshots == 0 {
@@ -113,8 +116,10 @@ impl<'a> Reporter<'a> {
         println!("╚════════════════════════════════════════════════════╝\n");
 
         if analysis.decommission_confidence >= 80 {
-            println!("✓ READY for decommission.\n");
-            println!("All indicators are clear. Safe to proceed.");
+            println!("✓ HIGH READINESS SCORE — no blocking evidence observed.\n");
+            println!(
+                "This is not proof of absence; validate with service owners before proceeding."
+            );
         } else if analysis.decommission_confidence >= 50 {
             println!("⚠ CAUTION. Investigate remaining items before proceeding.\n");
             println!("Outstanding dependencies or scheduled jobs detected.");
@@ -124,6 +129,13 @@ impl<'a> Reporter<'a> {
         }
 
         Ok(())
+    }
+
+    fn observed_hours(analysis: &AnalysisResult) -> f64 {
+        (analysis.observation_span.1 - analysis.observation_span.0)
+            .num_minutes()
+            .max(0) as f64
+            / 60.0
     }
 
     fn print_outbound_dependencies(&self, analysis: &AnalysisResult) -> Result<()> {

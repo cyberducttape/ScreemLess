@@ -1,7 +1,7 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use regex::Regex;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::models::ConfigReference;
 
@@ -42,26 +42,10 @@ impl ConfigScanner {
     fn scan_nginx() -> Result<Vec<ConfigReference>> {
         let mut refs = Vec::new();
 
-        let nginx_dirs = vec![
-            "/etc/nginx",
-            "/etc/nginx/sites-available",
-            "/etc/nginx/sites-enabled",
-        ];
-
-        for dir in nginx_dirs {
-            if Path::new(dir).exists() {
-                if let Ok(entries) = fs::read_dir(dir) {
-                    for entry in entries.flatten() {
-                        if let Ok(path) = entry.path().canonicalize() {
-                            if path.is_file() {
-                                if let Ok(content) = fs::read_to_string(&path) {
-                                    refs.extend(Self::parse_nginx_config(&path, &content)?);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+        for path in Self::config_files_under(Path::new("/etc/nginx"))? {
+            let content = fs::read_to_string(&path)
+                .with_context(|| format!("Unable to read Nginx config {}", path.display()))?;
+            refs.extend(Self::parse_nginx_config(&path, &content)?);
         }
 
         Ok(refs)
@@ -179,15 +163,10 @@ impl ConfigScanner {
             "/etc/httpd/conf.d",
             "/etc/httpd/sites-enabled",
         ] {
-            if let Ok(entries) = fs::read_dir(dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_file() {
-                        if let Ok(content) = fs::read_to_string(&path) {
-                            refs.extend(Self::parse_apache_config(&path, &content)?);
-                        }
-                    }
-                }
+            for path in Self::config_files_under(Path::new(dir))? {
+                let content = fs::read_to_string(&path)
+                    .with_context(|| format!("Unable to read Apache config {}", path.display()))?;
+                refs.extend(Self::parse_apache_config(&path, &content)?);
             }
         }
         Ok(refs)
@@ -270,16 +249,10 @@ impl ConfigScanner {
 
     fn scan_haproxy() -> Result<Vec<ConfigReference>> {
         let mut refs = Vec::new();
-        let mut paths = vec![Path::new("/etc/haproxy/haproxy.cfg").to_path_buf()];
-        if let Ok(entries) = fs::read_dir("/etc/haproxy/conf.d") {
-            paths.extend(entries.flatten().map(|entry| entry.path()));
-        }
-        for path in paths {
-            if path.is_file() {
-                if let Ok(content) = fs::read_to_string(&path) {
-                    refs.extend(Self::parse_haproxy_config(&path, &content)?);
-                }
-            }
+        for path in Self::config_files_under(Path::new("/etc/haproxy"))? {
+            let content = fs::read_to_string(&path)
+                .with_context(|| format!("Unable to read HAProxy config {}", path.display()))?;
+            refs.extend(Self::parse_haproxy_config(&path, &content)?);
         }
         Ok(refs)
     }
@@ -307,28 +280,10 @@ impl ConfigScanner {
 
     fn scan_traefik() -> Result<Vec<ConfigReference>> {
         let mut refs = Vec::new();
-        let mut paths = Vec::new();
-        for path in [
-            "/etc/traefik/traefik.yml",
-            "/etc/traefik/traefik.yaml",
-            "/etc/traefik/traefik.toml",
-            "/etc/traefik/dynamic.yml",
-            "/etc/traefik/dynamic.yaml",
-            "/etc/traefik/dynamic.toml",
-        ] {
-            paths.push(Path::new(path).to_path_buf());
-        }
-        for dir in ["/etc/traefik/conf.d", "/etc/traefik/dynamic"] {
-            if let Ok(entries) = fs::read_dir(dir) {
-                paths.extend(entries.flatten().map(|entry| entry.path()));
-            }
-        }
-        for path in paths {
-            if path.is_file() {
-                if let Ok(content) = fs::read_to_string(&path) {
-                    refs.extend(Self::parse_traefik_config(&path, &content)?);
-                }
-            }
+        for path in Self::config_files_under(Path::new("/etc/traefik"))? {
+            let content = fs::read_to_string(&path)
+                .with_context(|| format!("Unable to read Traefik config {}", path.display()))?;
+            refs.extend(Self::parse_traefik_config(&path, &content)?);
         }
         Ok(refs)
     }
@@ -356,15 +311,15 @@ impl ConfigScanner {
 
     fn scan_caddy() -> Result<Vec<ConfigReference>> {
         let mut refs = Vec::new();
-        let paths = [
-            Path::new("/etc/caddy/Caddyfile"),
-            Path::new("/etc/caddy/caddyfile"),
-        ];
-        for path in paths {
-            if path.is_file() {
-                if let Ok(content) = fs::read_to_string(path) {
-                    refs.extend(Self::parse_caddy_config(path, &content)?);
-                }
+        for path in Self::config_files_under(Path::new("/etc/caddy"))? {
+            let file_name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default();
+            if file_name.eq_ignore_ascii_case("caddyfile") {
+                let content = fs::read_to_string(&path)
+                    .with_context(|| format!("Unable to read Caddy config {}", path.display()))?;
+                refs.extend(Self::parse_caddy_config(&path, &content)?);
             }
         }
         Ok(refs)
@@ -435,20 +390,12 @@ impl ConfigScanner {
     fn scan_php_fpm() -> Result<Vec<ConfigReference>> {
         let mut refs = Vec::new();
 
-        let php_dirs = vec!["/etc/php", "/etc/php-fpm.d"];
-
-        for dir in php_dirs {
-            if Path::new(dir).exists() {
-                if let Ok(entries) = fs::read_dir(dir) {
-                    for entry in entries.flatten() {
-                        if let Ok(path) = entry.path().canonicalize() {
-                            if path.is_file() && path.to_string_lossy().ends_with(".conf") {
-                                if let Ok(content) = fs::read_to_string(&path) {
-                                    refs.extend(Self::parse_php_config(&path, &content)?);
-                                }
-                            }
-                        }
-                    }
+        for root in [Path::new("/etc/php"), Path::new("/etc/php-fpm.d")] {
+            for path in Self::config_files_under(root)? {
+                if path.to_string_lossy().ends_with(".conf") {
+                    let content = fs::read_to_string(&path)
+                        .with_context(|| format!("Unable to read PHP config {}", path.display()))?;
+                    refs.extend(Self::parse_php_config(&path, &content)?);
                 }
             }
         }
@@ -504,12 +451,13 @@ impl ConfigScanner {
         ];
 
         for pattern in config_patterns {
-            if let Ok(entries) = glob::glob(pattern) {
-                for entry in entries.flatten() {
-                    if let Ok(content) = fs::read_to_string(&entry) {
-                        refs.extend(Self::parse_app_config(&entry, &content)?);
-                    }
-                }
+            let entries =
+                glob::glob(pattern).with_context(|| format!("Invalid config glob {}", pattern))?;
+            for entry in entries {
+                let entry = entry.with_context(|| format!("Unable to enumerate {}", pattern))?;
+                let content = fs::read_to_string(&entry)
+                    .with_context(|| format!("Unable to read app config {}", entry.display()))?;
+                refs.extend(Self::parse_app_config(&entry, &content)?);
             }
         }
 
@@ -572,14 +520,8 @@ impl ConfigScanner {
                                 }
                             }
                         }
-                    } else if Self::is_valid_hostname(host_str) {
-                        let port = if host_str.contains(':') {
-                            host_str.split(':').next_back().and_then(|p| p.parse().ok())
-                        } else {
-                            default_port
-                        };
-
-                        let hostname = host_str.split(':').next().unwrap_or(host_str).to_string();
+                    } else if let Some((hostname, explicit_port)) = Self::parse_target(host_str) {
+                        let port = explicit_port.or(default_port);
                         refs.push(ConfigReference {
                             file_path: path.display().to_string(),
                             hostname: hostname.clone(),
@@ -598,6 +540,39 @@ impl ConfigScanner {
         Ok(refs)
     }
 
+    fn config_files_under(root: &Path) -> Result<Vec<PathBuf>> {
+        if !root.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut files = Vec::new();
+        Self::collect_config_files(root, &mut files)?;
+        Ok(files)
+    }
+
+    fn collect_config_files(root: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+        for entry in fs::read_dir(root)
+            .with_context(|| format!("Unable to read config directory {}", root.display()))?
+        {
+            let entry = entry.with_context(|| {
+                format!("Unable to enumerate config directory {}", root.display())
+            })?;
+            let path = entry.path();
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                Self::collect_config_files(&path, files)?;
+            } else if file_type.is_file() || file_type.is_symlink() {
+                let canonical = path
+                    .canonicalize()
+                    .with_context(|| format!("Unable to resolve config path {}", path.display()))?;
+                if canonical.is_file() {
+                    files.push(canonical);
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn scan_env_files() -> Result<Vec<ConfigReference>> {
         let mut refs = Vec::new();
 
@@ -610,12 +585,14 @@ impl ConfigScanner {
         ];
 
         for pattern in env_paths {
-            if let Ok(entries) = glob::glob(pattern) {
-                for entry in entries.flatten() {
-                    if let Ok(content) = fs::read_to_string(&entry) {
-                        refs.extend(Self::parse_env_file(&entry, &content)?);
-                    }
-                }
+            let entries = glob::glob(pattern)
+                .with_context(|| format!("Invalid environment glob {}", pattern))?;
+            for entry in entries {
+                let entry = entry.with_context(|| format!("Unable to enumerate {}", pattern))?;
+                let content = fs::read_to_string(&entry).with_context(|| {
+                    format!("Unable to read environment file {}", entry.display())
+                })?;
+                refs.extend(Self::parse_env_file(&entry, &content)?);
             }
         }
 
@@ -731,7 +708,9 @@ impl ConfigScanner {
         ];
 
         for path in db_config_paths {
-            if let Ok(content) = fs::read_to_string(path) {
+            if Path::new(path).exists() {
+                let content = fs::read_to_string(path)
+                    .with_context(|| format!("Unable to read database config {}", path))?;
                 refs.extend(Self::parse_database_config(Path::new(path), &content)?);
             }
         }
@@ -903,5 +882,16 @@ mod tests {
         assert_eq!(refs[0].hostname, "example.com");
         assert!(!refs[0].config_line.as_deref().unwrap().contains("password"));
         assert!(!refs[0].config_line.as_deref().unwrap().contains("token"));
+    }
+
+    #[test]
+    fn app_config_parses_host_and_port_separately() {
+        let refs =
+            ConfigScanner::parse_app_config(Path::new("/tmp/config.env"), "DB_HOST=db01:3306\n")
+                .unwrap();
+
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].hostname, "db01");
+        assert_eq!(refs[0].port, Some(3306));
     }
 }

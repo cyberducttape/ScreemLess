@@ -2,7 +2,7 @@ use crate::models::ObservationSnapshot;
 use rusqlite::{types::Type, Connection, Result as SqlResult};
 use std::path::Path;
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 pub struct Database {
     conn: Connection,
@@ -80,8 +80,8 @@ impl Database {
                 snapshot_id INTEGER NOT NULL,
                 name TEXT NOT NULL,
                 unit TEXT NOT NULL,
-                enabled INTEGER NOT NULL,
-                active INTEGER NOT NULL,
+                enabled INTEGER,
+                active INTEGER,
                 FOREIGN KEY(snapshot_id) REFERENCES snapshots(id)
             );
 
@@ -110,6 +110,26 @@ impl Database {
                 // switching to milliseconds to prevent same-second overwrites.
                 self.conn.execute_batch(
                     "UPDATE snapshots SET timestamp = timestamp * 1000; PRAGMA user_version = 2;",
+                )?;
+            }
+            if version < 3 {
+                // Timer state can be unavailable when systemd does not expose
+                // enabled/active fields. Preserve that uncertainty as NULL.
+                self.conn.execute_batch(
+                    "CREATE TABLE systemd_timers_new (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        snapshot_id INTEGER NOT NULL,
+                        name TEXT NOT NULL,
+                        unit TEXT NOT NULL,
+                        enabled INTEGER,
+                        active INTEGER,
+                        FOREIGN KEY(snapshot_id) REFERENCES snapshots(id)
+                    );
+                    INSERT INTO systemd_timers_new (id, snapshot_id, name, unit, enabled, active)
+                        SELECT id, snapshot_id, name, unit, enabled, active FROM systemd_timers;
+                    DROP TABLE systemd_timers;
+                    ALTER TABLE systemd_timers_new RENAME TO systemd_timers;
+                    PRAGMA user_version = 3;",
                 )?;
             }
         }

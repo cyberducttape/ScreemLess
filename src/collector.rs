@@ -16,7 +16,7 @@ static CONFIG_DNS_CACHE: OnceLock<ConfigDnsCache> = OnceLock::new();
 static PASSWD_CACHE: OnceLock<HashMap<u32, String>> = OnceLock::new();
 
 type ProcessAttribution = HashMap<u32, (String, u32, String)>;
-type ConfigDnsCache = Mutex<Option<(Instant, Vec<DnsName>, Vec<ConfigReference>)>>;
+type ConfigDnsCache = Mutex<Option<(Instant, Vec<DnsName>, usize, Vec<ConfigReference>)>>;
 type ProcessInventory = (Vec<Process>, ProcessAttribution, Vec<SoftwareInventory>);
 
 impl Collector {
@@ -608,12 +608,11 @@ impl Collector {
                     let active = timer_obj
                         .get("active")
                         .and_then(|a| a.as_str())
-                        .map(|a| a == "active")
-                        .unwrap_or(true);
+                        .map(|a| a == "active");
                     timers.push(SystemdTimer {
                         name: unit.replace(".timer", ""),
                         unit: unit.to_string(),
-                        enabled: true,
+                        enabled: None,
                         active,
                     });
                 }
@@ -628,9 +627,9 @@ impl Collector {
     fn collect_dns_names() -> Result<(Vec<DnsName>, usize, Vec<ConfigReference>)> {
         let cache = CONFIG_DNS_CACHE.get_or_init(|| Mutex::new(None));
         if let Ok(guard) = cache.lock() {
-            if let Some((timestamp, names, references)) = guard.as_ref() {
+            if let Some((timestamp, names, unavailable, references)) = guard.as_ref() {
                 if timestamp.elapsed() < StdDuration::from_secs(300) {
-                    return Ok((names.clone(), 0, references.clone()));
+                    return Ok((names.clone(), *unavailable, references.clone()));
                 }
             }
         }
@@ -664,7 +663,12 @@ impl Collector {
         }
 
         if let Ok(mut guard) = cache.lock() {
-            *guard = Some((Instant::now(), names.clone(), config_refs.clone()));
+            *guard = Some((
+                Instant::now(),
+                names.clone(),
+                unavailable,
+                config_refs.clone(),
+            ));
         }
         Ok((names, unavailable, config_refs))
     }

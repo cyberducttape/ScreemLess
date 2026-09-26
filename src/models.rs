@@ -121,7 +121,7 @@ pub struct Evidence {
     pub description: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum EvidenceLevel {
     #[serde(rename = "LOW")]
     Low,
@@ -178,7 +178,8 @@ pub struct ServerDependencyChain {
     pub outbound_deps: Vec<Dependency>,
     pub inbound_deps: Vec<InboundDependency>,
     pub total_impact: u8,
-    pub is_single_point_of_failure: bool,
+    #[serde(alias = "is_single_point_of_failure")]
+    pub is_high_fan_in: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -327,8 +328,10 @@ pub struct CronJob {
 pub struct SystemdTimer {
     pub name: String,
     pub unit: String,
-    pub enabled: bool,
-    pub active: bool,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub active: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
