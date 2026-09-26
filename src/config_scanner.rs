@@ -65,6 +65,8 @@ const SCAN_ROOTS: &[&str] = &[
     "/etc/php",
     "/etc/php-fpm.d",
     "/etc/mysql",
+    "/etc/my.cnf",
+    "/etc/my.cnf.d",
     "/etc/postgresql",
     "/etc/mariadb",
     "/etc/app",
@@ -242,6 +244,7 @@ impl ConfigScanner {
             "/home/*/.env",
             "/opt/*/.env",
             "/etc/mysql/**/*.cnf (recursive)",
+            "/etc/my.cnf and /etc/my.cnf.d/**/*.cnf (recursive)",
             "/etc/postgresql/**/postgresql.conf (recursive; versioned clusters)",
             "/etc/mariadb/**/*.cnf (recursive)",
         ]
@@ -1133,22 +1136,24 @@ impl ConfigScanner {
 
     fn scan_database_configs(context: &mut ScanContext) -> Result<Vec<ConfigReference>> {
         let mut refs = Vec::new();
+        let standalone_mysql_config = Path::new("/etc/my.cnf");
+        if standalone_mysql_config.is_file() {
+            if let Some(content) = Self::read_config_file(standalone_mysql_config, context) {
+                refs.extend(Self::parse_database_config(
+                    standalone_mysql_config,
+                    &content,
+                )?);
+            }
+        }
         for root in [
             Path::new("/etc/mysql"),
+            Path::new("/etc/my.cnf.d"),
             Path::new("/etc/postgresql"),
             Path::new("/etc/mariadb"),
         ] {
             for path in Self::config_files_under(root)? {
                 let is_postgres = root == Path::new("/etc/postgresql");
-                let supported_file = if is_postgres {
-                    matches!(
-                        path.file_name().and_then(|name| name.to_str()),
-                        Some("postgresql.conf" | "postgresql.auto.conf")
-                    )
-                } else {
-                    path.extension().and_then(|extension| extension.to_str()) == Some("cnf")
-                };
-                if !supported_file {
+                if !Self::is_supported_database_config_file(&path, is_postgres) {
                     continue;
                 }
                 let Some(content) = Self::read_config_file(&path, context) else {
@@ -1159,6 +1164,18 @@ impl ConfigScanner {
         }
 
         Ok(refs)
+    }
+
+    fn is_supported_database_config_file(path: &Path, is_postgres: bool) -> bool {
+        if is_postgres {
+            matches!(
+                path.file_name().and_then(|name| name.to_str()),
+                Some("postgresql.conf" | "postgresql.auto.conf")
+            )
+        } else {
+            path.file_name().and_then(|name| name.to_str()) == Some("my.cnf")
+                || path.extension().and_then(|extension| extension.to_str()) == Some("cnf")
+        }
     }
 
     fn parse_database_config(path: &Path, content: &str) -> Result<Vec<ConfigReference>> {
@@ -1400,6 +1417,7 @@ mod tests {
         assert!(paths
             .iter()
             .any(|path| path.contains("/etc/mysql/**/*.cnf")));
+        assert!(paths.iter().any(|path| path.contains("/etc/my.cnf")));
         assert!(paths.contains(&"/var/www/*/wp-config.php"));
         assert!(!paths.contains(&"/var/www/*"));
         assert!(!paths.contains(&"/opt/*"));
@@ -1913,5 +1931,25 @@ mod tests {
         )
         .unwrap();
         assert_eq!(default_refs[0].port, Some(3306));
+    }
+
+    #[test]
+    fn database_config_discovery_accepts_common_mysql_and_postgres_layouts() {
+        assert!(ConfigScanner::is_supported_database_config_file(
+            Path::new("/etc/my.cnf"),
+            false
+        ));
+        assert!(ConfigScanner::is_supported_database_config_file(
+            Path::new("/etc/my.cnf.d/server.cnf"),
+            false
+        ));
+        assert!(ConfigScanner::is_supported_database_config_file(
+            Path::new("/etc/postgresql/17/main/postgresql.conf"),
+            true
+        ));
+        assert!(!ConfigScanner::is_supported_database_config_file(
+            Path::new("/etc/postgresql/17/main/pg_hba.conf"),
+            true
+        ));
     }
 }
