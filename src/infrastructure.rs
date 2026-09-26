@@ -49,18 +49,14 @@ impl InfrastructureMapper {
                 let target = dependency
                     .hostname
                     .as_deref()
-                    .filter(|hostname| servers.contains_key(*hostname))
-                    .or_else(|| {
-                        servers
-                            .contains_key(&dependency.remote_addr)
-                            .then_some(dependency.remote_addr.as_str())
-                    });
+                    .and_then(|hostname| Self::resolve_server_key(hostname, servers))
+                    .or_else(|| Self::resolve_server_key(&dependency.remote_addr, servers));
                 let Some(target) = target else { continue };
-                if target == source {
+                if target.eq_ignore_ascii_case(source) {
                     continue;
                 }
 
-                let entry = inbound.entry(target.to_string()).or_default();
+                let entry = inbound.entry(target).or_default();
                 if let Some(existing) = entry
                     .iter_mut()
                     .find(|edge| edge.source_hostname.as_deref() == Some(source.as_str()))
@@ -137,8 +133,10 @@ impl InfrastructureMapper {
             // Follow outbound dependencies
             for dep in &chain.outbound_deps {
                 if let Some(hostname) = &dep.hostname {
-                    if chains.contains_key(hostname) && !visited.contains(hostname) {
-                        cluster.extend(Self::dfs_cluster(hostname, chains, visited));
+                    if let Some(server_key) = Self::resolve_server_key(hostname, chains) {
+                        if !visited.contains(&server_key) {
+                            cluster.extend(Self::dfs_cluster(&server_key, chains, visited));
+                        }
                     }
                 }
             }
@@ -147,14 +145,23 @@ impl InfrastructureMapper {
             for inbound in &chain.inbound_deps {
                 let source = &inbound.source_hostname;
                 if let Some(hostname) = source {
-                    if chains.contains_key(hostname) && !visited.contains(hostname) {
-                        cluster.extend(Self::dfs_cluster(hostname, chains, visited));
+                    if let Some(server_key) = Self::resolve_server_key(hostname, chains) {
+                        if !visited.contains(&server_key) {
+                            cluster.extend(Self::dfs_cluster(&server_key, chains, visited));
+                        }
                     }
                 }
             }
         }
 
         cluster
+    }
+
+    fn resolve_server_key<V>(candidate: &str, chains: &HashMap<String, V>) -> Option<String> {
+        chains
+            .keys()
+            .find(|server| server.eq_ignore_ascii_case(candidate))
+            .cloned()
     }
 
     pub fn find_high_fan_in_services(
@@ -312,5 +319,30 @@ mod tests {
             inbound[0].detection_methods,
             vec!["central_outbound_observation"]
         );
+    }
+
+    #[test]
+    fn dependency_clusters_exclude_external_hosts() {
+        let dependency = Dependency {
+            remote_addr: "34.117.59.81".to_string(),
+            remote_port: 443,
+            protocol: "tcp".to_string(),
+            observation_count: 1,
+            first_seen: Utc::now(),
+            last_seen: Utc::now(),
+            processes: vec!["web".to_string()],
+            confidence: 85,
+            evidence: Vec::new(),
+            config_references: Vec::new(),
+            hostname: Some("api.stripe.com".to_string()),
+        };
+        let mut servers = std::collections::HashMap::new();
+        servers.insert(
+            "web01".to_string(),
+            (analysis(vec![dependency]), Vec::new()),
+        );
+
+        let graph = InfrastructureMapper::build_full_dependency_graph(&servers);
+        assert!(InfrastructureMapper::find_dependency_clusters(&graph).is_empty());
     }
 }
