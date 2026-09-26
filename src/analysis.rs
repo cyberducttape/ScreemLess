@@ -34,24 +34,23 @@ struct InboundGraphBuilder {
 
 impl InboundGraphBuilder {
     fn add_endpoint_snapshot(&mut self, snapshot: &ObservationSnapshot) {
-        let canonical = snapshot.hostname.to_ascii_lowercase();
+        let canonical = Analyzer::normalize_hostname(&snapshot.hostname);
         let identity_names = [
             snapshot.host_identity.hostname.as_str(),
             snapshot.host_identity.fqdn.as_deref().unwrap_or_default(),
             snapshot.host_identity.short_hostname.as_str(),
         ];
-        for name in identity_names
-            .into_iter()
-            .chain(
-                snapshot
-                    .host_identity
-                    .dns_aliases
-                    .iter()
-                    .map(String::as_str),
-            )
-            .filter(|name| !name.is_empty())
-        {
-            let normalized = name.to_ascii_lowercase();
+        for name in identity_names.into_iter().chain(
+            snapshot
+                .host_identity
+                .dns_aliases
+                .iter()
+                .map(String::as_str),
+        ) {
+            let normalized = Analyzer::normalize_hostname(name);
+            if normalized.is_empty() {
+                continue;
+            }
             self.aliases
                 .entry(normalized.clone())
                 .or_default()
@@ -73,7 +72,7 @@ impl InboundGraphBuilder {
         }
         for dns in &snapshot.dns_names {
             self.dns_addresses
-                .entry(dns.hostname.to_ascii_lowercase())
+                .entry(Analyzer::normalize_hostname(&dns.hostname))
                 .or_default()
                 .extend(
                     dns.ip_addresses
@@ -102,7 +101,7 @@ impl InboundGraphBuilder {
     }
 
     fn add_connection_snapshot(&mut self, snapshot: &ObservationSnapshot) {
-        let source = snapshot.hostname.clone();
+        let source = Analyzer::normalize_hostname(&snapshot.hostname);
         for connection in &snapshot.network_connections {
             let remote = Analyzer::normalize_endpoint_address(&connection.remote_addr);
             let Some(targets) = self.endpoint_targets.get(&remote) else {
@@ -1319,6 +1318,10 @@ impl<'a> Analyzer<'a> {
             .unwrap_or_else(|_| address.to_ascii_lowercase())
     }
 
+    fn normalize_hostname(hostname: &str) -> String {
+        hostname.trim().trim_end_matches('.').to_ascii_lowercase()
+    }
+
     fn merge_host_identity(
         snapshots: &[ObservationSnapshot],
         target_hostname: &str,
@@ -2197,6 +2200,48 @@ mod tests {
             .iter()
             .any(|note| note.contains("db01, db02")));
         assert!(ambiguous.contains_key("db02"));
+    }
+
+    #[test]
+    fn dns_fqdn_trailing_dot_resolves_to_host_identity() {
+        let now = Utc::now();
+        let mut target = test_snapshot(now);
+        target.hostname = "db01".to_string();
+        target.host_identity.hostname = "db01".to_string();
+        target.host_identity.fqdn = Some("db01.internal".to_string());
+
+        let mut source = test_snapshot(now);
+        source.hostname = "worker01".to_string();
+        source.host_identity.hostname = "worker01".to_string();
+        source.dns_names.push(DnsName {
+            hostname: "DB01.INTERNAL.".to_string(),
+            ip_addresses: vec!["198.51.100.40".to_string()],
+            timestamp: now,
+        });
+        source.network_connections.push(NetworkConnection {
+            local_addr: "198.51.100.20".to_string(),
+            local_port: 50_000,
+            remote_addr: "198.51.100.40".to_string(),
+            remote_port: 5432,
+            protocol: "tcp".to_string(),
+            state: "ESTABLISHED".to_string(),
+            pid: 17,
+            process_name: "worker".to_string(),
+        });
+
+        let mut builder = InboundGraphBuilder::default();
+        builder.add_endpoint_snapshot(&target);
+        builder.add_endpoint_snapshot(&source);
+        builder.finish_endpoint_index();
+        builder.add_connection_snapshot(&source);
+        let (graph, ambiguous) = builder.finish();
+
+        assert_eq!(graph["db01"].len(), 1);
+        assert_eq!(
+            graph["db01"][0].source_hostname.as_deref(),
+            Some("worker01")
+        );
+        assert!(ambiguous.is_empty());
     }
 
     #[test]
