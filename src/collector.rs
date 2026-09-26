@@ -330,7 +330,7 @@ impl Collector {
                     process.pid() as u32,
                     (process_name.clone(), process.pid() as u32, user),
                 );
-                if Self::software_probe(&process_name).is_some() {
+                if Self::is_known_software(&process_name) {
                     if let Ok(executable) = fs::read_link(format!("/proc/{}/exe", process.pid())) {
                         software_candidates
                             .entry(Self::software_name(&process_name))
@@ -348,15 +348,12 @@ impl Collector {
         Ok((processes, pid_to_process, software))
     }
 
-    fn software_probe(process_name: &str) -> Option<&'static str> {
+    fn is_known_software(process_name: &str) -> bool {
         let name = process_name.to_ascii_lowercase();
         match name.as_str() {
-            "node" | "nodejs" | "python" | "python3" | "gunicorn" | "uwsgi" => Some("--version"),
-            "caddy" | "traefik" => Some("version"),
-            "nginx" | "apache2" | "httpd" | "haproxy" => Some("-v"),
-            "php" => Some("-v"),
-            _ if name.starts_with("python3.") || name.starts_with("php-fpm") => Some("--version"),
-            _ => None,
+            "node" | "nodejs" | "python" | "python3" | "gunicorn" | "uwsgi" | "caddy"
+            | "traefik" | "nginx" | "apache2" | "httpd" | "haproxy" | "php" => true,
+            _ => name.starts_with("python3.") || name.starts_with("php-fpm"),
         }
     }
 
@@ -376,28 +373,16 @@ impl Collector {
     }
 
     fn collect_software_version(name: String, pid: u32, executable: String) -> SoftwareInventory {
-        let version_arg = Self::software_probe(&name).unwrap_or("--version");
         let executable_path = Path::new(&executable);
-        let executable_name = executable_path
-            .file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or_default()
-            .trim_end_matches(" (deleted)");
-        let allowed_executable = match name.as_str() {
-            "python" => executable_name.starts_with("python"),
-            "php" => executable_name.starts_with("php"),
-            "node" => executable_name == "node" || executable_name == "nodejs",
-            "apache" => executable_name == "apache2" || executable_name == "httpd",
-            _ => executable_name == name,
-        };
-        let version = if allowed_executable {
-            Self::run_version_probe(executable_path, version_arg)
-        } else {
-            None
-        };
-        let evidence = match &version {
-            Some(_) => format!("version probe from process {}", pid),
-            None => format!("observed process {}; version probe unavailable", pid),
+        let (version, metadata_source) = Self::package_version(executable_path)
+            .map(|(version, source)| (Some(version), Some(source)))
+            .unwrap_or((None, None));
+        let evidence = match metadata_source {
+            Some(source) => format!("{} for process {}", source, pid),
+            None => format!(
+                "observed process {}; trusted package metadata unavailable",
+                pid
+            ),
         };
         SoftwareInventory {
             name,
@@ -408,30 +393,66 @@ impl Collector {
         }
     }
 
-    fn run_version_probe(executable: &Path, argument: &str) -> Option<String> {
-        let timeout = ["/usr/bin/timeout", "/bin/timeout"]
-            .into_iter()
-            .map(Path::new)
-            .find(|path| path.is_file())?;
-        let executable = executable.to_str()?;
-        let output = Command::new(timeout)
-            .args(["2", executable, argument])
-            .output()
-            .ok()?;
-        if !output.status.success() {
+    /// Gets a version from trusted package-manager metadata without executing the
+    /// discovered workload executable. This is important because the collector
+    /// may run as root while observed processes can belong to unprivileged users.
+    fn package_version(executable: &Path) -> Option<(String, &'static str)> {
+        let executable = fs::canonicalize(executable).ok()?;
+        if !executable.is_file() {
             return None;
         }
-        let text = if output.stdout.is_empty() {
-            String::from_utf8_lossy(&output.stderr)
-        } else {
-            String::from_utf8_lossy(&output.stdout)
-        };
-        let line = text.lines().next()?.trim();
-        let sanitized = line
+
+        if let Some(version) = Self::dpkg_version(&executable) {
+            return Some((version, "dpkg package metadata"));
+        }
+        Self::rpm_version(&executable).map(|version| (version, "rpm package metadata"))
+    }
+
+    fn dpkg_version(executable: &Path) -> Option<String> {
+        let executable = executable.to_str()?;
+        let ownership = Command::new("/usr/bin/dpkg-query")
+            .args(["-S", executable])
+            .output()
+            .ok()?;
+        if !ownership.status.success() {
+            return None;
+        }
+
+        let package = String::from_utf8_lossy(&ownership.stdout)
+            .lines()
+            .find_map(|line| {
+                line.split_once(':')
+                    .map(|(package, _)| package.trim().to_string())
+            })?;
+        let version = Command::new("/usr/bin/dpkg-query")
+            .args(["-W", "-f=${Version}", &package])
+            .output()
+            .ok()?;
+        Self::metadata_text(&version.stdout, version.status.success())
+    }
+
+    fn rpm_version(executable: &Path) -> Option<String> {
+        let executable = executable.to_str()?;
+        let output = Command::new("/usr/bin/rpm")
+            .args(["-qf", "--qf", "%{NAME}-%{VERSION}-%{RELEASE}", executable])
+            .output()
+            .ok()?;
+        Self::metadata_text(&output.stdout, output.status.success())
+    }
+
+    fn metadata_text(bytes: &[u8], successful: bool) -> Option<String> {
+        if !successful {
+            return None;
+        }
+        let value = String::from_utf8_lossy(bytes)
+            .lines()
+            .next()?
+            .trim()
             .chars()
             .filter(|character| !character.is_control())
+            .take(200)
             .collect::<String>();
-        (!sanitized.is_empty()).then(|| sanitized.chars().take(200).collect())
+        (!value.is_empty()).then_some(value)
     }
 
     fn username_for_uid(uid: u32) -> String {
