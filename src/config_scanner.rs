@@ -1266,6 +1266,26 @@ mod tests {
     use std::path::Path;
 
     #[test]
+    fn unmeasured_syntax_support_is_unknown_and_old_counts_remain_readable() {
+        let mut legacy = serde_json::to_value(crate::models::ConfigScanAudit::default()).unwrap();
+        legacy["syntax_unsupported"] = serde_json::json!(0);
+        let legacy: crate::models::ConfigScanAudit = serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy.syntax_unsupported, Some(0));
+
+        let mut current = serde_json::to_value(crate::models::ConfigScanAudit::default()).unwrap();
+        current
+            .as_object_mut()
+            .unwrap()
+            .remove("syntax_unsupported");
+        let current: crate::models::ConfigScanAudit = serde_json::from_value(current).unwrap();
+        assert_eq!(current.syntax_unsupported, None);
+        assert_eq!(
+            serde_json::to_value(current).unwrap()["syntax_unsupported"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[test]
     fn scan_metrics_count_unique_reads_and_record_skipped_files() {
         let root = std::env::temp_dir().join(format!(
             "screamless-scan-metrics-{}-{}",

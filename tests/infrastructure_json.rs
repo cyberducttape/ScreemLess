@@ -42,7 +42,7 @@ fn infrastructure_json_is_stdout_only_and_uses_ordered_host_array() {
         String::from_utf8_lossy(&output.stderr)
     );
     let json: Value = serde_json::from_slice(&output.stdout).expect("stdout must be JSON only");
-    assert_eq!(json["schema_version"], "2.0");
+    assert_eq!(json["schema_version"], "3.0");
     assert_eq!(json["servers_analyzed"], 2);
     assert_eq!(
         json["observation_window"]["hosts_requested"]
@@ -94,7 +94,7 @@ fn report_json_is_versioned_and_stdout_only() {
     );
     assert!(output.stderr.is_empty(), "unexpected stderr");
     let json: Value = serde_json::from_slice(&output.stdout).expect("stdout must be JSON only");
-    assert_eq!(json["schema_version"], "1.0");
+    assert_eq!(json["schema_version"], "2.0");
     assert_eq!(json["collector_version"], env!("CARGO_PKG_VERSION"));
     assert!(json["generated_at"].as_str().is_some());
     assert!(json["observation_period"].is_object());

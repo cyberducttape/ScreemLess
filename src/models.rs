@@ -160,7 +160,9 @@ pub struct ConfigScanAudit {
     pub files_parsed: usize,
     pub files_skipped: usize,
     pub permission_denied: usize,
-    pub syntax_unsupported: usize,
+    /// `None` means syntax support was not measured by this scanner version.
+    #[serde(default)]
+    pub syntax_unsupported: Option<usize>,
     pub bytes_scanned: u64,
     #[serde(default)]
     pub errors: Vec<String>,

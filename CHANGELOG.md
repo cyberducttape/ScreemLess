@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Use `null` rather than a misleading zero when configuration syntax support
+  has not been measured; bumped report JSON to 2.0 and infrastructure JSON to
+  3.0 because the nested audit shape changed.
+
 ## [1.1.0] - 2026-09-26
 
 Screamless 1.1.0 adds production-oriented evidence, inventory, and release
