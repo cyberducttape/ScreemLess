@@ -1,5 +1,5 @@
 use crate::models::ObservationSnapshot;
-use rusqlite::{types::Type, Connection, Result as SqlResult};
+use rusqlite::{types::Type, Connection, OpenFlags, Result as SqlResult};
 use std::path::Path;
 
 const SCHEMA_VERSION: i64 = 3;
@@ -61,7 +61,10 @@ impl SnapshotWindow<'_> {
 impl Database {
     pub fn new<P: AsRef<Path>>(path: P) -> SqlResult<Self> {
         let path = path.as_ref();
-        let conn = Connection::open(path)?;
+        let conn = Connection::open_with_flags(
+            path,
+            OpenFlags::default() | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
         let mut db = Database { conn };
         db.conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         db.conn.busy_timeout(std::time::Duration::from_secs(30))?;
@@ -403,6 +406,34 @@ mod tests {
 
         drop(db);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_database_symlink_paths() {
+        use std::os::unix::fs::symlink;
+
+        let unique = format!(
+            "screamless-db-symlink-test-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let target = std::env::temp_dir().join(format!("target-{unique}"));
+        let link = std::env::temp_dir().join(format!("link-{unique}"));
+        std::fs::write(&target, b"must not be opened as sqlite").unwrap();
+        symlink(&target, &link).unwrap();
+
+        assert!(Database::new(&link).is_err());
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            b"must not be opened as sqlite"
+        );
+
+        std::fs::remove_file(link).unwrap();
+        std::fs::remove_file(target).unwrap();
     }
 
     #[test]
