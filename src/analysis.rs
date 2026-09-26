@@ -1447,12 +1447,17 @@ impl<'a> Analyzer<'a> {
             // uncertainty, not proof of a fresh inventory collection.
             .filter(|snapshot| snapshot.slow_inventory_refreshed == Some(true))
             .collect::<Vec<_>>();
+        let complete_slow_inventory_samples = slow_inventory_samples
+            .iter()
+            .copied()
+            .filter(|snapshot| Self::slow_inventory_probes_complete(snapshot))
+            .collect::<Vec<_>>();
         let expected_slow_inventory_refreshes = ((requested_seconds as f64
             / SLOW_INVENTORY_REFRESH_INTERVAL_SECONDS as f64)
             .ceil() as usize)
             .max(1);
         let slow_inventory_refreshes = slow_inventory_samples.len();
-        let slow_inventory_covered_intervals = slow_inventory_samples
+        let slow_inventory_covered_intervals = complete_slow_inventory_samples
             .iter()
             .map(|snapshot| {
                 let offset_seconds = (snapshot.timestamp - window_start).num_seconds().max(0);
@@ -1466,7 +1471,7 @@ impl<'a> Analyzer<'a> {
             / expected_slow_inventory_refreshes as f64)
             * 100.0)
             .min(100.0);
-        let last_slow_inventory_refresh = slow_inventory_samples
+        let last_slow_inventory_refresh = complete_slow_inventory_samples
             .iter()
             .map(|snapshot| snapshot.timestamp)
             .max();
@@ -1552,7 +1557,7 @@ impl<'a> Analyzer<'a> {
         };
         if slow_inventory_coverage_percent < 90.0 {
             remaining_unknowns.push(format!(
-                "slow inventory covered {} of {} expected hourly intervals",
+                "complete slow-inventory data covered {} of {} expected hourly intervals",
                 slow_inventory_covered_intervals, expected_slow_inventory_refreshes
             ));
         }
@@ -1639,6 +1644,13 @@ impl<'a> Analyzer<'a> {
             "systemd" => &snapshot.probe_statuses.systemd,
             _ => unreachable!("unknown probe name"),
         }
+    }
+
+    fn slow_inventory_probes_complete(snapshot: &ObservationSnapshot) -> bool {
+        snapshot.probe_statuses.dns.is_complete()
+            && snapshot.probe_statuses.config_scan.is_complete()
+            && snapshot.probe_statuses.cron.is_complete()
+            && snapshot.probe_statuses.systemd.is_complete()
     }
 
     fn estimated_interval_seconds(snapshots: &[ObservationSnapshot]) -> i64 {
@@ -1859,6 +1871,21 @@ mod tests {
         assert_eq!(coverage.slow_inventory_refreshes, 168);
         assert_eq!(coverage.slow_inventory_covered_intervals, 3);
         assert!(coverage.slow_inventory_coverage_percent < 2.0);
+        assert_eq!(coverage.evidence_quality, "LOW");
+    }
+
+    #[test]
+    fn failed_slow_probe_does_not_count_as_covered_inventory() {
+        let now = Utc::now();
+        let mut snapshot = test_snapshot(now);
+        snapshot.slow_inventory_refreshed = Some(true);
+        snapshot.probe_statuses.systemd = crate::models::ProbeStatus::failed("systemd unavailable");
+
+        let coverage = Analyzer::build_observation_coverage(&[snapshot], now, 1);
+        assert_eq!(coverage.slow_inventory_refreshes, 1);
+        assert_eq!(coverage.slow_inventory_covered_intervals, 0);
+        assert_eq!(coverage.slow_inventory_coverage_percent, 0.0);
+        assert_eq!(coverage.last_slow_inventory_refresh, None);
         assert_eq!(coverage.evidence_quality, "LOW");
     }
 
