@@ -309,6 +309,27 @@ fn sampling_wait(
         .min(remaining_run_duration)
 }
 
+fn operation_impact_warnings(operation: &str, dependent_systems: usize) -> Vec<String> {
+    if dependent_systems == 0 {
+        return Vec::new();
+    }
+    match operation {
+        "restart" | "reboot" => vec![format!(
+            "{} systems depend on this server and may be interrupted by the {}",
+            dependent_systems, operation
+        )],
+        "update" => vec![format!(
+            "{} dependent systems may be interrupted if the update restarts services",
+            dependent_systems
+        )],
+        "shutdown" => vec![format!(
+            "CRITICAL: {} systems depend on this server; shutdown would interrupt them",
+            dependent_systems
+        )],
+        _ => Vec::new(),
+    }
+}
+
 fn dashboard(
     db_path: &std::path::Path,
     hostname: Option<String>,
@@ -564,49 +585,11 @@ fn preflight(
         safe = false;
     }
 
-    match operation.as_str() {
-        "restart" | "reboot" => {
-            if !analysis.inbound_dependencies.is_empty() {
-                warnings.push(format!(
-                    "{} servers depend on this one (will lose connectivity during restart)",
-                    analysis.inbound_dependencies.len()
-                ));
-                safe = false;
-            }
-        }
-        "update" => {
-            if !analysis.dependencies.is_empty() {
-                let high_conf = analysis
-                    .dependencies
-                    .iter()
-                    .filter(|d| d.confidence >= 70)
-                    .count();
-                if high_conf > 0 {
-                    warnings.push(format!(
-                        "{} high-confidence external dependencies",
-                        high_conf
-                    ));
-                    safe = false;
-                }
-            }
-        }
-        "shutdown" => {
-            if !analysis.inbound_dependencies.is_empty() {
-                warnings.push(format!(
-                    "CRITICAL: {} servers depend on this one",
-                    analysis.inbound_dependencies.len()
-                ));
-                safe = false;
-            }
-            if !analysis.dependencies.is_empty() {
-                warnings.push(format!(
-                    "This server depends on {} external services",
-                    analysis.dependencies.len()
-                ));
-                safe = false;
-            }
-        }
-        _ => unreachable!("operation was validated before dispatch"),
+    let impact_warnings =
+        operation_impact_warnings(&operation, analysis.inbound_dependencies.len());
+    if !impact_warnings.is_empty() {
+        safe = false;
+        warnings.extend(impact_warnings);
     }
 
     let exit_code = if insufficient_evidence {
@@ -690,7 +673,7 @@ fn format_duration(d: Duration) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_duration, sampling_wait};
+    use super::{operation_impact_warnings, parse_duration, sampling_wait};
     use std::time::Duration;
 
     #[test]
@@ -731,5 +714,13 @@ mod tests {
             ),
             Duration::from_secs(10)
         );
+    }
+
+    #[test]
+    fn maintenance_impact_uses_inbound_dependents_not_outbound_consumption() {
+        assert!(operation_impact_warnings("update", 0).is_empty());
+        assert!(operation_impact_warnings("shutdown", 0).is_empty());
+        assert!(operation_impact_warnings("update", 2)[0].contains("2 dependent systems"));
+        assert!(operation_impact_warnings("shutdown", 2)[0].contains("shutdown would interrupt"));
     }
 }
