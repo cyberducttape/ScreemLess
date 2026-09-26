@@ -14,6 +14,7 @@ const MAX_CONFIG_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_CONFIG_TREE_ENTRIES: usize = 20_000;
 const MAX_CONFIG_TREE_DEPTH: usize = 32;
 const MAX_AUDIT_ERRORS: usize = 100;
+const SCANNER_VERSION: &str = "config-scanner/4";
 const DB_HOST_REGEX: &str = r#"(?mi)(DB_HOST|DATABASE_HOST|database\.host|mysql\.host|postgres\.host|POSTGRES_HOST|DATABASES.*host)\s*[=:]\s*["']?([^\s;,"'\n}]+)"#;
 const REDIS_HOST_REGEX: &str =
     r#"(?mi)(?:REDIS_HOST|CACHE_URL|redis\.host|cache\.redis)\s*[=:]\s*["']?([^\s;,"'\n}]+)"#;
@@ -216,7 +217,7 @@ impl ConfigScanner {
         let paths_searched = Self::searched_path_descriptions();
         let mut context = ScanContext::default();
         let references = Self::scan_with_context(&mut context);
-        context.audit.scanner_version = "config-scanner/3".to_string();
+        context.audit.scanner_version = SCANNER_VERSION.to_string();
         context.audit.paths_searched = paths_searched.into_iter().map(str::to_string).collect();
         context.audit.syntax_validation =
             "not performed; extraction uses pattern-based directives".to_string();
@@ -1408,7 +1409,7 @@ impl ConfigScanner {
 
 #[cfg(test)]
 mod tests {
-    use super::{ConfigScanner, CONFIG_REGEX_PATTERNS};
+    use super::{ConfigScanner, CONFIG_REGEX_PATTERNS, SCANNER_VERSION};
     use std::fs;
     use std::path::Path;
 
@@ -1450,6 +1451,11 @@ mod tests {
         assert!(paths.contains(&"/var/www/*/wp-config.php"));
         assert!(!paths.contains(&"/var/www/*"));
         assert!(!paths.contains(&"/opt/*"));
+    }
+
+    #[test]
+    fn scanner_version_identifies_current_database_discovery_rules() {
+        assert_eq!(SCANNER_VERSION, "config-scanner/4");
     }
 
     #[test]

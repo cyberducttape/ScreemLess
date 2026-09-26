@@ -16,6 +16,8 @@
   client-only groups.
 - Keep database server listener settings from falsely corroborating outbound
   dependency edges.
+- Mark expanded database configuration discovery as config-scanner/4 in scan
+  audit records.
 - Preserve recognized software processes in inventory when `/proc/PID/exe`
   cannot be read, marking the version unavailable instead of omitting evidence.
 - Apply Nginx's default HTTP port to server blocks without `listen` directives
