@@ -271,7 +271,8 @@ impl ConfigScanner {
                 .captures(&directives)
                 .and_then(|capture| capture.get(1))
                 .map(|value| value.as_str().trim().to_string());
-            let ports = listen_re
+            let has_listen_directive = listen_re.is_match(&directives);
+            let mut ports = listen_re
                 .captures_iter(&directives)
                 .filter_map(|capture| capture.get(1))
                 .filter_map(|value| value.as_str().split_whitespace().next())
@@ -284,6 +285,12 @@ impl ConfigScanner {
                         .ok()
                 })
                 .collect::<Vec<_>>();
+            // Nginx HTTP server blocks default to port 80 when no listen
+            // directive is present. Preserve that port so virtual hosts using
+            // the implicit listener are recognized as sharing it.
+            if ports.is_empty() && !has_listen_directive {
+                ports.push(80);
+            }
             if let Some(names) = name_re
                 .captures(&directives)
                 .and_then(|capture| capture.get(1))
@@ -1488,6 +1495,36 @@ mod tests {
             .iter()
             .any(|reference| reference.hostname == "example.com"
                 && reference.context.contains("root=/srv/example/public")));
+    }
+
+    #[test]
+    fn nginx_site_without_listen_uses_default_http_port() {
+        let refs = ConfigScanner::parse_nginx_config(
+            Path::new("/etc/nginx/conf.d/default-port.conf"),
+            "server { server_name default.example.com; }",
+        )
+        .unwrap();
+
+        let site = refs
+            .iter()
+            .find(|reference| reference.hostname == "default.example.com")
+            .expect("nginx site should be detected");
+        assert!(site.context.contains("ports=80"));
+    }
+
+    #[test]
+    fn nginx_unix_socket_listener_is_not_misreported_as_default_port_80() {
+        let refs = ConfigScanner::parse_nginx_config(
+            Path::new("/etc/nginx/conf.d/unix-socket.conf"),
+            "server { listen unix:/run/site.sock; server_name socket.example.com; }",
+        )
+        .unwrap();
+
+        let site = refs
+            .iter()
+            .find(|reference| reference.hostname == "socket.example.com")
+            .expect("nginx site should be detected");
+        assert!(!site.context.contains("ports=80"));
     }
 
     #[test]
