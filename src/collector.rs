@@ -92,22 +92,29 @@ impl Collector {
             state.software = observed_software;
         }
 
-        let (listening_services, listening_unavailable) =
+        let (listening_services, listening_unavailable, listening_malformed) =
             match Self::collect_listening_services(&pid_to_process) {
                 Ok(result) => result,
                 Err(error) => {
                     probe_statuses.network_sockets = ProbeStatus::failed(error.to_string());
-                    (Vec::new(), 0)
+                    (Vec::new(), 0, 0)
                 }
             };
-        let (network_connections, connection_unavailable) =
+        let (network_connections, connection_unavailable, connection_malformed) =
             match Self::collect_network_connections(&pid_to_process) {
                 Ok(result) => result,
                 Err(error) => {
                     probe_statuses.network_sockets = ProbeStatus::failed(error.to_string());
-                    (Vec::new(), 0)
+                    (Vec::new(), 0, 0)
                 }
             };
+        let malformed_socket_rows = listening_malformed + connection_malformed;
+        if malformed_socket_rows > 0 && probe_statuses.network_sockets.is_complete() {
+            probe_statuses.network_sockets = ProbeStatus::partial(
+                format!("unable to parse {} socket row(s)", malformed_socket_rows),
+                malformed_socket_rows,
+            );
+        }
         let socket_unavailable = listening_unavailable + connection_unavailable;
         if socket_unavailable > 0 {
             probe_statuses.process_attribution = ProbeStatus::partial(
@@ -551,9 +558,10 @@ impl Collector {
 
     fn collect_listening_services(
         pid_to_process: &HashMap<u32, (String, u32, String)>,
-    ) -> Result<(Vec<ListeningService>, usize)> {
+    ) -> Result<(Vec<ListeningService>, usize, usize)> {
         let mut services = Vec::new();
         let mut unavailable = 0;
+        let mut malformed = 0;
 
         let output = Self::run_socket_probe(&["-tunlp"])?;
 
@@ -561,6 +569,9 @@ impl Collector {
 
         for line in stdout.lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
+            if !Self::is_socket_record(&parts) {
+                continue;
+            }
             if let Some((_, port)) = Self::find_endpoints(&parts).first() {
                 let pid = Self::extract_pid(parts.last().copied());
                 if pid == 0 || !pid_to_process.contains_key(&pid) {
@@ -578,17 +589,20 @@ impl Collector {
                     pid,
                     user: user.clone(),
                 });
+            } else {
+                malformed += 1;
             }
         }
 
-        Ok((services, unavailable))
+        Ok((services, unavailable, malformed))
     }
 
     fn collect_network_connections(
         pid_to_process: &HashMap<u32, (String, u32, String)>,
-    ) -> Result<(Vec<NetworkConnection>, usize)> {
+    ) -> Result<(Vec<NetworkConnection>, usize, usize)> {
         let mut connections = Vec::new();
         let mut unavailable = 0;
+        let mut malformed = 0;
 
         let output = Self::run_socket_probe(&["-tunp"])?;
 
@@ -596,7 +610,10 @@ impl Collector {
 
         for line in stdout.lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 4 && Self::is_connection_line(&parts) {
+            if parts.len() >= 4
+                && Self::is_socket_record(&parts)
+                && Self::is_connection_line(&parts)
+            {
                 let endpoints = Self::find_endpoints(&parts);
                 if let [local, remote, ..] = endpoints.as_slice() {
                     if remote.1 == 0 {
@@ -621,11 +638,13 @@ impl Collector {
                         pid,
                         process_name,
                     });
+                } else if Self::is_malformed_connection_row(&parts) {
+                    malformed += 1;
                 }
             }
         }
 
-        Ok((connections, unavailable))
+        Ok((connections, unavailable, malformed))
     }
 
     fn run_socket_probe(args: &[&str]) -> Result<Output> {
@@ -704,7 +723,21 @@ impl Collector {
             .find(|part| {
                 matches!(
                     **part,
-                    "LISTEN" | "ESTAB" | "ESTABLISHED" | "UNCONN" | "CLOSE-WAIT"
+                    "LISTEN"
+                        | "ESTAB"
+                        | "ESTABLISHED"
+                        | "SYN-SENT"
+                        | "SYN-RECV"
+                        | "FIN-WAIT-1"
+                        | "FIN-WAIT-2"
+                        | "TIME-WAIT"
+                        | "CLOSE"
+                        | "CLOSE-WAIT"
+                        | "LAST-ACK"
+                        | "CLOSING"
+                        | "NEW-SYN-RECV"
+                        | "UNCONN"
+                        | "CONNECTED"
                 )
             })
             .map(|state| match *state {
@@ -719,7 +752,60 @@ impl Collector {
         parts.iter().any(|part| {
             matches!(
                 *part,
-                "ESTAB" | "ESTABLISHED" | "UNCONN" | "CONNECTED" | "udp" | "udp6"
+                "ESTAB"
+                    | "ESTABLISHED"
+                    | "SYN-SENT"
+                    | "SYN-RECV"
+                    | "FIN-WAIT-1"
+                    | "FIN-WAIT-2"
+                    | "TIME-WAIT"
+                    | "CLOSE"
+                    | "CLOSE-WAIT"
+                    | "LAST-ACK"
+                    | "CLOSING"
+                    | "NEW-SYN-RECV"
+                    | "UNCONN"
+                    | "CONNECTED"
+                    | "udp"
+                    | "udp6"
+            )
+        })
+    }
+
+    fn is_malformed_connection_row(parts: &[&str]) -> bool {
+        Self::is_socket_record(parts)
+            && Self::is_connection_line(parts)
+            && Self::find_endpoints(parts).len() < 2
+            && Self::socket_state(parts) != "UNCONN"
+    }
+
+    fn is_socket_record(parts: &[&str]) -> bool {
+        parts.iter().take(2).any(|part| {
+            matches!(
+                *part,
+                "tcp"
+                    | "tcp6"
+                    | "udp"
+                    | "udp6"
+                    | "udplite"
+                    | "udplite6"
+                    | "raw"
+                    | "raw6"
+                    | "LISTEN"
+                    | "ESTAB"
+                    | "ESTABLISHED"
+                    | "SYN-SENT"
+                    | "SYN-RECV"
+                    | "FIN-WAIT-1"
+                    | "FIN-WAIT-2"
+                    | "TIME-WAIT"
+                    | "CLOSE"
+                    | "CLOSE-WAIT"
+                    | "LAST-ACK"
+                    | "CLOSING"
+                    | "NEW-SYN-RECV"
+                    | "UNCONN"
+                    | "CONNECTED"
             )
         })
     }
@@ -1425,7 +1511,25 @@ mod tests {
         let fields = "ESTAB 0 0 127.0.0.1:36886 127.0.0.1:55059";
         let parts: Vec<&str> = fields.split_whitespace().collect();
         assert!(parts.contains(&"ESTAB"));
+        assert!(Collector::is_socket_record(&parts));
         assert_eq!(Collector::find_endpoints(&parts).len(), 2);
+    }
+
+    #[test]
+    fn recognizes_transitional_tcp_states_and_incomplete_rows() {
+        let transitional = "SYN-SENT 0 1 192.0.2.10:49152 192.0.2.20:443";
+        let parts: Vec<&str> = transitional.split_whitespace().collect();
+        assert!(Collector::is_socket_record(&parts));
+        assert!(Collector::is_connection_line(&parts));
+        assert!(!Collector::is_malformed_connection_row(&parts));
+
+        let malformed = "SYN-SENT 0 1 local-address peer-address";
+        let parts: Vec<&str> = malformed.split_whitespace().collect();
+        assert!(Collector::is_malformed_connection_row(&parts));
+
+        let unconnected_udp = "UNCONN 0 0 0.0.0.0:5353 *:*";
+        let parts: Vec<&str> = unconnected_udp.split_whitespace().collect();
+        assert!(!Collector::is_malformed_connection_row(&parts));
     }
 
     #[test]

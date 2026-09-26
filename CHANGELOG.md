@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Recognize transitional TCP connection states and mark malformed socket rows as
+  partial collection instead of silently treating them as complete evidence.
 - Report website listener state as unknown when the latest socket probe is
   incomplete; do not interpret missing listener evidence as a site without a
   listener.
