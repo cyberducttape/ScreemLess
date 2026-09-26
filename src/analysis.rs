@@ -908,7 +908,7 @@ impl<'a> Analyzer<'a> {
         for snapshot in snapshots {
             for conn in &snapshot.network_connections {
                 let key = (
-                    conn.remote_addr.clone(),
+                    Self::normalize_endpoint_address(&conn.remote_addr),
                     conn.remote_port,
                     conn.protocol.clone(),
                 );
@@ -929,7 +929,7 @@ impl<'a> Analyzer<'a> {
         {
             let key = (
                 reference.file_path.clone(),
-                reference.hostname.to_ascii_lowercase(),
+                Self::normalize_hostname(&reference.hostname),
                 reference.port,
                 reference.context.clone(),
                 reference.config_line.clone(),
@@ -1007,10 +1007,12 @@ impl<'a> Analyzer<'a> {
             let config_references = config_refs
                 .iter()
                 .filter(|cr| {
-                    let hostname_matches = cr.hostname.eq_ignore_ascii_case(&remote_addr)
-                        || hostname
-                            .as_ref()
-                            .is_some_and(|resolved| cr.hostname.eq_ignore_ascii_case(resolved));
+                    let hostname_matches = Self::normalize_hostname(&cr.hostname)
+                        == Self::normalize_hostname(&remote_addr)
+                        || hostname.as_ref().is_some_and(|resolved| {
+                            Self::normalize_hostname(&cr.hostname)
+                                == Self::normalize_hostname(resolved)
+                        });
                     let port_matches = cr.port.is_none() || cr.port == Some(remote_port);
                     hostname_matches && port_matches
                 })
@@ -1238,11 +1240,11 @@ impl<'a> Analyzer<'a> {
     }
 
     fn build_ip_to_hostname_map(snapshots: &[ObservationSnapshot]) -> HashMap<String, String> {
-        let mut aliases = HashMap::<String, String>::new();
+        let mut aliases = HashMap::<String, HashSet<String>>::new();
         let mut owners = HashMap::<String, HashSet<String>>::new();
 
         for snapshot in snapshots {
-            let canonical = snapshot.hostname.to_ascii_lowercase();
+            let canonical = Self::normalize_hostname(&snapshot.hostname);
             for name in [
                 snapshot.host_identity.hostname.as_str(),
                 snapshot.host_identity.fqdn.as_deref().unwrap_or_default(),
@@ -1255,24 +1257,42 @@ impl<'a> Analyzer<'a> {
                     .dns_aliases
                     .iter()
                     .map(String::as_str),
-            )
-            .filter(|name| !name.is_empty())
-            {
-                aliases.insert(name.to_ascii_lowercase(), canonical.clone());
+            ) {
+                let normalized = Self::normalize_hostname(name);
+                if normalized.is_empty() {
+                    continue;
+                }
+                aliases
+                    .entry(normalized)
+                    .or_default()
+                    .insert(canonical.clone());
             }
-            aliases.insert(canonical.clone(), canonical.clone());
+            aliases
+                .entry(canonical.clone())
+                .or_default()
+                .insert(canonical.clone());
 
             for ip in Self::identity_addresses(&snapshot.host_identity) {
-                owners.entry(ip).or_default().insert(canonical.clone());
+                owners
+                    .entry(Self::normalize_endpoint_address(&ip))
+                    .or_default()
+                    .insert(canonical.clone());
             }
         }
 
         for snapshot in snapshots {
             for dns in &snapshot.dns_names {
-                let name = dns.hostname.to_ascii_lowercase();
-                let owner = aliases.get(&name).cloned().unwrap_or(name);
+                let name = Self::normalize_hostname(&dns.hostname);
+                let dns_targets = aliases
+                    .get(&name)
+                    .cloned()
+                    .unwrap_or_else(|| [name].into_iter().collect());
                 for ip in &dns.ip_addresses {
-                    owners.entry(ip.clone()).or_default().insert(owner.clone());
+                    let address = Self::normalize_endpoint_address(ip);
+                    owners
+                        .entry(address)
+                        .or_default()
+                        .extend(dns_targets.iter().cloned());
                 }
             }
         }
@@ -2012,7 +2032,6 @@ mod tests {
             .iter()
             .any(|note| note.contains("db01, db02")));
         assert!(ambiguous.contains_key("db02"));
-
         let mut coverage = ObservationCoverage {
             coverage_percent: 100.0,
             evidence_quality: "HIGH".to_string(),
@@ -2200,6 +2219,9 @@ mod tests {
             .iter()
             .any(|note| note.contains("db01, db02")));
         assert!(ambiguous.contains_key("db02"));
+        assert!(
+            !Analyzer::build_ip_to_hostname_map(&[db01, db02, client]).contains_key("192.0.2.80")
+        );
     }
 
     #[test]
@@ -2242,6 +2264,29 @@ mod tests {
             Some("worker01")
         );
         assert!(ambiguous.is_empty());
+    }
+
+    #[test]
+    fn outbound_ip_enrichment_normalizes_ipv6_and_fqdn_aliases() {
+        let now = Utc::now();
+        let mut target = test_snapshot(now);
+        target.hostname = "db01".to_string();
+        target.host_identity.hostname = "db01".to_string();
+        target.host_identity.fqdn = Some("db01.internal".to_string());
+
+        let mut source = test_snapshot(now);
+        source.hostname = "worker01".to_string();
+        source.dns_names.push(DnsName {
+            hostname: "DB01.INTERNAL.".to_string(),
+            ip_addresses: vec!["2001:0db8:0:0:0:0:0:40".to_string()],
+            timestamp: now,
+        });
+
+        let mappings = Analyzer::build_ip_to_hostname_map(&[target, source]);
+        assert_eq!(
+            mappings.get("2001:db8::40").map(String::as_str),
+            Some("db01")
+        );
     }
 
     #[test]
