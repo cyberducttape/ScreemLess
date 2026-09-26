@@ -1870,6 +1870,49 @@ mod tests {
     }
 
     #[test]
+    fn analyzes_one_thousand_hosts_from_a_shared_graph() {
+        const HOST_COUNT: u32 = 1_000;
+        let mut db = Database::new(":memory:").unwrap();
+        let sample_time = Utc::now() - chrono::Duration::seconds(30);
+        let mut hostnames = Vec::with_capacity(HOST_COUNT as usize);
+
+        for index in 0..HOST_COUNT {
+            let hostname = format!("fleet-{index:04}");
+            let address = format!("10.30.{}.{}", index / 256, index % 256);
+            let mut snapshot = test_snapshot(sample_time);
+            snapshot.hostname = hostname.clone();
+            snapshot.host_identity.hostname = hostname.clone();
+            snapshot.host_identity.ipv4_addresses = vec![address];
+            if index > 0 {
+                let target_index = index - 1;
+                snapshot.network_connections.push(NetworkConnection {
+                    local_addr: format!("10.30.{}.{}", index / 256, index % 256),
+                    local_port: 50_000,
+                    remote_addr: format!("10.30.{}.{}", target_index / 256, target_index % 256),
+                    remote_port: 5432,
+                    protocol: "tcp".to_string(),
+                    state: "ESTABLISHED".to_string(),
+                    pid: 1,
+                    process_name: "fleet-test".to_string(),
+                });
+            }
+            db.store_snapshot(&snapshot).unwrap();
+            hostnames.push(hostname);
+        }
+
+        let analyses = Analyzer::new(&db).analyze_many(&hostnames, 1).unwrap();
+        assert_eq!(analyses.len(), HOST_COUNT as usize);
+        assert_eq!(analyses["fleet-0000"].inbound_dependencies.len(), 1);
+        assert_eq!(
+            analyses["fleet-0000"].inbound_dependencies[0]
+                .source_hostname
+                .as_deref(),
+            Some("fleet-0001")
+        );
+        assert_eq!(analyses["fleet-0999"].inbound_dependencies.len(), 0);
+    }
+
+    #[test]
     fn inventory_uses_virtual_host_identity_and_inbound_socket_evidence() {
         let snapshot = ObservationSnapshot {
             timestamp: Utc::now(),
