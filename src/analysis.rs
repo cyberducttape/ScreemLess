@@ -246,7 +246,7 @@ impl<'a> Analyzer<'a> {
         let now = Utc::now();
         let since = now - Duration::hours(hours as i64);
         self.db
-            .with_snapshot_window(since.timestamp_millis(), |window| {
+            .with_snapshot_window(since.timestamp_millis(), now.timestamp_millis(), |window| {
                 let (inbound_graph, ambiguous_endpoints, endpoint_hostnames) =
                     Self::build_inbound_dependency_graph_from_window(window)?;
                 let snapshots = window.snapshots_for_host(hostname)?;
@@ -269,9 +269,10 @@ impl<'a> Analyzer<'a> {
         hostnames: &[String],
         hours: u32,
     ) -> Result<HashMap<String, AnalysisResult>> {
-        let since = Utc::now() - Duration::hours(hours as i64);
+        let now = Utc::now();
+        let since = now - Duration::hours(hours as i64);
         self.db
-            .with_snapshot_window(since.timestamp_millis(), |window| {
+            .with_snapshot_window(since.timestamp_millis(), now.timestamp_millis(), |window| {
                 let (inbound_graph, ambiguous_endpoints, endpoint_hostnames) =
                     Self::build_inbound_dependency_graph_from_window(window)?;
                 let mut analyses = HashMap::with_capacity(hostnames.len());
@@ -1969,7 +1970,7 @@ mod tests {
             db.store_snapshot(snapshot).unwrap();
         }
         let (graph, ambiguous, _) = db
-            .with_snapshot_window(0, |window| {
+            .with_snapshot_window(0, i64::MAX, |window| {
                 Analyzer::build_inbound_dependency_graph_from_window(window)
             })
             .unwrap();

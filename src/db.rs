@@ -11,6 +11,7 @@ pub struct Database {
 pub(crate) struct SnapshotWindow<'a> {
     conn: &'a Connection,
     since_timestamp: i64,
+    until_timestamp: i64,
 }
 
 impl SnapshotWindow<'_> {
@@ -18,16 +19,19 @@ impl SnapshotWindow<'_> {
         let hostname = hostname.trim().trim_end_matches('.').to_ascii_lowercase();
         let mut stmt = self.conn.prepare(
             "SELECT data FROM snapshots
-             WHERE lower(rtrim(hostname, '.')) = ?1 AND timestamp >= ?2
+             WHERE lower(rtrim(hostname, '.')) = ?1 AND timestamp BETWEEN ?2 AND ?3
              ORDER BY timestamp ASC",
         )?;
         let snapshots = stmt
-            .query_map(rusqlite::params![hostname, self.since_timestamp], |row| {
-                let json = row.get::<_, String>(0)?;
-                serde_json::from_str(&json).map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(0, Type::Text, Box::new(error))
-                })
-            })?
+            .query_map(
+                rusqlite::params![hostname, self.since_timestamp, self.until_timestamp],
+                |row| {
+                    let json = row.get::<_, String>(0)?;
+                    serde_json::from_str(&json).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(0, Type::Text, Box::new(error))
+                    })
+                },
+            )?
             .collect();
         snapshots
     }
@@ -36,10 +40,13 @@ impl SnapshotWindow<'_> {
     where
         F: FnMut(ObservationSnapshot) -> SqlResult<()>,
     {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT data FROM snapshots WHERE timestamp >= ?1 ORDER BY timestamp ASC")?;
-        let mut rows = stmt.query(rusqlite::params![self.since_timestamp])?;
+        let mut stmt = self.conn.prepare(
+            "SELECT data FROM snapshots WHERE timestamp BETWEEN ?1 AND ?2 ORDER BY timestamp ASC",
+        )?;
+        let mut rows = stmt.query(rusqlite::params![
+            self.since_timestamp,
+            self.until_timestamp
+        ])?;
         while let Some(row) = rows.next()? {
             let json = row.get::<_, String>(0)?;
             let snapshot = serde_json::from_str(&json).map_err(|error| {
@@ -246,6 +253,7 @@ impl Database {
     pub(crate) fn with_snapshot_window<T, F, E>(
         &self,
         since_timestamp: i64,
+        until_timestamp: i64,
         read: F,
     ) -> Result<T, E>
     where
@@ -256,6 +264,7 @@ impl Database {
         let window = SnapshotWindow {
             conn: &tx,
             since_timestamp,
+            until_timestamp,
         };
         let result = read(&window)?;
         tx.commit().map_err(E::from)?;
@@ -379,7 +388,7 @@ mod tests {
         assert_eq!(listener_count, 0);
         assert_eq!(cron_count, 0);
         let snapshots = db
-            .with_snapshot_window(0, |window| window.snapshots_for_host("test-host"))
+            .with_snapshot_window(0, i64::MAX, |window| window.snapshots_for_host("test-host"))
             .unwrap();
         assert_eq!(snapshots.len(), 2);
 
@@ -404,11 +413,31 @@ mod tests {
 
         for lookup in ["NODE-A.INTERNAL.", "node-a.internal"] {
             let snapshots = db
-                .with_snapshot_window(0, |window| window.snapshots_for_host(lookup))
+                .with_snapshot_window(0, i64::MAX, |window| window.snapshots_for_host(lookup))
                 .unwrap();
             assert_eq!(snapshots.len(), 1, "lookup failed for {lookup}");
             assert_eq!(snapshots[0].hostname, "node-a.internal.");
         }
+    }
+
+    #[test]
+    fn snapshot_window_excludes_future_dated_rows() {
+        let mut db = Database::new(":memory:").unwrap();
+        let now = Utc::now();
+        db.store_snapshot(&test_snapshot(
+            "future-host",
+            now + chrono::Duration::days(1),
+        ))
+        .unwrap();
+
+        let snapshots = db
+            .with_snapshot_window(
+                (now - chrono::Duration::hours(1)).timestamp_millis(),
+                now.timestamp_millis(),
+                |window| window.snapshots_for_host("future-host"),
+            )
+            .unwrap();
+        assert!(snapshots.is_empty());
     }
 
     #[test]
@@ -474,7 +503,7 @@ mod tests {
         db.store_snapshot(&first).unwrap();
 
         let count_in_snapshot = db
-            .with_snapshot_window(0, |window| {
+            .with_snapshot_window(0, i64::MAX, |window| {
                 let mut first_pass_count = 0;
                 window.for_each(|_| {
                     first_pass_count += 1;
@@ -504,7 +533,7 @@ mod tests {
 
         assert_eq!(count_in_snapshot, (1, 1));
         let count_after_commit = db
-            .with_snapshot_window(0, |window| {
+            .with_snapshot_window(0, i64::MAX, |window| {
                 let mut count = 0;
                 window.for_each(|_| {
                     count += 1;
@@ -531,7 +560,7 @@ mod tests {
             .unwrap();
 
         assert!(db
-            .with_snapshot_window(0, |window| window.for_each(|_| Ok(())))
+            .with_snapshot_window(0, i64::MAX, |window| window.for_each(|_| Ok(())))
             .is_err());
         drop(db);
         let _ = std::fs::remove_file(path);
