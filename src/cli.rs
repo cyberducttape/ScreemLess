@@ -546,10 +546,14 @@ struct PreflightResult {
     safe: bool,
     exit_code: u8,
     warnings: Vec<String>,
-    outbound_dependencies: usize,
-    inbound_dependencies: usize,
+    total_snapshots: Option<usize>,
+    observation_window_hours: Option<u32>,
+    observation_coverage: Option<crate::models::ObservationCoverage>,
+    outbound_dependencies: Option<usize>,
+    inbound_dependencies: Option<usize>,
+    inbound_dependency_evidence: Option<Vec<crate::models::InboundDependency>>,
     impact_acknowledged: bool,
-    probe_statuses: crate::models::ProbeStatuses,
+    probe_statuses: Option<crate::models::ProbeStatuses>,
 }
 
 fn preflight(
@@ -575,7 +579,15 @@ fn preflight(
                     "status": "invalid_invocation",
                     "safe": false,
                     "exit_code": 3,
-                    "warnings": ["Use restart, reboot, update, or shutdown"]
+                    "warnings": ["Use restart, reboot, update, or shutdown"],
+                    "total_snapshots": null,
+                    "observation_window_hours": null,
+                    "observation_coverage": null,
+                    "outbound_dependencies": null,
+                    "inbound_dependencies": null,
+                    "inbound_dependency_evidence": null,
+                    "impact_acknowledged": false,
+                    "probe_statuses": null
                 }))?
             );
         }
@@ -659,10 +671,14 @@ fn preflight(
                 safe,
                 exit_code,
                 warnings: warnings.clone(),
-                outbound_dependencies: analysis.dependencies.len(),
-                inbound_dependencies: analysis.inbound_dependencies.len(),
+                total_snapshots: Some(analysis.total_snapshots),
+                observation_window_hours: Some(analysis.observation_window_hours),
+                observation_coverage: Some(analysis.coverage.clone()),
+                outbound_dependencies: Some(analysis.dependencies.len()),
+                inbound_dependencies: Some(analysis.inbound_dependencies.len()),
+                inbound_dependency_evidence: Some(analysis.inbound_dependencies.clone()),
                 impact_acknowledged,
-                probe_statuses: analysis.probe_statuses.clone(),
+                probe_statuses: Some(analysis.probe_statuses.clone()),
             })?
         );
     } else {

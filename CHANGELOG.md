@@ -8,6 +8,8 @@
 - Require explicit acknowledgement of observed dependency impact before
   preflight permits restart, reboot, update, or shutdown; report this in
   versioned preflight JSON.
+- Include observation coverage and inbound evidence in preflight JSON; keep a
+  stable result shape with `null` for metrics unavailable on invalid requests.
 - Stop and disable the systemd agent on package removal while preserving its
   observation database; package upgrades do not stop the running service.
 

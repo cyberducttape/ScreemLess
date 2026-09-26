@@ -137,4 +137,42 @@ fn preflight_json_keeps_insufficient_evidence_blocking_after_impact_ack() {
     assert_eq!(json["status"], "insufficient_evidence");
     assert_eq!(json["exit_code"], 4);
     assert_eq!(json["impact_acknowledged"], false);
+    assert_eq!(json["total_snapshots"], 0);
+    assert_eq!(json["observation_window_hours"], 168);
+    assert!(json["observation_coverage"].is_object());
+    assert!(json["observation_coverage"]["remaining_unknowns"].is_array());
+    assert_eq!(json["inbound_dependencies"], 0);
+    assert_eq!(json["inbound_dependency_evidence"], serde_json::json!([]));
+    assert!(json["probe_statuses"].is_object());
+}
+
+#[test]
+fn invalid_preflight_json_uses_same_schema_with_unknowns_as_null() {
+    let output = Command::new(env!("CARGO_BIN_EXE_screamless"))
+        .args([
+            "preflight",
+            "--server",
+            "node-a",
+            "--operation",
+            "invalid",
+            "--json",
+        ])
+        .output()
+        .expect("run invalid preflight JSON command");
+
+    assert_eq!(output.status.code(), Some(3));
+    let json: Value = serde_json::from_slice(&output.stdout).expect("stdout must be JSON only");
+    assert_eq!(json["schema_version"], "1.0");
+    assert_eq!(json["status"], "invalid_invocation");
+    for field in [
+        "total_snapshots",
+        "observation_window_hours",
+        "observation_coverage",
+        "outbound_dependencies",
+        "inbound_dependencies",
+        "inbound_dependency_evidence",
+        "probe_statuses",
+    ] {
+        assert!(json[field].is_null(), "{field} should be unknown");
+    }
 }

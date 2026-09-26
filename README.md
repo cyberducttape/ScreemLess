@@ -187,7 +187,8 @@ When systems are observed depending on a host, preflight reports the expected
 impact and blocks automation until the caller passes `--acknowledge-impact`.
 That flag acknowledges impact only; it does not override incomplete observations
 or verify that a maintenance window has been approved. Preflight JSON declares
-schema version `1.0` and includes `impact_acknowledged`.
+schema version `1.0` and includes the observed coverage, probe states, inbound
+dependency evidence, and `impact_acknowledged`; unavailable data is `null`.
 
 ### 3. **Incident Response**
 ```bash
