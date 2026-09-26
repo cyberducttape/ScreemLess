@@ -98,6 +98,10 @@ pub enum Command {
         /// Emit a stable JSON result for automation
         #[arg(long)]
         json: bool,
+
+        /// Explicitly acknowledge observed dependent-system impact
+        #[arg(long)]
+        acknowledge_impact: bool,
     },
 
     /// Take a single snapshot
@@ -115,7 +119,8 @@ pub async fn run(args: Args) -> Result<()> {
             server,
             operation,
             json,
-        } => preflight(&args.db, server, operation, json),
+            acknowledge_impact,
+        } => preflight(&args.db, server, operation, json, acknowledge_impact),
         Command::Snapshot => snapshot(&args.db).await,
     }
 }
@@ -330,6 +335,10 @@ fn operation_impact_warnings(operation: &str, dependent_systems: usize) -> Vec<S
     }
 }
 
+fn impact_requires_acknowledgement(operation: &str, dependent_systems: usize) -> bool {
+    dependent_systems > 0 && matches!(operation, "restart" | "reboot" | "update" | "shutdown")
+}
+
 fn dashboard(
     db_path: &std::path::Path,
     hostname: Option<String>,
@@ -530,6 +539,7 @@ pub fn error_exit_code(error: &anyhow::Error) -> u8 {
 
 #[derive(Serialize)]
 struct PreflightResult {
+    schema_version: String,
     server: String,
     operation: String,
     status: String,
@@ -538,6 +548,7 @@ struct PreflightResult {
     warnings: Vec<String>,
     outbound_dependencies: usize,
     inbound_dependencies: usize,
+    impact_acknowledged: bool,
     probe_statuses: crate::models::ProbeStatuses,
 }
 
@@ -546,6 +557,7 @@ fn preflight(
     server: String,
     operation: String,
     json: bool,
+    acknowledge_impact: bool,
 ) -> Result<()> {
     use crate::analysis::Analyzer;
 
@@ -557,6 +569,7 @@ fn preflight(
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
+                    "schema_version": "1.0",
                     "server": server,
                     "operation": operation,
                     "status": "invalid_invocation",
@@ -606,9 +619,19 @@ fn preflight(
 
     let impact_warnings =
         operation_impact_warnings(&operation, analysis.inbound_dependencies.len());
+    let impact_acknowledged = acknowledge_impact && !impact_warnings.is_empty();
     if !impact_warnings.is_empty() {
-        safe = false;
         warnings.extend(impact_warnings);
+        if impact_acknowledged {
+            warnings.push(
+                "The caller acknowledged the observed impact; coordinate affected systems and follow the approved maintenance plan.".to_string(),
+            );
+        } else if impact_requires_acknowledgement(&operation, analysis.inbound_dependencies.len()) {
+            safe = false;
+            warnings.push(
+                "Pass --acknowledge-impact only after confirming the affected systems and approved maintenance plan.".to_string(),
+            );
+        }
     }
 
     let exit_code = if insufficient_evidence {
@@ -629,6 +652,7 @@ fn preflight(
         println!(
             "{}",
             serde_json::to_string_pretty(&PreflightResult {
+                schema_version: "1.0".to_string(),
                 server,
                 operation,
                 status: status.to_string(),
@@ -637,6 +661,7 @@ fn preflight(
                 warnings: warnings.clone(),
                 outbound_dependencies: analysis.dependencies.len(),
                 inbound_dependencies: analysis.inbound_dependencies.len(),
+                impact_acknowledged,
                 probe_statuses: analysis.probe_statuses.clone(),
             })?
         );
@@ -692,7 +717,10 @@ fn format_duration(d: Duration) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{operation_impact_warnings, parse_duration, sampling_wait, Args};
+    use super::{
+        impact_requires_acknowledgement, operation_impact_warnings, parse_duration, sampling_wait,
+        Args,
+    };
     use clap::Parser;
     use std::time::Duration;
 
@@ -748,5 +776,23 @@ mod tests {
         assert!(operation_impact_warnings("shutdown", 0).is_empty());
         assert!(operation_impact_warnings("update", 2)[0].contains("2 dependent systems"));
         assert!(operation_impact_warnings("shutdown", 2)[0].contains("shutdown would interrupt"));
+        assert!(!impact_requires_acknowledgement("restart", 0));
+        assert!(impact_requires_acknowledgement("restart", 2));
+        assert!(impact_requires_acknowledgement("shutdown", 2));
+        assert!(!impact_requires_acknowledgement("snapshot", 2));
+    }
+
+    #[test]
+    fn preflight_impact_acknowledgement_is_explicit_in_cli() {
+        assert!(Args::try_parse_from([
+            "screamless",
+            "preflight",
+            "--server",
+            "db01",
+            "--operation",
+            "restart",
+            "--acknowledge-impact"
+        ])
+        .is_ok());
     }
 }

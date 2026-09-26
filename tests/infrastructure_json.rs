@@ -99,3 +99,42 @@ fn report_json_is_versioned_and_stdout_only() {
     assert!(json["generated_at"].as_str().is_some());
     assert!(json["observation_period"].is_object());
 }
+
+#[test]
+fn preflight_json_keeps_insufficient_evidence_blocking_after_impact_ack() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let db_path = std::env::temp_dir().join(format!(
+        "screamless-preflight-json-{}-{nonce}.db",
+        std::process::id()
+    ));
+
+    let output = Command::new(env!("CARGO_BIN_EXE_screamless"))
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "preflight",
+            "--server",
+            "node-a",
+            "--operation",
+            "restart",
+            "--json",
+            "--acknowledge-impact",
+        ])
+        .output()
+        .expect("run preflight JSON command");
+
+    for suffix in ["", "-wal", "-shm"] {
+        let path = format!("{}{suffix}", db_path.display());
+        let _ = std::fs::remove_file(path);
+    }
+
+    assert_eq!(output.status.code(), Some(4));
+    let json: Value = serde_json::from_slice(&output.stdout).expect("stdout must be JSON only");
+    assert_eq!(json["schema_version"], "1.0");
+    assert_eq!(json["status"], "insufficient_evidence");
+    assert_eq!(json["exit_code"], 4);
+    assert_eq!(json["impact_acknowledged"], false);
+}

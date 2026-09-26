@@ -48,6 +48,9 @@ screamless decommission-check --hostname web-old-03
 screamless preflight --server db01 --operation restart
 # Output: ⚠️ 15 servers depend on this, plan maintenance window
 ```
+After coordinating the impact, pass `--acknowledge-impact` to explicitly
+acknowledge the dependent-system interruption. This does not override missing
+or incomplete observations.
 
 ### "Review observed infrastructure relationships"
 ```bash

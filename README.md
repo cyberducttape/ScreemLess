@@ -183,6 +183,11 @@ Automation exit codes are consistent across preflight and decommission checks:
 
 Operation policy is specific to the requested action. A listening service is
 relevant to decommissioning but is not, by itself, evidence that a restart is unsafe.
+When systems are observed depending on a host, preflight reports the expected
+impact and blocks automation until the caller passes `--acknowledge-impact`.
+That flag acknowledges impact only; it does not override incomplete observations
+or verify that a maintenance window has been approved. Preflight JSON declares
+schema version `1.0` and includes `impact_acknowledged`.
 
 ### 3. **Incident Response**
 ```bash

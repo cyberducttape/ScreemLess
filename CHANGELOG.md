@@ -5,6 +5,9 @@
 - Use `null` rather than a misleading zero when configuration syntax support
   has not been measured; bumped report JSON to 2.0 and infrastructure JSON to
   3.0 because the nested audit shape changed.
+- Require explicit acknowledgement of observed dependency impact before
+  preflight permits restart, reboot, update, or shutdown; report this in
+  versioned preflight JSON.
 
 ## [1.1.0] - 2026-09-26
 
