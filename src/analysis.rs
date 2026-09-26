@@ -11,6 +11,7 @@ type InboundDependencyGraph = (
     HashMap<String, Vec<InboundDependency>>,
     HashMap<String, BTreeSet<String>>,
     HashMap<String, String>,
+    BTreeSet<String>,
 );
 
 #[derive(Default)]
@@ -31,11 +32,15 @@ struct InboundGraphBuilder {
     dns_addresses: HashMap<String, HashSet<String>>,
     graph: HashMap<String, HashMap<String, SourceEvidence>>,
     ambiguous_endpoints: HashMap<String, BTreeSet<String>>,
+    incomplete_socket_hosts: BTreeSet<String>,
 }
 
 impl InboundGraphBuilder {
     fn add_endpoint_snapshot(&mut self, snapshot: &ObservationSnapshot) {
         let canonical = Analyzer::normalize_hostname(&snapshot.hostname);
+        if !snapshot.probe_statuses.network_sockets.is_complete() {
+            self.incomplete_socket_hosts.insert(canonical.clone());
+        }
         let identity_names = [
             snapshot.host_identity.hostname.as_str(),
             snapshot.host_identity.fqdn.as_deref().unwrap_or_default(),
@@ -229,7 +234,12 @@ impl InboundGraphBuilder {
                 (target, inbound)
             })
             .collect();
-        (inbound_graph, self.ambiguous_endpoints, endpoint_hostnames)
+        (
+            inbound_graph,
+            self.ambiguous_endpoints,
+            endpoint_hostnames,
+            self.incomplete_socket_hosts,
+        )
     }
 }
 
@@ -247,8 +257,12 @@ impl<'a> Analyzer<'a> {
         let since = now - Duration::hours(hours as i64);
         self.db
             .with_snapshot_window(since.timestamp_millis(), now.timestamp_millis(), |window| {
-                let (inbound_graph, ambiguous_endpoints, endpoint_hostnames) =
-                    Self::build_inbound_dependency_graph_from_window(window)?;
+                let (
+                    inbound_graph,
+                    ambiguous_endpoints,
+                    endpoint_hostnames,
+                    incomplete_socket_hosts,
+                ) = Self::build_inbound_dependency_graph_from_window(window)?;
                 let snapshots = window.snapshots_for_host(hostname)?;
                 self.analyze_from_snapshots(
                     hostname,
@@ -257,6 +271,7 @@ impl<'a> Analyzer<'a> {
                     &inbound_graph,
                     &ambiguous_endpoints,
                     &endpoint_hostnames,
+                    &incomplete_socket_hosts,
                 )
             })
     }
@@ -273,8 +288,12 @@ impl<'a> Analyzer<'a> {
         let since = now - Duration::hours(hours as i64);
         self.db
             .with_snapshot_window(since.timestamp_millis(), now.timestamp_millis(), |window| {
-                let (inbound_graph, ambiguous_endpoints, endpoint_hostnames) =
-                    Self::build_inbound_dependency_graph_from_window(window)?;
+                let (
+                    inbound_graph,
+                    ambiguous_endpoints,
+                    endpoint_hostnames,
+                    incomplete_socket_hosts,
+                ) = Self::build_inbound_dependency_graph_from_window(window)?;
                 let mut analyses = HashMap::with_capacity(hostnames.len());
                 for hostname in hostnames {
                     if analyses.contains_key(hostname) {
@@ -288,6 +307,7 @@ impl<'a> Analyzer<'a> {
                         &inbound_graph,
                         &ambiguous_endpoints,
                         &endpoint_hostnames,
+                        &incomplete_socket_hosts,
                     )?;
                     analyses.insert(hostname.clone(), analysis);
                 }
@@ -303,6 +323,7 @@ impl<'a> Analyzer<'a> {
         inbound_graph: &HashMap<String, Vec<InboundDependency>>,
         ambiguous_endpoints: &HashMap<String, BTreeSet<String>>,
         endpoint_hostnames: &HashMap<String, String>,
+        incomplete_socket_hosts: &BTreeSet<String>,
     ) -> Result<AnalysisResult> {
         let now = Utc::now();
         let unresolved_for_host = ambiguous_endpoints
@@ -311,6 +332,11 @@ impl<'a> Analyzer<'a> {
             .unwrap_or_default();
         let mut coverage = Self::build_observation_coverage(&snapshots, now, hours);
         Self::apply_unresolved_endpoint_evidence(&mut coverage, &unresolved_for_host);
+        Self::apply_incomplete_inbound_probe_evidence(
+            &mut coverage,
+            incomplete_socket_hosts,
+            hostname,
+        );
 
         if snapshots.is_empty() {
             return Ok(AnalysisResult {
@@ -1689,6 +1715,27 @@ impl<'a> Analyzer<'a> {
         coverage.evidence_quality = "LOW".to_string();
     }
 
+    fn apply_incomplete_inbound_probe_evidence(
+        coverage: &mut ObservationCoverage,
+        incomplete_hosts: &BTreeSet<String>,
+        target_hostname: &str,
+    ) {
+        let target = Self::normalize_hostname(target_hostname);
+        let incomplete_source_count = incomplete_hosts
+            .iter()
+            .filter(|hostname| **hostname != target)
+            .count();
+        if incomplete_source_count == 0 {
+            return;
+        }
+
+        coverage.remaining_unknowns.push(format!(
+            "inbound dependency evidence is incomplete: {} other observed host(s) had incomplete network-socket probes",
+            incomplete_source_count
+        ));
+        coverage.evidence_quality = "LOW".to_string();
+    }
+
     fn probe_status<'snapshot>(
         snapshot: &'snapshot ObservationSnapshot,
         name: &str,
@@ -2082,7 +2129,7 @@ mod tests {
         for snapshot in &snapshots {
             db.store_snapshot(snapshot).unwrap();
         }
-        let (graph, ambiguous, _) = db
+        let (graph, ambiguous, _, _) = db
             .with_snapshot_window(0, i64::MAX, |window| {
                 Analyzer::build_inbound_dependency_graph_from_window(window)
             })
@@ -2102,6 +2149,59 @@ mod tests {
         Analyzer::apply_unresolved_endpoint_evidence(&mut coverage, &ambiguous["db01"]);
         assert_eq!(coverage.evidence_quality, "LOW");
         assert!(!coverage.remaining_unknowns.is_empty());
+    }
+
+    #[test]
+    fn incomplete_inbound_probe_evidence_lowers_quality_but_ignores_target_probe() {
+        let mut coverage = ObservationCoverage {
+            coverage_percent: 100.0,
+            evidence_quality: "HIGH".to_string(),
+            ..ObservationCoverage::default()
+        };
+        let mut incomplete_hosts = std::collections::BTreeSet::from(["db01".to_string()]);
+        Analyzer::apply_incomplete_inbound_probe_evidence(
+            &mut coverage,
+            &incomplete_hosts,
+            "DB01.",
+        );
+        assert_eq!(coverage.evidence_quality, "HIGH");
+
+        incomplete_hosts.insert("web01".to_string());
+        Analyzer::apply_incomplete_inbound_probe_evidence(&mut coverage, &incomplete_hosts, "db01");
+        assert_eq!(coverage.evidence_quality, "LOW");
+        assert!(coverage
+            .remaining_unknowns
+            .iter()
+            .any(|unknown| unknown.contains("1 other observed host")));
+    }
+
+    #[test]
+    fn incomplete_fleet_socket_probes_are_reported_as_inbound_unknowns() {
+        let now = Utc::now();
+        let mut target = test_snapshot(now);
+        target.hostname = "db01".to_string();
+        target.host_identity.hostname = "db01".to_string();
+
+        let mut source = test_snapshot(now);
+        source.hostname = "web01".to_string();
+        source.host_identity.hostname = "web01".to_string();
+        source.probe_statuses.network_sockets =
+            crate::models::ProbeStatus::failed("ss unavailable");
+
+        let mut db = Database::new(":memory:").unwrap();
+        db.store_snapshot(&target).unwrap();
+        db.store_snapshot(&source).unwrap();
+
+        let analysis = Analyzer::new(&db).analyze("db01", 1).unwrap();
+        assert!(analysis
+            .coverage
+            .remaining_unknowns
+            .iter()
+            .any(
+                |unknown| unknown.contains("inbound dependency evidence is incomplete")
+                    && unknown.contains("1 other observed host")
+            ));
+        assert_eq!(analysis.coverage.evidence_quality, "LOW");
     }
 
     #[test]
@@ -2228,7 +2328,7 @@ mod tests {
         builder.add_endpoint_snapshot(&source);
         builder.finish_endpoint_index();
         builder.add_connection_snapshot(&source);
-        let (graph, _, _) = builder.finish();
+        let (graph, _, _, _) = builder.finish();
 
         assert_eq!(graph["db01"].len(), 1);
         assert_eq!(graph["db01"][0].source_hostname.as_deref(), Some("web01"));
@@ -2273,7 +2373,7 @@ mod tests {
         }
         builder.finish_endpoint_index();
         builder.add_connection_snapshot(&client);
-        let (graph, ambiguous, endpoint_hostnames) = builder.finish();
+        let (graph, ambiguous, endpoint_hostnames, _) = builder.finish();
 
         assert!(!graph.contains_key("db01"));
         assert!(!graph.contains_key("db02"));
@@ -2316,7 +2416,7 @@ mod tests {
         builder.add_endpoint_snapshot(&source);
         builder.finish_endpoint_index();
         builder.add_connection_snapshot(&source);
-        let (graph, ambiguous, _) = builder.finish();
+        let (graph, ambiguous, _, _) = builder.finish();
 
         assert_eq!(graph["db01"].len(), 1);
         assert_eq!(
@@ -2356,7 +2456,7 @@ mod tests {
         builder.add_endpoint_snapshot(&target);
         builder.add_endpoint_snapshot(&source);
         builder.finish_endpoint_index();
-        let (_, _, mappings) = builder.finish();
+        let (_, _, mappings, _) = builder.finish();
         assert_eq!(
             mappings.get("2001:db8::40").map(String::as_str),
             Some("db01")
