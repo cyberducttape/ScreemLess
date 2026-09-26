@@ -305,7 +305,7 @@ impl<'a> Analyzer<'a> {
     ) -> Result<AnalysisResult> {
         let now = Utc::now();
         let unresolved_for_host = ambiguous_endpoints
-            .get(&hostname.to_ascii_lowercase())
+            .get(&Self::normalize_hostname(hostname))
             .cloned()
             .unwrap_or_default();
         let mut coverage = Self::build_observation_coverage(&snapshots, now, hours);
@@ -342,7 +342,7 @@ impl<'a> Analyzer<'a> {
         let observed_processes = self.analyze_process_activity(&snapshots)?;
 
         let inbound_dependencies = inbound_graph
-            .get(&hostname.to_ascii_lowercase())
+            .get(&Self::normalize_hostname(hostname))
             .cloned()
             .unwrap_or_default();
 
