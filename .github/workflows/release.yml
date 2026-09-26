@@ -27,6 +27,19 @@ jobs:
           install -m 0755 target/release/screamless "dist/screamless-${VERSION}/screamless"
           install -m 0644 LICENSE CHANGELOG.md README.md packaging/screamless-agent.service "dist/screamless-${VERSION}/"
           tar -C dist -czf "dist/screamless-${VERSION}-linux-amd64.tar.gz" "screamless-${VERSION}"
+          git archive --format=tar.gz --prefix="screamless-${VERSION}-source/" "$GITHUB_REF_NAME" \
+            -o "dist/screamless-${VERSION}-source.tar.gz"
+
+      - name: Verify release archives contain no Git internals
+        run: |
+          if tar -tzf "dist/screamless-${VERSION}-linux-amd64.tar.gz" | grep -E '(^|/)\.git(/|$)'; then
+            echo "Git internals found in binary archive" >&2
+            exit 1
+          fi
+          if tar -tzf "dist/screamless-${VERSION}-source.tar.gz" | grep -E '(^|/)\.git(/|$)'; then
+            echo "Git internals found in source archive" >&2
+            exit 1
+          fi
 
       - name: Build deb and rpm packages
         uses: goreleaser/nfpm-action@v2

@@ -247,6 +247,7 @@ Published releases include:
 - `screamless_1.1.0_amd64.deb`
 - `screamless-1.1.0-1.x86_64.rpm`
 - `screamless-1.1.0-linux-amd64.tar.gz`
+- `screamless-1.1.0-source.tar.gz` (tracked source only; no `.git/`)
 - `SHA256SUMS`, `SBOM.spdx.json`, and Cosign signature material
 
 The package/installer can enable the collector with:
