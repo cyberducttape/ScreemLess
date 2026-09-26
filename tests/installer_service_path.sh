@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RENDERER="$ROOT_DIR/packaging/render-service-unit.sh"
 UNIT="$ROOT_DIR/packaging/screamless-agent.service"
+VALIDATOR="$ROOT_DIR/packaging/validate-service-install-dir.sh"
 
 rendered="$(bash "$RENDERER" "$UNIT" /opt/screamless/bin/screamless)"
 grep -Fqx 'ExecStart=/opt/screamless/bin/screamless observe --db /var/lib/screamless/screamless.db --duration 3650d --interval 1m' <<< "$rendered"
@@ -30,5 +31,19 @@ for install_dir in /tmp/screamless /var/tmp/screamless /tmp /var/tmp; do
         fi
     fi
 done
+
+bash "$VALIDATOR" /usr/local/bin
+bash "$VALIDATOR" /opt/screamless/new-bin
+if bash "$VALIDATOR" "$HOME/screamless-bin" >/dev/null 2>&1; then
+    home_owner="$(stat -c '%u' "$HOME")"
+    if [[ "$home_owner" != 0 ]]; then
+        echo "Service install validator accepted a user-owned executable path" >&2
+        exit 1
+    fi
+fi
+if bash "$VALIDATOR" /bin/screamless >/dev/null 2>&1; then
+    echo "Service install validator accepted a symlinked executable path" >&2
+    exit 1
+fi
 
 echo "Installer service path tests passed"

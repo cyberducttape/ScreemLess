@@ -30,6 +30,7 @@ jobs:
           install -m 0644 LICENSE CHANGELOG.md README.md packaging/screamless-agent.service "dist/screamless-${VERSION}/"
           install -m 0755 packaging/service-activation.sh "dist/screamless-${VERSION}/service-activation.sh"
           install -m 0755 packaging/render-service-unit.sh "dist/screamless-${VERSION}/render-service-unit.sh"
+          install -m 0755 packaging/validate-service-install-dir.sh "dist/screamless-${VERSION}/validate-service-install-dir.sh"
           tar -C dist -czf "dist/screamless-${VERSION}-linux-amd64.tar.gz" "screamless-${VERSION}"
           git archive --format=tar.gz --prefix="screamless-${VERSION}-source/" "$GITHUB_REF_NAME" \
             -o "dist/screamless-${VERSION}-source.tar.gz"
@@ -89,6 +90,7 @@ jobs:
           install -m 0644 LICENSE CHANGELOG.md README.md packaging/screamless-agent.service "dist/screamless-${VERSION}/"
           install -m 0755 packaging/service-activation.sh "dist/screamless-${VERSION}/service-activation.sh"
           install -m 0755 packaging/render-service-unit.sh "dist/screamless-${VERSION}/render-service-unit.sh"
+          install -m 0755 packaging/validate-service-install-dir.sh "dist/screamless-${VERSION}/validate-service-install-dir.sh"
           tar -C dist -czf "dist/screamless-${VERSION}-linux-arm64.tar.gz" "screamless-${VERSION}"
           if tar -tzf "dist/screamless-${VERSION}-linux-arm64.tar.gz" | grep -E '(^|/)\.git(/|$)'; then
             echo "Git internals found in ARM64 binary archive" >&2

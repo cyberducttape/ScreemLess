@@ -93,15 +93,18 @@ if [[ "$INSTALL_SERVICE" == 1 ]]; then
         SERVICE_FILE="$BUILD_DIR/source/packaging/screamless-agent.service"
         SERVICE_ACTIVATION="$BUILD_DIR/source/packaging/service-activation.sh"
         SERVICE_RENDERER="$BUILD_DIR/source/packaging/render-service-unit.sh"
+        SERVICE_DIR_VALIDATOR="$BUILD_DIR/source/packaging/validate-service-install-dir.sh"
     else
         SERVICE_FILE="$BUILD_DIR/screamless-${VERSION}/screamless-agent.service"
         SERVICE_ACTIVATION="$BUILD_DIR/screamless-${VERSION}/service-activation.sh"
         SERVICE_RENDERER="$BUILD_DIR/screamless-${VERSION}/render-service-unit.sh"
+        SERVICE_DIR_VALIDATOR="$BUILD_DIR/screamless-${VERSION}/validate-service-install-dir.sh"
     fi
-    if [[ ! -f "$SERVICE_FILE" || ! -f "$SERVICE_ACTIVATION" || ! -f "$SERVICE_RENDERER" ]]; then
+    if [[ ! -f "$SERVICE_FILE" || ! -f "$SERVICE_ACTIVATION" || ! -f "$SERVICE_RENDERER" || ! -f "$SERVICE_DIR_VALIDATOR" ]]; then
         echo "Agent service files are missing from the installation source" >&2
         exit 1
     fi
+    as_root bash "$SERVICE_DIR_VALIDATOR" "$INSTALL_DIR"
     if [[ "$INSTALL_DIR" != "/usr/local/bin" ]]; then
         CUSTOM_SERVICE_FILE="$BUILD_DIR/screamless-agent-custom.service"
         bash "$SERVICE_RENDERER" "$SERVICE_FILE" "$INSTALL_DIR/screamless" > "$CUSTOM_SERVICE_FILE"
@@ -109,7 +112,15 @@ if [[ "$INSTALL_SERVICE" == 1 ]]; then
     fi
 fi
 
-if [[ -w "$INSTALL_DIR" ]]; then
+if [[ "$INSTALL_SERVICE" == 1 ]]; then
+    # A system service runs as root; never leave its executable in a
+    # directory the invoking account can replace.
+    as_root install -d -m 0755 "$INSTALL_DIR"
+    as_root bash "$SERVICE_DIR_VALIDATOR" "$INSTALL_DIR"
+    STAGED_BINARY="$(as_root mktemp "$INSTALL_DIR/.screamless.XXXXXX")"
+    as_root install -m 0755 "$BINARY" "$STAGED_BINARY"
+    as_root mv -f -- "$STAGED_BINARY" "$INSTALL_DIR/screamless"
+elif [[ -w "$INSTALL_DIR" ]]; then
     install -D -m 0755 "$BINARY" "$INSTALL_DIR/screamless"
 else
     as_root install -D -m 0755 "$BINARY" "$INSTALL_DIR/screamless"

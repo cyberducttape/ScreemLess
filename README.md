@@ -54,6 +54,12 @@ curl -fsSL https://raw.githubusercontent.com/cyberducttape/ScreemLess/v1.1.0/ins
 ./target/release/screamless dashboard --output analysis.html
 ```
 
+When installing the systemd agent, a custom `INSTALL_DIR` must be under a
+root-owned directory tree that is not writable by group or other users. This
+prevents the root service from executing a user-replaceable binary. `/tmp` and
+`/var/tmp` are not valid service install locations; use `--no-service` for a
+user-owned CLI installation without registering the system service.
+
 The observer emits structured diagnostics to stderr. Set `RUST_LOG` to tune
 verbosity, for example `RUST_LOG=screamless=info` for journal-friendly run,
 snapshot, timing, and failure fields.

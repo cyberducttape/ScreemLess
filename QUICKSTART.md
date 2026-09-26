@@ -2,7 +2,7 @@
 
 ## Installation
 
-The published-binary installer requires `cosign` so it can verify the release checksum signature. The explicit `--from-source` path requires Rust and Git.
+The published-binary installer requires `cosign` so it can verify the release checksum signature. The explicit `--from-source` path requires Rust and Git. When installing the systemd agent, a custom `INSTALL_DIR` must be under a root-owned directory tree that is not writable by group or other users; this prevents the root service from executing a user-replaceable binary. `/tmp` and `/var/tmp` are not valid service install locations. Use `--no-service` for a user-owned CLI installation without registering the root service.
 
 ```bash
 # Using install script (easiest)
