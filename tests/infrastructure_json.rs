@@ -59,3 +59,43 @@ fn infrastructure_json_is_stdout_only_and_uses_ordered_host_array() {
         "analysis payload should not be duplicated"
     );
 }
+
+#[test]
+fn report_json_is_versioned_and_stdout_only() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let db_path = std::env::temp_dir().join(format!(
+        "screamless-report-json-{}-{nonce}.db",
+        std::process::id()
+    ));
+
+    let output = Command::new(env!("CARGO_BIN_EXE_screamless"))
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "report",
+            "--format",
+            "json",
+        ])
+        .output()
+        .expect("run report JSON command");
+
+    for suffix in ["", "-wal", "-shm"] {
+        let path = format!("{}{suffix}", db_path.display());
+        let _ = std::fs::remove_file(path);
+    }
+
+    assert!(
+        output.status.success(),
+        "command failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty(), "unexpected stderr");
+    let json: Value = serde_json::from_slice(&output.stdout).expect("stdout must be JSON only");
+    assert_eq!(json["schema_version"], "1.0");
+    assert_eq!(json["collector_version"], env!("CARGO_PKG_VERSION"));
+    assert!(json["generated_at"].as_str().is_some());
+    assert!(json["observation_period"].is_object());
+}

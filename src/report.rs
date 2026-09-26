@@ -3,6 +3,7 @@ use crate::db::Database;
 use crate::graph::GraphRenderer;
 use crate::models::*;
 use anyhow::Result;
+use chrono::Utc;
 use serde_json::json;
 
 pub struct Reporter<'a> {
@@ -79,6 +80,9 @@ impl<'a> Reporter<'a> {
         let analysis = analyzer.analyze(&hostname, 168)?;
 
         let json = json!({
+            "schema_version": "1.0",
+            "generated_at": Utc::now().to_rfc3339(),
+            "collector_version": env!("CARGO_PKG_VERSION"),
             "server": hostname,
             "observation_period": {
                 "start": analysis.observation_span.0.to_rfc3339(),
