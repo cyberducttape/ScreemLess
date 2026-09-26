@@ -1063,7 +1063,7 @@ mod tests {
     use crate::models::{
         ConfigReference, Evidence, EvidenceLevel, HostIdentity, ImpactLevel, InboundDependency,
         ListeningService, NetworkConnection, ObservationCoverage, ObservationSnapshot,
-        ProbeStatuses, Process,
+        ProbeStatuses, Process, SoftwareInventory,
     };
     use chrono::Utc;
 
@@ -1296,5 +1296,30 @@ mod tests {
             .websites
             .iter()
             .all(|site| site.listener_activity_observations == 0));
+
+        let mut proxy_snapshot = snapshot;
+        proxy_snapshot.config_references.push(ConfigReference {
+            file_path: "/etc/nginx/sites-enabled/proxy".to_string(),
+            hostname: "app.internal".to_string(),
+            port: Some(8080),
+            context: "proxy_pass".to_string(),
+            config_line: None,
+        });
+        proxy_snapshot.software = ["python", "php", "node", "postgres"]
+            .into_iter()
+            .map(|name| SoftwareInventory {
+                name: name.to_string(),
+                version: None,
+                executable: None,
+                evidence: "test".to_string(),
+                observations: 1,
+            })
+            .collect();
+        let proxy_inventory = Analyzer::build_inventory(&[proxy_snapshot], &[]);
+        assert_eq!(proxy_inventory.load_balancers, vec!["nginx"]);
+        assert!(proxy_inventory.tech_stack.contains(&"python".to_string()));
+        assert!(!proxy_inventory
+            .load_balancers
+            .contains(&"python".to_string()));
     }
 }
