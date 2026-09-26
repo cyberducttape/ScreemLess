@@ -32,7 +32,7 @@ for install_dir in /tmp/screamless /var/tmp/screamless /tmp /var/tmp; do
     fi
 done
 
-bash "$VALIDATOR" /usr/local/bin
+bash "$VALIDATOR" /usr
 bash "$VALIDATOR" /opt/screamless/new-bin
 if bash "$VALIDATOR" "$HOME/screamless-bin" >/dev/null 2>&1; then
     home_owner="$(stat -c '%u' "$HOME")"
