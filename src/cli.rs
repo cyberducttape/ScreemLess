@@ -405,10 +405,19 @@ fn infrastructure(db_path: &std::path::Path, servers: String, format: OutputForm
     let db = Database::new(db_path)?;
     let analyzer = Analyzer::new(&db);
 
+    let mut requested_hosts = std::collections::HashSet::new();
     let server_list: Vec<String> = servers
         .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+        .filter_map(|server| {
+            let server = server.trim();
+            if server.is_empty() {
+                return None;
+            }
+            let normalized = server.trim_end_matches('.').to_ascii_lowercase();
+            requested_hosts
+                .insert(normalized)
+                .then(|| server.to_string())
+        })
         .collect();
     let mut server_analyses = HashMap::new();
     let json_output = matches!(format, OutputFormat::Json);

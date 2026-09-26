@@ -19,7 +19,7 @@ fn infrastructure_json_is_stdout_only_and_uses_ordered_host_array() {
             db_path.to_str().unwrap(),
             "infrastructure",
             "--servers",
-            "node-a,node-b",
+            "node-a,node-b,NODE-A.,node-b",
             "--format",
             "json",
         ])
@@ -43,6 +43,14 @@ fn infrastructure_json_is_stdout_only_and_uses_ordered_host_array() {
     );
     let json: Value = serde_json::from_slice(&output.stdout).expect("stdout must be JSON only");
     assert_eq!(json["schema_version"], "1.0");
+    assert_eq!(json["servers_analyzed"], 2);
+    assert_eq!(
+        json["observation_window"]["hosts_requested"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
     assert_eq!(json["hosts"].as_array().unwrap().len(), 2);
     assert_eq!(json["hosts"][0]["hostname"], "node-a");
     assert_eq!(json["hosts"][1]["hostname"], "node-b");
