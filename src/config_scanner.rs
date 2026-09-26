@@ -10,6 +10,8 @@ use crate::models::{ConfigReference, ConfigScanAudit};
 pub struct ConfigScanner;
 
 const MAX_CONFIG_FILE_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_CONFIG_TREE_ENTRIES: usize = 20_000;
+const MAX_CONFIG_TREE_DEPTH: usize = 32;
 const MAX_AUDIT_ERRORS: usize = 100;
 const SCAN_ROOTS: &[&str] = &[
     "/etc/nginx",
@@ -788,17 +790,42 @@ impl ConfigScanner {
     }
 
     fn config_files_under(root: &Path) -> Result<Vec<PathBuf>> {
+        Self::config_files_under_with_limits(root, MAX_CONFIG_TREE_ENTRIES, MAX_CONFIG_TREE_DEPTH)
+    }
+
+    fn config_files_under_with_limits(
+        root: &Path,
+        max_entries: usize,
+        max_depth: usize,
+    ) -> Result<Vec<PathBuf>> {
         if !root.exists() {
             return Ok(Vec::new());
         }
 
         let mut files = Vec::new();
+        let mut entries_seen = 0;
         let boundary = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-        Self::collect_config_files(root, &boundary, &mut files)?;
+        Self::collect_config_files(
+            root,
+            &boundary,
+            &mut files,
+            &mut entries_seen,
+            0,
+            max_entries,
+            max_depth,
+        )?;
         Ok(files)
     }
 
-    fn collect_config_files(root: &Path, boundary: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+    fn collect_config_files(
+        root: &Path,
+        boundary: &Path,
+        files: &mut Vec<PathBuf>,
+        entries_seen: &mut usize,
+        depth: usize,
+        max_entries: usize,
+        max_depth: usize,
+    ) -> Result<()> {
         for entry in fs::read_dir(root)
             .with_context(|| format!("Unable to read config directory {}", root.display()))?
         {
@@ -807,8 +834,31 @@ impl ConfigScanner {
             })?;
             let path = entry.path();
             let file_type = entry.file_type()?;
+            *entries_seen = entries_seen.saturating_add(1);
+            if *entries_seen > max_entries {
+                anyhow::bail!(
+                    "Configuration tree at {} exceeded the {} entry scan limit",
+                    root.display(),
+                    max_entries
+                );
+            }
             if file_type.is_dir() {
-                Self::collect_config_files(&path, boundary, files)?;
+                if depth >= max_depth {
+                    anyhow::bail!(
+                        "Configuration tree at {} exceeded the {} directory depth limit",
+                        path.display(),
+                        max_depth
+                    );
+                }
+                Self::collect_config_files(
+                    &path,
+                    boundary,
+                    files,
+                    entries_seen,
+                    depth + 1,
+                    max_entries,
+                    max_depth,
+                )?;
             } else if file_type.is_file() || file_type.is_symlink() {
                 let canonical = path
                     .canonicalize()
@@ -1189,6 +1239,34 @@ mod tests {
 
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(outside).unwrap();
+    }
+
+    #[test]
+    fn config_tree_traversal_stops_at_entry_and_depth_budgets() {
+        let root = std::env::temp_dir().join(format!(
+            "screamless-config-tree-limits-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("one.conf"), "one").unwrap();
+        fs::write(root.join("two.conf"), "two").unwrap();
+        fs::write(root.join("three.conf"), "three").unwrap();
+
+        let entry_limit = ConfigScanner::config_files_under_with_limits(&root, 2, 32)
+            .unwrap_err()
+            .to_string();
+        assert!(entry_limit.contains("entry scan limit"));
+
+        let nested = root.join("level-one").join("level-two");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("deep.conf"), "deep").unwrap();
+        let depth_limit = ConfigScanner::config_files_under_with_limits(&root, 100, 1)
+            .unwrap_err()
+            .to_string();
+        assert!(depth_limit.contains("directory depth limit"));
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
