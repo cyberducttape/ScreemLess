@@ -10,6 +10,7 @@ type RemoteObservation = (DateTime<Utc>, HashSet<String>);
 type InboundDependencyGraph = (
     HashMap<String, Vec<InboundDependency>>,
     HashMap<String, BTreeSet<String>>,
+    HashMap<String, String>,
 );
 
 #[derive(Default)]
@@ -156,12 +157,15 @@ impl InboundGraphBuilder {
         }
     }
 
-    fn finish(
-        self,
-    ) -> (
-        HashMap<String, Vec<InboundDependency>>,
-        HashMap<String, BTreeSet<String>>,
-    ) {
+    fn finish(self) -> InboundDependencyGraph {
+        let endpoint_hostnames = self
+            .endpoint_targets
+            .into_iter()
+            .filter_map(|(endpoint, targets)| {
+                (endpoint.parse::<std::net::IpAddr>().is_ok() && targets.len() == 1)
+                    .then(|| (endpoint, targets.into_iter().next().unwrap()))
+            })
+            .collect();
         let inbound_graph = self
             .graph
             .into_iter()
@@ -225,7 +229,7 @@ impl InboundGraphBuilder {
                 (target, inbound)
             })
             .collect();
-        (inbound_graph, self.ambiguous_endpoints)
+        (inbound_graph, self.ambiguous_endpoints, endpoint_hostnames)
     }
 }
 
@@ -243,7 +247,7 @@ impl<'a> Analyzer<'a> {
         let since = now - Duration::hours(hours as i64);
         self.db
             .with_snapshot_window(since.timestamp_millis(), |window| {
-                let (inbound_graph, ambiguous_endpoints) =
+                let (inbound_graph, ambiguous_endpoints, endpoint_hostnames) =
                     Self::build_inbound_dependency_graph_from_window(window)?;
                 let snapshots = window.snapshots_for_host(hostname)?;
                 self.analyze_from_snapshots(
@@ -252,6 +256,7 @@ impl<'a> Analyzer<'a> {
                     snapshots,
                     &inbound_graph,
                     &ambiguous_endpoints,
+                    &endpoint_hostnames,
                 )
             })
     }
@@ -267,7 +272,7 @@ impl<'a> Analyzer<'a> {
         let since = Utc::now() - Duration::hours(hours as i64);
         self.db
             .with_snapshot_window(since.timestamp_millis(), |window| {
-                let (inbound_graph, ambiguous_endpoints) =
+                let (inbound_graph, ambiguous_endpoints, endpoint_hostnames) =
                     Self::build_inbound_dependency_graph_from_window(window)?;
                 let mut analyses = HashMap::with_capacity(hostnames.len());
                 for hostname in hostnames {
@@ -281,6 +286,7 @@ impl<'a> Analyzer<'a> {
                         snapshots,
                         &inbound_graph,
                         &ambiguous_endpoints,
+                        &endpoint_hostnames,
                     )?;
                     analyses.insert(hostname.clone(), analysis);
                 }
@@ -295,6 +301,7 @@ impl<'a> Analyzer<'a> {
         snapshots: Vec<ObservationSnapshot>,
         inbound_graph: &HashMap<String, Vec<InboundDependency>>,
         ambiguous_endpoints: &HashMap<String, BTreeSet<String>>,
+        endpoint_hostnames: &HashMap<String, String>,
     ) -> Result<AnalysisResult> {
         let now = Utc::now();
         let unresolved_for_host = ambiguous_endpoints
@@ -331,7 +338,7 @@ impl<'a> Analyzer<'a> {
         let last_snap = snapshots.last().unwrap();
         let host_identity = Self::merge_host_identity(&snapshots, hostname);
 
-        let dependencies = self.infer_dependencies(&snapshots)?;
+        let dependencies = self.infer_dependencies(&snapshots, endpoint_hostnames)?;
         let observed_processes = self.analyze_process_activity(&snapshots)?;
 
         let inbound_dependencies = inbound_graph
@@ -708,7 +715,12 @@ impl<'a> Analyzer<'a> {
     }
 
     #[cfg(test)]
-    fn build_inbound_dependency_graph(snapshots: &[ObservationSnapshot]) -> InboundDependencyGraph {
+    fn build_inbound_dependency_graph(
+        snapshots: &[ObservationSnapshot],
+    ) -> (
+        HashMap<String, Vec<InboundDependency>>,
+        HashMap<String, BTreeSet<String>>,
+    ) {
         #[derive(Default)]
         struct SourceEvidence {
             count: usize,
@@ -902,7 +914,11 @@ impl<'a> Analyzer<'a> {
         Ok(builder.finish())
     }
 
-    fn infer_dependencies(&self, snapshots: &[ObservationSnapshot]) -> Result<Vec<Dependency>> {
+    fn infer_dependencies(
+        &self,
+        snapshots: &[ObservationSnapshot],
+        ip_to_hostname: &HashMap<String, String>,
+    ) -> Result<Vec<Dependency>> {
         let mut remote_hosts: HashMap<RemoteDependencyKey, Vec<RemoteObservation>> = HashMap::new();
 
         for snapshot in snapshots {
@@ -939,8 +955,6 @@ impl<'a> Analyzer<'a> {
                 .or_insert_with(|| reference.clone());
         }
         let config_refs = unique_config_refs.into_values().collect::<Vec<_>>();
-        let ip_to_hostname = Self::build_ip_to_hostname_map(snapshots);
-
         let mut dependencies = Vec::new();
 
         for ((remote_addr, remote_port, protocol), observations) in remote_hosts {
@@ -1237,72 +1251,6 @@ impl<'a> Analyzer<'a> {
             _ => 69,
         };
         score.min(cap)
-    }
-
-    fn build_ip_to_hostname_map(snapshots: &[ObservationSnapshot]) -> HashMap<String, String> {
-        let mut aliases = HashMap::<String, HashSet<String>>::new();
-        let mut owners = HashMap::<String, HashSet<String>>::new();
-
-        for snapshot in snapshots {
-            let canonical = Self::normalize_hostname(&snapshot.hostname);
-            for name in [
-                snapshot.host_identity.hostname.as_str(),
-                snapshot.host_identity.fqdn.as_deref().unwrap_or_default(),
-                snapshot.host_identity.short_hostname.as_str(),
-            ]
-            .into_iter()
-            .chain(
-                snapshot
-                    .host_identity
-                    .dns_aliases
-                    .iter()
-                    .map(String::as_str),
-            ) {
-                let normalized = Self::normalize_hostname(name);
-                if normalized.is_empty() {
-                    continue;
-                }
-                aliases
-                    .entry(normalized)
-                    .or_default()
-                    .insert(canonical.clone());
-            }
-            aliases
-                .entry(canonical.clone())
-                .or_default()
-                .insert(canonical.clone());
-
-            for ip in Self::identity_addresses(&snapshot.host_identity) {
-                owners
-                    .entry(Self::normalize_endpoint_address(&ip))
-                    .or_default()
-                    .insert(canonical.clone());
-            }
-        }
-
-        for snapshot in snapshots {
-            for dns in &snapshot.dns_names {
-                let name = Self::normalize_hostname(&dns.hostname);
-                let dns_targets = aliases
-                    .get(&name)
-                    .cloned()
-                    .unwrap_or_else(|| [name].into_iter().collect());
-                for ip in &dns.ip_addresses {
-                    let address = Self::normalize_endpoint_address(ip);
-                    owners
-                        .entry(address)
-                        .or_default()
-                        .extend(dns_targets.iter().cloned());
-                }
-            }
-        }
-
-        owners
-            .into_iter()
-            .filter_map(|(ip, hosts)| {
-                (hosts.len() == 1).then(|| (ip, hosts.into_iter().next().unwrap()))
-            })
-            .collect()
     }
 
     fn identity_matches(identity: &HostIdentity, target: &str) -> bool {
@@ -2020,7 +1968,7 @@ mod tests {
         for snapshot in &snapshots {
             db.store_snapshot(snapshot).unwrap();
         }
-        let (graph, ambiguous) = db
+        let (graph, ambiguous, _) = db
             .with_snapshot_window(0, |window| {
                 Analyzer::build_inbound_dependency_graph_from_window(window)
             })
@@ -2166,7 +2114,7 @@ mod tests {
         builder.add_endpoint_snapshot(&source);
         builder.finish_endpoint_index();
         builder.add_connection_snapshot(&source);
-        let (graph, _) = builder.finish();
+        let (graph, _, _) = builder.finish();
 
         assert_eq!(graph["db01"].len(), 1);
         assert_eq!(graph["db01"][0].source_hostname.as_deref(), Some("web01"));
@@ -2211,7 +2159,7 @@ mod tests {
         }
         builder.finish_endpoint_index();
         builder.add_connection_snapshot(&client);
-        let (graph, ambiguous) = builder.finish();
+        let (graph, ambiguous, endpoint_hostnames) = builder.finish();
 
         assert!(!graph.contains_key("db01"));
         assert!(!graph.contains_key("db02"));
@@ -2219,9 +2167,7 @@ mod tests {
             .iter()
             .any(|note| note.contains("db01, db02")));
         assert!(ambiguous.contains_key("db02"));
-        assert!(
-            !Analyzer::build_ip_to_hostname_map(&[db01, db02, client]).contains_key("192.0.2.80")
-        );
+        assert!(!endpoint_hostnames.contains_key("192.0.2.80"));
     }
 
     #[test]
@@ -2256,7 +2202,7 @@ mod tests {
         builder.add_endpoint_snapshot(&source);
         builder.finish_endpoint_index();
         builder.add_connection_snapshot(&source);
-        let (graph, ambiguous) = builder.finish();
+        let (graph, ambiguous, _) = builder.finish();
 
         assert_eq!(graph["db01"].len(), 1);
         assert_eq!(
@@ -2281,12 +2227,34 @@ mod tests {
             ip_addresses: vec!["2001:0db8:0:0:0:0:0:40".to_string()],
             timestamp: now,
         });
+        source.network_connections.push(NetworkConnection {
+            local_addr: "2001:db8::10".to_string(),
+            local_port: 50_000,
+            remote_addr: "2001:0db8:0:0:0:0:0:40".to_string(),
+            remote_port: 5432,
+            protocol: "tcp".to_string(),
+            state: "ESTABLISHED".to_string(),
+            pid: 17,
+            process_name: "worker".to_string(),
+        });
 
-        let mappings = Analyzer::build_ip_to_hostname_map(&[target, source]);
+        let mut builder = InboundGraphBuilder::default();
+        builder.add_endpoint_snapshot(&target);
+        builder.add_endpoint_snapshot(&source);
+        builder.finish_endpoint_index();
+        let (_, _, mappings) = builder.finish();
         assert_eq!(
             mappings.get("2001:db8::40").map(String::as_str),
             Some("db01")
         );
+
+        let mut db = Database::new(":memory:").unwrap();
+        db.store_snapshot(&target).unwrap();
+        db.store_snapshot(&source).unwrap();
+        let analysis = Analyzer::new(&db).analyze("worker01", 1).unwrap();
+        assert_eq!(analysis.dependencies.len(), 1);
+        assert_eq!(analysis.dependencies[0].remote_addr, "2001:db8::40");
+        assert_eq!(analysis.dependencies[0].hostname.as_deref(), Some("db01"));
     }
 
     #[test]
