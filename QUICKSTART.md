@@ -2,6 +2,8 @@
 
 ## Installation
 
+The published-binary installer requires `cosign` so it can verify the release checksum signature. The explicit `--from-source` path requires Rust and Git.
+
 ```bash
 # Using install script (easiest)
 curl -fsSL https://raw.githubusercontent.com/cyberducttape/ScreemLess/v1.1.0/install.sh | bash

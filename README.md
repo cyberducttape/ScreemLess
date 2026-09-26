@@ -32,6 +32,7 @@ Most servers have **no documentation**. You inherit them. Nobody knows why they 
 
 ```bash
 # Install the published release (no Rust toolchain required)
+# The binary installer requires cosign to authenticate the signed release checksums.
 curl -fsSL https://raw.githubusercontent.com/cyberducttape/ScreemLess/v1.1.0/install.sh | bash
 
 # Or download a versioned artifact from GitHub Releases

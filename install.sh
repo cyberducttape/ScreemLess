@@ -9,6 +9,11 @@ REPO="https://github.com/cyberducttape/ScreemLess"
 RELEASE_BASE="$REPO/releases/download/v$VERSION"
 INSTALL_SERVICE="${INSTALL_SERVICE:-1}"
 
+if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+    echo "VERSION must be a semantic version (for example 1.1.0)" >&2
+    exit 3
+fi
+
 as_root() {
     if [[ "${EUID:-$(id -u)}" == 0 ]]; then
         "$@"
@@ -47,10 +52,21 @@ if ((FROM_SOURCE)); then
     BINARY="$BUILD_DIR/source/target/release/screamless"
 else
     command -v curl >/dev/null 2>&1 || { echo "curl is required" >&2; exit 1; }
+    command -v cosign >/dev/null 2>&1 || {
+        echo "cosign is required to authenticate release checksums; install cosign and retry" >&2
+        exit 1
+    }
     ARCHIVE="screamless-${VERSION}-linux-${ARTIFACT_ARCH}.tar.gz"
     curl --fail --location --silent --show-error "$RELEASE_BASE/$ARCHIVE" -o "$BUILD_DIR/$ARCHIVE"
     curl --fail --location --silent --show-error "$RELEASE_BASE/SHA256SUMS" -o "$BUILD_DIR/SHA256SUMS"
-    (cd "$BUILD_DIR" && grep "  $ARCHIVE$" SHA256SUMS | sha256sum --check -)
+    curl --fail --location --silent --show-error "$RELEASE_BASE/SHA256SUMS.sig" -o "$BUILD_DIR/SHA256SUMS.sig"
+    curl --fail --location --silent --show-error "$RELEASE_BASE/SHA256SUMS.pem" -o "$BUILD_DIR/SHA256SUMS.pem"
+    cosign verify-blob "$BUILD_DIR/SHA256SUMS" \
+        --signature "$BUILD_DIR/SHA256SUMS.sig" \
+        --certificate "$BUILD_DIR/SHA256SUMS.pem" \
+        --certificate-identity "https://github.com/cyberducttape/ScreemLess/.github/workflows/release.yml@refs/tags/v${VERSION}" \
+        --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
+    (cd "$BUILD_DIR" && awk -v file="$ARCHIVE" '$2 == file { print; count++ } END { exit count != 1 }' SHA256SUMS | sha256sum --check -)
     tar -xzf "$BUILD_DIR/$ARCHIVE" -C "$BUILD_DIR"
     BINARY="$BUILD_DIR/screamless-${VERSION}/screamless"
 fi
