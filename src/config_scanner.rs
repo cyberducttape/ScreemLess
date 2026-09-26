@@ -1182,11 +1182,17 @@ impl ConfigScanner {
         let content = Self::strip_comments(content, '#');
         let mut refs = Vec::new();
         let is_postgres = path.starts_with("/etc/postgresql");
+        let server_content = if is_postgres {
+            content
+        } else {
+            Self::mysql_server_group_content(&content)
+        };
         let default_port = if is_postgres { 5432 } else { 3306 };
         let port_re = Self::compiled_regex(DATABASE_PORT_REGEX);
         let port = port_re
-            .captures_iter(&content)
+            .captures_iter(&server_content)
             .filter_map(|capture| capture.get(1)?.as_str().parse::<u16>().ok())
+            .filter(|port| *port != 0)
             .last()
             .unwrap_or(default_port);
 
@@ -1196,7 +1202,7 @@ impl ConfigScanner {
             Self::compiled_regex(DATABASE_BIND_REGEX)
         };
 
-        for capture in address_re.captures_iter(&content) {
+        for capture in address_re.captures_iter(&server_content) {
             let Some(value) = capture.get(1) else {
                 continue;
             };
@@ -1240,6 +1246,29 @@ impl ConfigScanner {
         }
 
         Ok(refs)
+    }
+
+    fn mysql_server_group_content(content: &str) -> String {
+        let mut in_server_group = false;
+        let mut selected = String::new();
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if let Some(group) = trimmed
+                .strip_prefix('[')
+                .and_then(|group| group.strip_suffix(']'))
+            {
+                let group = group.trim().to_ascii_lowercase();
+                in_server_group = matches!(
+                    group.as_str(),
+                    "server" | "mysqld" | "mariadb" | "mariadbd" | "client-server"
+                ) || group.starts_with("mysqld-")
+                    || group.starts_with("mariadb-");
+            } else if in_server_group {
+                selected.push_str(line);
+                selected.push('\n');
+            }
+        }
+        selected
     }
 
     fn is_valid_hostname(s: &str) -> bool {
@@ -1927,10 +1956,23 @@ mod tests {
 
         let default_refs = ConfigScanner::parse_database_config(
             Path::new("/etc/mysql/my.cnf"),
-            "bind-address = 192.0.2.45\n",
+            "[mysqld]\nbind-address = 192.0.2.45\n",
         )
         .unwrap();
         assert_eq!(default_refs[0].port, Some(3306));
+    }
+
+    #[test]
+    fn mysql_client_options_do_not_override_server_listener_evidence() {
+        let refs = ConfigScanner::parse_database_config(
+            Path::new("/etc/mysql/my.cnf"),
+            "[mysqld]\nbind-address = 192.0.2.46\nport = 3307\n[client]\nport = 3308\n",
+        )
+        .unwrap();
+
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].hostname, "192.0.2.46");
+        assert_eq!(refs[0].port, Some(3307));
     }
 
     #[test]
