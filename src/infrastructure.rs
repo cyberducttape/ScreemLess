@@ -88,7 +88,7 @@ impl InfrastructureMapper {
                                 "Observed outbound {} connection to port {} ({} observation(s))",
                                 dependency.protocol,
                                 dependency.remote_port,
-                                dependency.connection_count
+                                dependency.observation_count
                             ),
                         }],
                         detection_methods: vec!["central_outbound_observation".to_string()],
@@ -286,7 +286,7 @@ mod tests {
             remote_addr: "10.0.0.2".to_string(),
             remote_port: 3306,
             protocol: "tcp".to_string(),
-            connection_count: 4,
+            observation_count: 4,
             first_seen: now,
             last_seen: now,
             processes: vec!["billing".to_string()],

@@ -555,7 +555,7 @@ mod tests {
                 remote_addr: "10.0.0.2".to_string(),
                 remote_port: 3306,
                 protocol: "tcp".to_string(),
-                connection_count: 3,
+                observation_count: 3,
                 first_seen: now,
                 last_seen: now,
                 processes: vec!["billing<arg>".to_string()],

@@ -378,7 +378,7 @@ impl<'a> Analyzer<'a> {
                 target,
                 port: dependency.remote_port,
                 protocol: dependency.protocol.clone(),
-                usage_observations: dependency.connection_count,
+                usage_observations: dependency.observation_count,
                 evidence: "Observed outbound connection".to_string(),
             };
             if database {
@@ -615,7 +615,7 @@ impl<'a> Analyzer<'a> {
         let mut dependencies = Vec::new();
 
         for ((remote_addr, remote_port, protocol), observations) in remote_hosts {
-            let connection_count = observations.len();
+            let observation_count = observations.len();
 
             let mut all_processes = HashSet::new();
             for (_ts, procs) in &observations {
@@ -627,20 +627,20 @@ impl<'a> Analyzer<'a> {
 
             let mut evidence = Vec::new();
 
-            if connection_count > 100 {
+            if observation_count > 100 {
                 evidence.push(Evidence {
                     level: EvidenceLevel::High,
-                    description: format!("{} observed connections", connection_count),
+                    description: format!("{} socket observations", observation_count),
                 });
-            } else if connection_count > 10 {
+            } else if observation_count > 10 {
                 evidence.push(Evidence {
                     level: EvidenceLevel::Med,
-                    description: format!("{} observed connections", connection_count),
+                    description: format!("{} socket observations", observation_count),
                 });
             } else {
                 evidence.push(Evidence {
                     level: EvidenceLevel::Low,
-                    description: format!("{} observed connections", connection_count),
+                    description: format!("{} socket observations", observation_count),
                 });
             }
 
@@ -688,7 +688,7 @@ impl<'a> Analyzer<'a> {
                 remote_addr,
                 remote_port,
                 protocol,
-                connection_count,
+                observation_count,
                 first_seen,
                 last_seen,
                 processes: all_processes.into_iter().collect(),
@@ -699,7 +699,7 @@ impl<'a> Analyzer<'a> {
             });
         }
 
-        dependencies.sort_by_key(|dependency| std::cmp::Reverse(dependency.connection_count));
+        dependencies.sort_by_key(|dependency| std::cmp::Reverse(dependency.observation_count));
         Ok(dependencies)
     }
 
@@ -791,12 +791,12 @@ impl<'a> Analyzer<'a> {
         }
 
         for dep in dependencies {
-            if dep.connection_count == 1 {
+            if dep.observation_count == 1 {
                 risks.push(RiskAssessment {
                     name: "One-time connection".to_string(),
                     severity: RiskSeverity::Info,
                     description: format!(
-                        "Connection to {}:{} observed only once",
+                        "Socket to {}:{} observed once (polling evidence)",
                         dep.remote_addr, dep.remote_port
                     ),
                     evidence: "Single observation of this connection in window".to_string(),

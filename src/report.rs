@@ -42,6 +42,9 @@ impl<'a> Reporter<'a> {
 
         self.print_probe_status(&analysis);
         self.print_observation_coverage(&analysis);
+        println!(
+            "NETWORK EVIDENCE: polling socket observations; short-lived connections may be missed\n"
+        );
 
         println!("DEPENDENCY GRAPH");
         println!("{}", GraphRenderer::render_ascii(&analysis, &hostname));
@@ -72,6 +75,11 @@ impl<'a> Reporter<'a> {
             },
             "snapshots": analysis.total_snapshots,
             "observation_coverage": analysis.coverage,
+            "network_evidence": {
+                "capture_mode": "polling",
+                "unit": "socket_observations",
+                "limitations": "Short-lived connections and datagrams may occur between polls; persistent sockets produce repeated observations."
+            },
             "dependencies": analysis.dependencies,
             "inbound_dependencies": analysis.inbound_dependencies,
             "inventory": analysis.inventory,
@@ -213,7 +221,7 @@ impl<'a> Reporter<'a> {
             println!("  Confidence: {}%", dep.confidence);
             println!(
                 "  Connections: {} (first: {}, last: {})",
-                dep.connection_count,
+                dep.observation_count,
                 dep.first_seen.format("%H:%M:%S"),
                 dep.last_seen.format("%H:%M:%S")
             );
@@ -496,10 +504,10 @@ impl<'a> Reporter<'a> {
 
         for dep in analysis.dependencies.iter().filter(|d| d.confidence >= 70) {
             println!(
-                "  • {}:{} - {} confirmed connections from {}",
+                "  • {}:{} - {} socket observations from {} (polling evidence)",
                 dep.remote_addr,
                 dep.remote_port,
-                dep.connection_count,
+                dep.observation_count,
                 dep.processes.join(", ")
             );
             any_blocking = true;

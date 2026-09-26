@@ -123,7 +123,7 @@ async fn snapshot(db_path: &std::path::Path) -> Result<()> {
         snapshot.listening_services.len()
     );
     println!(
-        "  Network connections: {}",
+        "  Socket observations: {}",
         snapshot.network_connections.len()
     );
     println!("  Processes: {}", snapshot.processes.len());
@@ -168,7 +168,7 @@ async fn observe(
                 )?;
 
                 println!(
-                    "[{}] Snapshot collected: {} services, {} connections",
+                    "[{}] Snapshot collected: {} services, {} socket observations",
                     chrono::Local::now().format("%H:%M:%S"),
                     snapshot.listening_services.len(),
                     snapshot.network_connections.len()

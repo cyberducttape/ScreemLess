@@ -57,7 +57,7 @@ cargo build --release
 Web server connects to:
   db01:3306           94% confidence (42 connections, nginx process, wp-config.php reference)
   redis01:6379        87% confidence (15 connections, php-fpm process)
-  api.vendor.com:443  61% confidence (2 observed connections; config evidence is supporting context)
+  api.vendor.com:443  61% confidence (2 socket observations; config evidence is supporting context)
 ```
 
 ### Inbound Dependencies  

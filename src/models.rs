@@ -187,7 +187,10 @@ pub struct Dependency {
     pub remote_addr: String,
     pub remote_port: u16,
     pub protocol: String,
-    pub connection_count: usize,
+    /// Number of socket observations, not a count of distinct connections.
+    /// Event-driven capture can later provide a separate connection/event count.
+    #[serde(rename = "observation_count", alias = "connection_count")]
+    pub observation_count: usize,
     pub first_seen: DateTime<Utc>,
     pub last_seen: DateTime<Utc>,
     pub processes: Vec<String>,
