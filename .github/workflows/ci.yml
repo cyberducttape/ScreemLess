@@ -44,6 +44,8 @@ jobs:
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
       - name: Run tests
+        env:
+          SCREAMLESS_REQUIRE_PACKAGE_METADATA_TEST: 1
         run: cargo test --locked --all-targets
 
       - name: Verify workload version probes are safe under root
@@ -76,7 +78,7 @@ jobs:
             env SCREAMLESS_REQUIRE_ROOT_TEST=1 "$test_binary" --exact \
             collector::tests::software_inventory_never_executes_the_observed_executable
           sudo -n setpriv --bounding-set=-all,+dac_read_search,+net_admin,+sys_ptrace \
-            "$test_binary" --exact \
+            env SCREAMLESS_REQUIRE_SOCKET_ATTRIBUTION=1 "$test_binary" --exact \
             collector::tests::live_loopback_tcp_connection_is_visible_to_socket_collector
 
       - name: Audit dependencies
