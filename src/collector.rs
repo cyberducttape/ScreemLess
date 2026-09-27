@@ -1284,39 +1284,50 @@ impl Collector {
             SOCKET_PROBE_OUTPUT_LIMIT,
         )
         .with_context(|| format!("Failed to run systemctl {operation}"))?;
-        let json_result = if json_output.status.success() {
-            parse_json(&json_output.stdout).context("JSON schema was unsupported")
-        } else {
-            Err(anyhow!(
-                "JSON mode exited with status {}",
-                json_output.status
-            ))
-        };
-        let json_error = match json_result {
-            Ok(parsed) => return Ok(parsed),
-            Err(error) => error,
-        };
-
-        let output = Self::run_bounded_command(
-            systemctl,
-            text_args,
-            INVENTORY_PROBE_TIMEOUT,
-            SOCKET_PROBE_OUTPUT_LIMIT,
+        Self::parse_systemctl_output_with_fallback(
+            &json_output.stdout,
+            json_output.status.success(),
+            operation,
+            parse_json,
+            || {
+                let output = Self::run_bounded_command(
+                    systemctl,
+                    text_args,
+                    INVENTORY_PROBE_TIMEOUT,
+                    SOCKET_PROBE_OUTPUT_LIMIT,
+                )
+                .with_context(|| format!("Failed to run systemctl {operation} text fallback"))?;
+                if !output.status.success() {
+                    return Err(anyhow!(
+                        "text fallback exited with status {}",
+                        output.status
+                    ));
+                }
+                parse_text(&output.stdout)
+            },
         )
-        .with_context(|| format!("Failed to run systemctl {operation} text fallback"))?;
-        if !output.status.success() {
-            return Err(anyhow!(
-                "systemctl {operation} failed in JSON mode ({}) and text mode (exit {})",
-                json_error,
-                output.status
-            ));
+    }
+
+    fn parse_systemctl_output_with_fallback<T>(
+        json_output: &[u8],
+        json_command_succeeded: bool,
+        operation: &str,
+        parse_json: fn(&[u8]) -> Result<T>,
+        text_fallback: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        let json_result = if json_command_succeeded {
+            parse_json(json_output).context("JSON schema was unsupported")
+        } else {
+            Err(anyhow!("JSON output mode is unsupported"))
+        };
+        match json_result {
+            Ok(parsed) => Ok(parsed),
+            Err(json_error) => text_fallback().with_context(|| {
+                format!(
+                    "Failed to collect systemctl {operation} in JSON and text modes; JSON error: {json_error}"
+                )
+            }),
         }
-        parse_text(&output.stdout).with_context(|| {
-            format!(
-                "Failed to parse systemctl {operation} text fallback after JSON failure: {}",
-                json_error
-            )
-        })
     }
 
     fn parse_systemd_timers_text(bytes: &[u8]) -> Result<Vec<SystemdTimer>> {
@@ -1738,6 +1749,41 @@ mod tests {
             Collector::parse_systemd_loaded_timer_states_text(b"broken.timer loaded\n").is_err()
         );
         assert!(Collector::parse_systemd_timer_unit_files_text(&[0xff]).is_err());
+    }
+
+    #[test]
+    fn systemd_fallback_runs_on_schema_mismatch_but_not_valid_json() {
+        let mut fallback_called = false;
+        let from_text = Collector::parse_systemctl_output_with_fallback(
+            br#"{"different_shape":[]}"#,
+            true,
+            "list-unit-files",
+            Collector::parse_systemd_timer_unit_files_json,
+            || {
+                fallback_called = true;
+                Collector::parse_systemd_timer_unit_files_text(include_bytes!(
+                    "../tests/fixtures/systemd/list-unit-files-v239.txt"
+                ))
+            },
+        )
+        .unwrap();
+        assert!(fallback_called);
+        assert_eq!(from_text.get("backup.timer"), Some(&Some(true)));
+
+        let mut fallback_called = false;
+        let from_json = Collector::parse_systemctl_output_with_fallback(
+            include_bytes!("../tests/fixtures/systemd/list-unit-files-v259.json"),
+            true,
+            "list-unit-files",
+            Collector::parse_systemd_timer_unit_files_json,
+            || {
+                fallback_called = true;
+                unreachable!("valid JSON must not run the text fallback")
+            },
+        )
+        .unwrap();
+        assert!(!fallback_called);
+        assert_eq!(from_json.get("hourly.timer"), Some(&Some(true)));
     }
 
     #[test]
