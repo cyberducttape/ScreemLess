@@ -4,6 +4,8 @@
 
 The published-binary installer requires `cosign` so it can verify the release checksum signature. The explicit `--from-source` path requires Rust and Git. When installing the systemd agent, a custom `INSTALL_DIR` must be under a root-owned directory tree that is not writable by group or other users; this prevents the root service from executing a user-replaceable binary. `/tmp` and `/var/tmp` are not valid service install locations. Use `--no-service` for a user-owned CLI installation without registering the root service.
 
+The systemd agent runs as root with a bounded capability set to inspect host-wide process, socket, and protected configuration state. This is still privileged host access; review [SECURITY.md](SECURITY.md) before deployment.
+
 ```bash
 # Using install script (easiest)
 curl -fsSL https://raw.githubusercontent.com/cyberducttape/ScreemLess/v1.1.0/install.sh | bash

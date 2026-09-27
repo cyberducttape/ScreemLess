@@ -13,6 +13,14 @@ Screamless enforces owner-only (`0600`) permissions for its SQLite database and
 generated dashboard files on Unix systems. Keep the containing directory
 restricted as well, and do not place these artifacts in a shared web root.
 
+The packaged systemd collector runs as root to inspect host-wide process and
+socket state and read protected configuration files. Its unit bounds Linux
+capabilities to `CAP_DAC_READ_SEARCH`, `CAP_NET_ADMIN`, and `CAP_SYS_PTRACE`,
+and enables systemd filesystem and device isolation. These capabilities still
+permit sensitive host inspection; install and run the agent only on systems
+where that access is authorized. The collector does not execute discovered
+workload binaries for software-version detection.
+
 The collector is local and polling-based. Missing privileges, failed probes,
 short-lived traffic, remote hosts, containers, and network namespaces can
 produce incomplete evidence. An incomplete probe is UNKNOWN, not evidence that

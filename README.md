@@ -60,6 +60,11 @@ prevents the root service from executing a user-replaceable binary. `/tmp` and
 `/var/tmp` are not valid service install locations; use `--no-service` for a
 user-owned CLI installation without registering the system service.
 
+The packaged agent runs as root with a bounded Linux capability set for
+host-wide process, socket, and protected-configuration inventory. This remains
+sensitive host access; review the [security policy](SECURITY.md) before
+deployment.
+
 The observer emits structured diagnostics to stderr. Set `RUST_LOG` to tune
 verbosity, for example `RUST_LOG=screamless=info` for journal-friendly run,
 snapshot, timing, and failure fields.
