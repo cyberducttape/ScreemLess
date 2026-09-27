@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Do not infer MySQL's default port for protocol-ambiguous `DB_HOST` or
+  `DATABASE_HOST` values; retain the endpoint with an unknown port unless its
+  protocol is explicit, and version the scanner accordingly.
 - Track interface-address collection as an explicit host-identity probe, include
   host identity in report JSON schema 2.1, and treat missing identity status in
   legacy records as unknown rather than complete.

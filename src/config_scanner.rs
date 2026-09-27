@@ -14,7 +14,7 @@ const MAX_CONFIG_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_CONFIG_TREE_ENTRIES: usize = 20_000;
 const MAX_CONFIG_TREE_DEPTH: usize = 32;
 const MAX_AUDIT_ERRORS: usize = 100;
-const SCANNER_VERSION: &str = "config-scanner/4";
+const SCANNER_VERSION: &str = "config-scanner/5";
 const DB_HOST_REGEX: &str = r#"(?mi)(DB_HOST|DATABASE_HOST|database\.host|mysql\.host|postgres\.host|POSTGRES_HOST|DATABASES.*host)\s*[=:]\s*["']?([^\s;,"'\n}]+)"#;
 const REDIS_HOST_REGEX: &str =
     r#"(?mi)(?:REDIS_HOST|CACHE_URL|redis\.host|cache\.redis)\s*[=:]\s*["']?([^\s;,"'\n}]+)"#;
@@ -792,7 +792,7 @@ impl ConfigScanner {
         let key = key.to_ascii_lowercase();
         if key.contains("postgres") {
             Some(5432)
-        } else if key.contains("mysql") || key == "db_host" || key == "database_host" {
+        } else if key.contains("mysql") {
             Some(3306)
         } else {
             None
@@ -1461,7 +1461,7 @@ mod tests {
 
     #[test]
     fn scanner_version_identifies_current_database_discovery_rules() {
-        assert_eq!(SCANNER_VERSION, "config-scanner/4");
+        assert_eq!(SCANNER_VERSION, "config-scanner/5");
     }
 
     #[test]
@@ -1946,6 +1946,35 @@ mod tests {
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].hostname, "db01.internal");
         assert_eq!(refs[0].port, Some(5432));
+    }
+
+    #[test]
+    fn generic_database_host_does_not_assume_mysql_port() {
+        for setting in ["DB_HOST", "DATABASE_HOST"] {
+            let refs = ConfigScanner::parse_app_config(
+                Path::new("/tmp/config.env"),
+                &format!("{setting}=db01.internal\n"),
+            )
+            .unwrap();
+
+            assert_eq!(refs.len(), 1, "{setting} should retain host evidence");
+            assert_eq!(refs[0].hostname, "db01.internal");
+            assert_eq!(refs[0].port, None, "{setting} is protocol-ambiguous");
+        }
+    }
+
+    #[test]
+    fn protocol_specific_database_host_keys_get_protocol_defaults() {
+        for (setting, expected_port) in [("MYSQL_HOST", 3306), ("POSTGRES_HOST", 5432)] {
+            let refs = ConfigScanner::parse_env_file(
+                Path::new("/tmp/config.env"),
+                &format!("{setting}=db01.internal\n"),
+            )
+            .unwrap();
+
+            assert_eq!(refs.len(), 1, "{setting} should be recognized");
+            assert_eq!(refs[0].port, Some(expected_port));
+        }
     }
 
     #[test]
