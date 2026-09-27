@@ -1804,9 +1804,7 @@ mod tests {
             true,
             "list-unit-files",
             Collector::parse_systemd_timer_unit_files_json,
-            || {
-                unreachable!("valid JSON must not run the text fallback")
-            },
+            || unreachable!("valid JSON must not run the text fallback"),
         )
         .unwrap();
         assert_eq!(from_json.get("hourly.timer"), Some(&Some(true)));
