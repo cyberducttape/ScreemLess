@@ -21,7 +21,14 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let args = cli::Args::parse();
+    let args = match cli::Args::try_parse() {
+        Ok(args) => args,
+        Err(error) => {
+            let exit_code = cli::parse_error_exit_code(&error);
+            let _ = error.print();
+            std::process::exit(exit_code as i32);
+        }
+    };
     match cli::run(args).await {
         Ok(()) => Ok(()),
         Err(error) => {

@@ -21,6 +21,8 @@
 - Refuse SQLite database paths whose final component is a symbolic link, so a
   privileged collector cannot be redirected to an unintended database target.
 - Run an end-to-end dashboard drag regression test in Chromium and Firefox in CI.
+- Map Clap syntax errors to the documented invalid-invocation exit code and align
+  QUICKSTART's automation code table.
 - Build and inspect Debian/RPM package artifacts in regular CI, not only release jobs.
 - Parse complete sanitized `ss` and `netstat` output fixtures, covering IPv4,
   IPv6, process attribution, listeners, UDP, and normal tool headers.

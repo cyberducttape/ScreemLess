@@ -128,10 +128,11 @@ Observation uses periodic TCP/UDP polling, so very short-lived network activity 
 - screamless preflight --server app01 --operation update
 ```
 Exit codes:
-- `0` = safe
-- `1` = unsafe (blocks merge)
-- `2` = insufficient evidence
-- `3` = invalid invocation
+- `0` = evidence supports the operation
+- `1` = internal failure
+- `2` = evidence identifies an operation-specific blocker
+- `3` = invalid invocation (including CLI parse errors)
+- `4` = insufficient or unknown evidence
 
 Use `--json` for a stable machine-readable result:
 

@@ -32,6 +32,16 @@ pub struct Args {
     pub db: PathBuf,
 }
 
+/// Keep Clap's help/version success behavior, but map parse failures to the
+/// documented automation code for invalid invocations.
+pub fn parse_error_exit_code(error: &clap::Error) -> u8 {
+    if error.use_stderr() {
+        3
+    } else {
+        0
+    }
+}
+
 #[derive(Subcommand)]
 pub enum Command {
     /// Start observing a server
