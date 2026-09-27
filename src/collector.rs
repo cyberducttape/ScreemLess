@@ -2033,16 +2033,12 @@ mod tests {
 
     #[test]
     fn software_versions_come_from_trusted_package_metadata() {
-        if Collector::trusted_command_path("dpkg-query").is_none()
-            && Collector::trusted_command_path("rpm").is_none()
-        {
-            return;
-        }
-
-        let executable = Collector::trusted_command_path("hostname")
-            .expect("hostname should be installed on Linux CI");
+        let executable = ["dpkg-query", "rpm"]
+            .into_iter()
+            .find_map(Collector::trusted_command_path)
+            .expect("a supported package manager should be installed on Linux CI");
         let (version, source) = Collector::package_version(&executable)
-            .expect("the hostname executable should have package metadata");
+            .expect("the package manager executable should have package metadata");
 
         assert!(!version.trim().is_empty());
         assert!(matches!(
