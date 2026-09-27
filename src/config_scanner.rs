@@ -2000,4 +2000,63 @@ mod tests {
             true
         ));
     }
+
+    #[test]
+    fn text_parsers_survive_deterministic_adversarial_configuration_inputs() {
+        let tokens = [
+            "server {",
+            "listen ",
+            "proxy_pass ",
+            "upstream backend {",
+            "server_name ",
+            "root ",
+            "DB_HOST=",
+            "listen_addresses = ",
+            "[mysqld]\n",
+            "port = ",
+            "http://",
+            "unix:/",
+            "[2001:db8::1]:",
+            "# commented proxy_pass ",
+            "}\n",
+            "'\";:{}[],:\\\n",
+        ];
+        let paths = [
+            Path::new("/tmp/nginx.conf"),
+            Path::new("/tmp/apache.conf"),
+            Path::new("/tmp/haproxy.cfg"),
+            Path::new("/tmp/traefik.yaml"),
+            Path::new("/tmp/Caddyfile"),
+            Path::new("/tmp/php.ini"),
+            Path::new("/tmp/app.env"),
+            Path::new("/etc/postgresql/17/main/postgresql.conf"),
+            Path::new("/etc/mysql/my.cnf"),
+        ];
+        let mut seed = 0x9e37_79b9u32;
+
+        for _ in 0..512 {
+            let mut content = String::new();
+            for _ in 0..32 {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                content.push_str(tokens[(seed as usize) % tokens.len()]);
+                if seed & 7 == 0 {
+                    content.push(char::from((seed >> 8) as u8));
+                }
+            }
+
+            let _ = ConfigScanner::parse_nginx_config(paths[0], &content);
+            let _ = ConfigScanner::parse_apache_config(paths[1], &content);
+            let _ = ConfigScanner::parse_haproxy_config(paths[2], &content);
+            let _ = ConfigScanner::parse_traefik_config(paths[3], &content);
+            let _ = ConfigScanner::parse_caddy_config(paths[4], &content);
+            let _ = ConfigScanner::parse_php_config(paths[5], &content);
+            let _ = ConfigScanner::parse_app_config(paths[6], &content);
+            let _ = ConfigScanner::parse_env_file(paths[6], &content);
+            let _ = ConfigScanner::parse_database_config(paths[7], &content);
+            let _ = ConfigScanner::parse_database_config(paths[8], &content);
+            let _ = ConfigScanner::parse_endpoint(&content, None);
+        }
+    }
 }
