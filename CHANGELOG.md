@@ -28,6 +28,8 @@
   catch panics and brittle assumptions without nondeterministic fuzz tests.
 - Inventory installed systemd timer units as well as scheduled timers and
   merge enabled/active state only when systemd reports it.
+- Fall back to locale-stable systemctl text output when older systemd releases
+  do not support JSON output, with versioned fixtures for both formats.
 - Preserve recognized software processes in inventory when `/proc/PID/exe`
   cannot be read, marking the version unavailable instead of omitting evidence.
 - Apply Nginx's default HTTP port to server blocks without `listen` directives

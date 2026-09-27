@@ -380,6 +380,8 @@ impl Collector {
         let mut command = Command::new(executable);
         command
             .args(args)
+            .env("LC_ALL", "C")
+            .env("LANG", "C")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -1208,20 +1210,33 @@ impl Collector {
     }
 
     fn collect_systemd_timers() -> Result<Vec<SystemdTimer>> {
-        let scheduled = Self::run_systemctl_json(
+        let (scheduled, scheduled_is_json) = Self::run_systemctl_output(
             &["list-timers", "--all", "--no-pager", "--output=json"],
+            &[
+                "list-timers",
+                "--all",
+                "--no-pager",
+                "--no-legend",
+                "--plain",
+            ],
             "list-timers",
         )?;
-        let unit_files = Self::run_systemctl_json(
+        let (unit_files, unit_files_are_json) = Self::run_systemctl_output(
             &[
                 "list-unit-files",
                 "--type=timer",
                 "--no-pager",
                 "--output=json",
             ],
+            &[
+                "list-unit-files",
+                "--type=timer",
+                "--no-pager",
+                "--no-legend",
+            ],
             "list-unit-files",
         )?;
-        let loaded_units = Self::run_systemctl_json(
+        let (loaded_units, loaded_units_are_json) = Self::run_systemctl_output(
             &[
                 "list-units",
                 "--all",
@@ -1229,15 +1244,35 @@ impl Collector {
                 "--no-pager",
                 "--output=json",
             ],
+            &[
+                "list-units",
+                "--all",
+                "--type=timer",
+                "--no-pager",
+                "--no-legend",
+                "--plain",
+            ],
             "list-units",
         )?;
 
-        let scheduled = Self::parse_systemd_timers_json(&scheduled)
-            .context("Failed to parse systemd timer schedule inventory")?;
-        let unit_files = Self::parse_systemd_timer_unit_files_json(&unit_files)
-            .context("Failed to parse systemd timer unit-file states")?;
-        let loaded_units = Self::parse_systemd_loaded_timer_states_json(&loaded_units)
-            .context("Failed to parse systemd loaded timer states")?;
+        let scheduled = if scheduled_is_json {
+            Self::parse_systemd_timers_json(&scheduled)
+        } else {
+            Self::parse_systemd_timers_text(&scheduled)
+        }
+        .context("Failed to parse systemd timer schedule inventory")?;
+        let unit_files = if unit_files_are_json {
+            Self::parse_systemd_timer_unit_files_json(&unit_files)
+        } else {
+            Self::parse_systemd_timer_unit_files_text(&unit_files)
+        }
+        .context("Failed to parse systemd timer unit-file states")?;
+        let loaded_units = if loaded_units_are_json {
+            Self::parse_systemd_loaded_timer_states_json(&loaded_units)
+        } else {
+            Self::parse_systemd_loaded_timer_states_text(&loaded_units)
+        }
+        .context("Failed to parse systemd loaded timer states")?;
         Ok(Self::merge_systemd_timer_inventory(
             scheduled,
             unit_files,
@@ -1245,20 +1280,110 @@ impl Collector {
         ))
     }
 
-    fn run_systemctl_json(args: &[&str], operation: &str) -> Result<Vec<u8>> {
+    fn run_systemctl_output(
+        json_args: &[&str],
+        text_args: &[&str],
+        operation: &str,
+    ) -> Result<(Vec<u8>, bool)> {
         let systemctl = Self::trusted_command_path("systemctl")
             .ok_or_else(|| anyhow!("No trusted systemctl utility found"))?;
         let output = Self::run_bounded_command(
-            systemctl,
-            args,
+            systemctl.clone(),
+            json_args,
             INVENTORY_PROBE_TIMEOUT,
             SOCKET_PROBE_OUTPUT_LIMIT,
         )
         .with_context(|| format!("Failed to run systemctl {operation}"))?;
+        if output.status.success()
+            && serde_json::from_slice::<serde_json::Value>(&output.stdout).is_ok()
+        {
+            return Ok((output.stdout, true));
+        }
+
+        let output = Self::run_bounded_command(
+            systemctl,
+            text_args,
+            INVENTORY_PROBE_TIMEOUT,
+            SOCKET_PROBE_OUTPUT_LIMIT,
+        )
+        .with_context(|| format!("Failed to run systemctl {operation} text fallback"))?;
         if !output.status.success() {
             return Err(anyhow!("systemctl {operation} exited unsuccessfully"));
         }
-        Ok(output.stdout)
+        Ok((output.stdout, false))
+    }
+
+    fn parse_systemd_timers_text(bytes: &[u8]) -> Result<Vec<SystemdTimer>> {
+        let output = std::str::from_utf8(bytes).context("systemd timer output was not UTF-8")?;
+        let mut timers = BTreeMap::new();
+        for (line_number, line) in output.lines().enumerate() {
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            let Some(unit) = fields
+                .iter()
+                .find(|field| Self::systemd_timer_name(field).is_some())
+            else {
+                continue;
+            };
+            let name = Self::systemd_timer_name(unit)
+                .ok_or_else(|| anyhow!("invalid timer unit on line {}", line_number + 1))?;
+            timers
+                .entry((*unit).to_string())
+                .or_insert_with(|| SystemdTimer {
+                    name: name.to_string(),
+                    unit: (*unit).to_string(),
+                    enabled: None,
+                    active: None,
+                });
+        }
+        Ok(timers.into_values().collect())
+    }
+
+    fn parse_systemd_timer_unit_files_text(bytes: &[u8]) -> Result<BTreeMap<String, Option<bool>>> {
+        let output =
+            std::str::from_utf8(bytes).context("systemd unit-file output was not UTF-8")?;
+        let mut unit_files = BTreeMap::new();
+        for (line_number, line) in output.lines().enumerate() {
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            if fields.is_empty() {
+                continue;
+            }
+            if Self::systemd_timer_name(fields[0]).is_none() {
+                continue;
+            }
+            let state = fields
+                .get(1)
+                .ok_or_else(|| anyhow!("unit-file row {} has no state", line_number + 1))?;
+            let enabled = match *state {
+                "enabled" | "enabled-runtime" => Some(true),
+                "disabled" | "masked" | "masked-runtime" => Some(false),
+                _ => None,
+            };
+            unit_files.insert(fields[0].to_string(), enabled);
+        }
+        Ok(unit_files)
+    }
+
+    fn parse_systemd_loaded_timer_states_text(
+        bytes: &[u8],
+    ) -> Result<BTreeMap<String, Option<bool>>> {
+        let output = std::str::from_utf8(bytes).context("systemd unit output was not UTF-8")?;
+        let mut loaded = BTreeMap::new();
+        for (line_number, line) in output.lines().enumerate() {
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            if fields.is_empty() || Self::systemd_timer_name(fields[0]).is_none() {
+                continue;
+            }
+            let active = fields.get(2).ok_or_else(|| {
+                anyhow!("loaded-unit row {} has no active state", line_number + 1)
+            })?;
+            let active = match *active {
+                "active" => Some(true),
+                "inactive" => Some(false),
+                _ => None,
+            };
+            loaded.insert(fields[0].to_string(), active);
+        }
+        Ok(loaded)
     }
 
     fn parse_systemd_timers_json(bytes: &[u8]) -> Result<Vec<SystemdTimer>> {
@@ -1571,6 +1696,42 @@ mod tests {
         assert_eq!(timer("failed").active, None);
         assert_eq!(timer("transient").enabled, None);
         assert_eq!(timer("transient").active, Some(false));
+    }
+
+    #[test]
+    fn systemd_v239_text_output_preserves_timer_inventory_and_states() {
+        let scheduled = Collector::parse_systemd_timers_text(include_bytes!(
+            "../tests/fixtures/systemd/list-timers-v239.txt"
+        ))
+        .unwrap();
+        let unit_files = Collector::parse_systemd_timer_unit_files_text(include_bytes!(
+            "../tests/fixtures/systemd/list-unit-files-v239.txt"
+        ))
+        .unwrap();
+        let loaded_units = Collector::parse_systemd_loaded_timer_states_text(include_bytes!(
+            "../tests/fixtures/systemd/list-units-v239.txt"
+        ))
+        .unwrap();
+        let timers = Collector::merge_systemd_timer_inventory(scheduled, unit_files, loaded_units);
+        let timer = |name: &str| timers.iter().find(|timer| timer.name == name).unwrap();
+
+        assert_eq!(timers.len(), 5);
+        assert_eq!(timer("backup").enabled, Some(true));
+        assert_eq!(timer("backup").active, Some(true));
+        assert_eq!(timer("disabled").enabled, Some(false));
+        assert_eq!(timer("cleanup").enabled, Some(false));
+        assert_eq!(timer("cleanup").active, Some(false));
+        assert_eq!(timer("generated").enabled, None);
+        assert_eq!(timer("failed").active, None);
+    }
+
+    #[test]
+    fn systemd_text_parsers_reject_malformed_timer_rows() {
+        assert!(Collector::parse_systemd_timer_unit_files_text(b"broken.timer\n").is_err());
+        assert!(
+            Collector::parse_systemd_loaded_timer_states_text(b"broken.timer loaded\n").is_err()
+        );
+        assert!(Collector::parse_systemd_timer_unit_files_text(&[0xff]).is_err());
     }
 
     #[test]
