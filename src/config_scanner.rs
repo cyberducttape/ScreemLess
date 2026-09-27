@@ -14,7 +14,7 @@ const MAX_CONFIG_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_CONFIG_TREE_ENTRIES: usize = 20_000;
 const MAX_CONFIG_TREE_DEPTH: usize = 32;
 const MAX_AUDIT_ERRORS: usize = 100;
-const SCANNER_VERSION: &str = "config-scanner/8";
+const SCANNER_VERSION: &str = "config-scanner/9";
 const DB_HOST_REGEX: &str = r#"(?mi)(DB_HOST|DATABASE_HOST|database\.host|mysql\.host|postgres\.host|POSTGRES_HOST|DATABASES.*host)\s*[=:]\s*["']?([^\s;,"'\n}]+)"#;
 const REDIS_HOST_REGEX: &str =
     r#"(?mi)(?:REDIS_HOST|CACHE_URL|redis\.host|cache\.redis)\s*[=:]\s*["']?([^\s;,"'\n}]+)"#;
@@ -293,8 +293,7 @@ impl ConfigScanner {
             let mut ports = listen_re
                 .captures_iter(&directives)
                 .filter_map(|capture| capture.get(1))
-                .filter_map(|value| value.as_str().split_whitespace().next())
-                .filter_map(|value| Self::parse_port(value.rsplit(':').next().unwrap_or(value)))
+                .filter_map(|value| Self::nginx_listen_port(value.as_str()))
                 .collect::<Vec<_>>();
             // Nginx HTTP server blocks default to port 80 when no listen
             // directive is present. Preserve that port so virtual hosts using
@@ -375,6 +374,19 @@ impl ConfigScanner {
         }
 
         Ok(refs)
+    }
+
+    fn nginx_listen_port(value: &str) -> Option<u16> {
+        let address = value.split_whitespace().next()?;
+        if let Some(port) = Self::parse_port(address) {
+            return Some(port);
+        }
+        if let Some((host, port)) = address.rsplit_once(':') {
+            if host == "*" {
+                return Self::parse_port(port);
+            }
+        }
+        Self::parse_endpoint(address, None).and_then(|(_, port)| port)
     }
 
     fn nginx_server_blocks(content: &str) -> Result<Vec<&str>> {
@@ -1489,7 +1501,7 @@ mod tests {
 
     #[test]
     fn scanner_version_identifies_current_database_discovery_rules() {
-        assert_eq!(SCANNER_VERSION, "config-scanner/8");
+        assert_eq!(SCANNER_VERSION, "config-scanner/9");
     }
 
     #[test]
@@ -1680,6 +1692,31 @@ mod tests {
             .find(|reference| reference.hostname == "default.example.com")
             .expect("nginx site should be detected");
         assert!(site.context.contains("ports=80"));
+    }
+
+    #[test]
+    fn nginx_listen_parser_handles_ipv6_and_bare_ports() {
+        let refs = ConfigScanner::parse_nginx_config(
+            Path::new("/etc/nginx/conf.d/ipv6.conf"),
+            concat!(
+                "server { listen [::]:8443 ssl; server_name v6.example.com; }\n",
+                "server { listen 8080 default_server; server_name bare.example.com; }\n",
+                "server { listen *:9000; server_name wildcard.example.com; }\n",
+            ),
+        )
+        .unwrap();
+
+        for (hostname, port) in [
+            ("v6.example.com", "8443"),
+            ("bare.example.com", "8080"),
+            ("wildcard.example.com", "9000"),
+        ] {
+            let site = refs
+                .iter()
+                .find(|reference| reference.hostname == hostname)
+                .expect("Nginx virtual host should be discovered");
+            assert!(site.context.contains(&format!("ports={port}")));
+        }
     }
 
     #[test]
