@@ -1786,6 +1786,44 @@ mod tests {
         assert_eq!(from_json.get("hourly.timer"), Some(&Some(true)));
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn live_loopback_tcp_connection_is_visible_to_socket_collector() {
+        use std::net::{TcpListener, TcpStream};
+        use std::sync::mpsc;
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (accepted_tx, accepted_rx) = mpsc::channel();
+        let accept_thread = std::thread::spawn(move || {
+            let (connection, _) = listener.accept().unwrap();
+            accepted_tx.send(connection).unwrap();
+        });
+        let client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let server = accepted_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("loopback accept should complete");
+
+        let pid = std::process::id();
+        let process = HashMap::from([(
+            pid,
+            ("screamless-test".to_string(), 0, "test-user".to_string()),
+        )]);
+        let (connections, _, _) = Collector::collect_network_connections(&process).unwrap();
+        assert!(
+            connections.iter().any(|connection| {
+                connection.protocol == "tcp"
+                    && connection.state == "ESTABLISHED"
+                    && (connection.local_port == port || connection.remote_port == port)
+            }),
+            "active loopback connection on port {port} was missing from socket observation"
+        );
+
+        drop(client);
+        drop(server);
+        accept_thread.join().unwrap();
+    }
+
     #[test]
     fn systemd_state_parsers_reject_wrong_unit_types_and_bad_json() {
         assert!(Collector::parse_systemd_timer_unit_files_json(

@@ -24,6 +24,8 @@
 - Build and inspect Debian/RPM package artifacts in regular CI, not only release jobs.
 - Parse complete sanitized `ss` and `netstat` output fixtures, covering IPv4,
   IPv6, process attribution, listeners, UDP, and normal tool headers.
+- Verify the live socket collector observes an active loopback TCP connection,
+  exercising the host utility invocation in addition to parser-only fixtures.
 - Exercise config parsers against a deterministic adversarial text corpus to
   catch panics and brittle assumptions without nondeterministic fuzz tests.
 - Inventory installed systemd timer units as well as scheduled timers and
