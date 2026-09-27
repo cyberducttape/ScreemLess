@@ -14,7 +14,7 @@ const MAX_CONFIG_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_CONFIG_TREE_ENTRIES: usize = 20_000;
 const MAX_CONFIG_TREE_DEPTH: usize = 32;
 const MAX_AUDIT_ERRORS: usize = 100;
-const SCANNER_VERSION: &str = "config-scanner/6";
+const SCANNER_VERSION: &str = "config-scanner/7";
 const DB_HOST_REGEX: &str = r#"(?mi)(DB_HOST|DATABASE_HOST|database\.host|mysql\.host|postgres\.host|POSTGRES_HOST|DATABASES.*host)\s*[=:]\s*["']?([^\s;,"'\n}]+)"#;
 const REDIS_HOST_REGEX: &str =
     r#"(?mi)(?:REDIS_HOST|CACHE_URL|redis\.host|cache\.redis)\s*[=:]\s*["']?([^\s;,"'\n}]+)"#;
@@ -838,21 +838,26 @@ impl ConfigScanner {
         for caps in listen_re.captures_iter(&content) {
             if let Some(addr) = caps.get(1) {
                 let addr_str = addr.as_str();
-                if addr_str.contains(':') && !addr_str.starts_with('/') {
-                    if let Some(colon_pos) = addr_str.rfind(':') {
-                        let hostname = addr_str[..colon_pos].to_string();
-                        let port = Self::parse_port(&addr_str[colon_pos + 1..]);
-
-                        if Self::is_valid_hostname(&hostname) && hostname != "127.0.0.1" {
-                            refs.push(ConfigReference {
-                                file_path: path.display().to_string(),
-                                hostname,
-                                port,
-                                context: "PHP-FPM listen".to_string(),
-                                config_line: None,
-                            });
-                        }
-                    }
+                let Some((hostname, Some(port))) = Self::parse_endpoint(addr_str, None) else {
+                    continue;
+                };
+                let local_or_wildcard = hostname
+                    .parse::<std::net::IpAddr>()
+                    .map(|ip| ip.is_loopback() || ip.is_unspecified())
+                    .unwrap_or_else(|_| {
+                        matches!(
+                            hostname.to_ascii_lowercase().as_str(),
+                            "localhost" | "localhost.localdomain"
+                        )
+                    });
+                if !local_or_wildcard {
+                    refs.push(ConfigReference {
+                        file_path: path.display().to_string(),
+                        hostname,
+                        port: Some(port),
+                        context: "PHP-FPM listen".to_string(),
+                        config_line: None,
+                    });
                 }
             }
         }
@@ -1461,7 +1466,7 @@ mod tests {
 
     #[test]
     fn scanner_version_identifies_current_database_discovery_rules() {
-        assert_eq!(SCANNER_VERSION, "config-scanner/6");
+        assert_eq!(SCANNER_VERSION, "config-scanner/7");
     }
 
     #[test]
@@ -1979,6 +1984,32 @@ mod tests {
             assert_eq!(refs.len(), 1, "{setting} should be recognized");
             assert_eq!(refs[0].port, Some(expected_port));
         }
+    }
+
+    #[test]
+    fn php_fpm_listener_parsing_supports_ipv6_and_ignores_local_binds() {
+        let refs = ConfigScanner::parse_php_config(
+            Path::new("/etc/php/8.3/fpm/pool.d/www.conf"),
+            concat!(
+                "listen = [2001:db8::20]:9000\n",
+                "listen = 192.0.2.20:9001\n",
+                "listen = [::]:9002\n",
+                "listen = [::1]:9003\n",
+                "listen = 127.0.0.1:9004\n",
+                "listen = localhost:9005\n",
+                "listen = 9006\n",
+                "listen = /run/php/php-fpm.sock\n",
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(refs.len(), 2);
+        assert!(refs.iter().any(|reference| {
+            reference.hostname == "2001:db8::20" && reference.port == Some(9000)
+        }));
+        assert!(refs.iter().any(|reference| {
+            reference.hostname == "192.0.2.20" && reference.port == Some(9001)
+        }));
     }
 
     #[test]
