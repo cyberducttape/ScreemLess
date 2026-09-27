@@ -547,24 +547,32 @@ impl Collector {
 
     fn interface_addresses() -> (Vec<String>, ProbeStatus) {
         if let Some(output) = Self::command_text("ip", &["-j", "-o", "address", "show"]) {
-            if let Ok(interfaces) = serde_json::from_str::<serde_json::Value>(&output) {
-                let addresses = interfaces
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .flat_map(|interface| interface.get("addr_info"))
-                    .filter_map(|value| value.as_array())
-                    .flatten()
-                    .filter_map(|address| address.get("local").and_then(|value| value.as_str()))
-                    .map(str::to_string)
-                    .collect::<Vec<_>>();
-                if !addresses.is_empty() {
-                    return (addresses, ProbeStatus::complete());
-                }
+            if let Some(addresses) = Self::parse_interface_addresses_json(&output) {
+                return (addresses, ProbeStatus::complete());
             }
         }
 
-        match Self::command_text("hostname", &["-I"]) {
+        let hostname_output = Self::command_text("hostname", &["-I"]);
+        Self::parse_hostname_interface_addresses(hostname_output.as_deref())
+    }
+
+    fn parse_interface_addresses_json(output: &str) -> Option<Vec<String>> {
+        let interfaces = serde_json::from_str::<serde_json::Value>(output).ok()?;
+        let addresses = interfaces
+            .as_array()?
+            .iter()
+            .flat_map(|interface| interface.get("addr_info"))
+            .filter_map(|value| value.as_array())
+            .flatten()
+            .filter_map(|address| address.get("local").and_then(|value| value.as_str()))
+            .filter(|address| address.parse::<std::net::IpAddr>().is_ok())
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        (!addresses.is_empty()).then_some(addresses)
+    }
+
+    fn parse_hostname_interface_addresses(output: Option<&str>) -> (Vec<String>, ProbeStatus) {
+        match output {
             Some(value) => {
                 let addresses = value
                     .split_whitespace()
@@ -1914,6 +1922,40 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("unavailable"));
+    }
+
+    #[test]
+    fn parses_interface_addresses_and_rejects_malformed_values() {
+        let addresses = Collector::parse_interface_addresses_json(
+            r#"[
+                {"ifname":"eth0","addr_info":[
+                    {"family":"inet","local":"192.0.2.10"},
+                    {"family":"inet6","local":"2001:db8::10"},
+                    {"family":"inet","local":"not-an-ip"}
+                ]}
+            ]"#,
+        )
+        .unwrap();
+        assert_eq!(addresses, vec!["192.0.2.10", "2001:db8::10"]);
+        assert!(Collector::parse_interface_addresses_json("not json").is_none());
+        assert!(Collector::parse_interface_addresses_json("[]").is_none());
+    }
+
+    #[test]
+    fn hostname_address_fallback_reports_empty_and_failed_probes() {
+        let (addresses, status) = Collector::parse_hostname_interface_addresses(Some(
+            "192.0.2.11 2001:db8::11 malformed",
+        ));
+        assert_eq!(addresses, vec!["192.0.2.11", "2001:db8::11"]);
+        assert!(status.is_complete());
+
+        let (addresses, status) = Collector::parse_hostname_interface_addresses(Some("\n"));
+        assert!(addresses.is_empty());
+        assert_eq!(status.state, crate::models::ProbeState::Partial);
+
+        let (addresses, status) = Collector::parse_hostname_interface_addresses(None);
+        assert!(addresses.is_empty());
+        assert_eq!(status.state, crate::models::ProbeState::Failed);
     }
 
     #[test]
