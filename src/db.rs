@@ -630,6 +630,86 @@ mod tests {
     }
 
     #[test]
+    fn migrates_v2_timer_rows_without_losing_state_and_allows_unknown_state() {
+        let path = std::env::temp_dir().join(format!(
+            "screamless-db-v2-timer-migration-{}.db",
+            std::process::id()
+        ));
+        let raw = rusqlite::Connection::open(&path).unwrap();
+        raw.execute_batch(
+            "CREATE TABLE snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                hostname TEXT NOT NULL,
+                timestamp INTEGER NOT NULL,
+                data TEXT NOT NULL,
+                UNIQUE(hostname, timestamp)
+             );
+             INSERT INTO snapshots (id, hostname, timestamp, data)
+                 VALUES (7, 'legacy-host', 1700000000000, '{}');
+             CREATE TABLE systemd_timers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                snapshot_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                unit TEXT NOT NULL,
+                enabled INTEGER NOT NULL,
+                active INTEGER NOT NULL
+             );
+             INSERT INTO systemd_timers (snapshot_id, name, unit, enabled, active)
+                 VALUES (7, 'backup', 'backup.timer', 1, 1),
+                        (7, 'cleanup', 'cleanup.timer', 0, 0);
+             PRAGMA user_version = 2;",
+        )
+        .unwrap();
+        drop(raw);
+
+        let db = Database::new(&path).unwrap();
+        let version: i64 = db
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, super::SCHEMA_VERSION);
+        let timers: Vec<(String, Option<bool>, Option<bool>)> = {
+            let mut statement = db
+                .conn
+                .prepare("SELECT unit, enabled, active FROM systemd_timers ORDER BY unit")
+                .unwrap();
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get::<_, Option<i64>>(1)?.map(|value| value != 0),
+                        row.get::<_, Option<i64>>(2)?.map(|value| value != 0),
+                    ))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        assert_eq!(
+            timers,
+            vec![
+                ("backup.timer".to_string(), Some(true), Some(true)),
+                ("cleanup.timer".to_string(), Some(false), Some(false)),
+            ]
+        );
+        db.conn
+            .execute(
+                "INSERT INTO snapshots (id, hostname, timestamp, data) VALUES (8, 'new-host', 1700000001000, '{}')",
+                [],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO systemd_timers (snapshot_id, name, unit, enabled, active)
+                 VALUES (8, 'unknown', 'unknown.timer', NULL, NULL)",
+                [],
+            )
+            .unwrap();
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn failed_schema_migration_rolls_back_all_ddl_and_version_changes() {
         let path = std::env::temp_dir().join(format!(
             "screamless-db-failed-migration-{}.db",
