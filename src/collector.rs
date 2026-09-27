@@ -1210,7 +1210,7 @@ impl Collector {
     }
 
     fn collect_systemd_timers() -> Result<Vec<SystemdTimer>> {
-        let (scheduled, scheduled_is_json) = Self::run_systemctl_output(
+        let scheduled = Self::run_systemctl_with_fallback(
             &["list-timers", "--all", "--no-pager", "--output=json"],
             &[
                 "list-timers",
@@ -1220,8 +1220,10 @@ impl Collector {
                 "--plain",
             ],
             "list-timers",
+            Self::parse_systemd_timers_json,
+            Self::parse_systemd_timers_text,
         )?;
-        let (unit_files, unit_files_are_json) = Self::run_systemctl_output(
+        let unit_files = Self::run_systemctl_with_fallback(
             &[
                 "list-unit-files",
                 "--type=timer",
@@ -1235,8 +1237,10 @@ impl Collector {
                 "--no-legend",
             ],
             "list-unit-files",
+            Self::parse_systemd_timer_unit_files_json,
+            Self::parse_systemd_timer_unit_files_text,
         )?;
-        let (loaded_units, loaded_units_are_json) = Self::run_systemctl_output(
+        let loaded_units = Self::run_systemctl_with_fallback(
             &[
                 "list-units",
                 "--all",
@@ -1253,26 +1257,10 @@ impl Collector {
                 "--plain",
             ],
             "list-units",
+            Self::parse_systemd_loaded_timer_states_json,
+            Self::parse_systemd_loaded_timer_states_text,
         )?;
 
-        let scheduled = if scheduled_is_json {
-            Self::parse_systemd_timers_json(&scheduled)
-        } else {
-            Self::parse_systemd_timers_text(&scheduled)
-        }
-        .context("Failed to parse systemd timer schedule inventory")?;
-        let unit_files = if unit_files_are_json {
-            Self::parse_systemd_timer_unit_files_json(&unit_files)
-        } else {
-            Self::parse_systemd_timer_unit_files_text(&unit_files)
-        }
-        .context("Failed to parse systemd timer unit-file states")?;
-        let loaded_units = if loaded_units_are_json {
-            Self::parse_systemd_loaded_timer_states_json(&loaded_units)
-        } else {
-            Self::parse_systemd_loaded_timer_states_text(&loaded_units)
-        }
-        .context("Failed to parse systemd loaded timer states")?;
         Ok(Self::merge_systemd_timer_inventory(
             scheduled,
             unit_files,
@@ -1280,25 +1268,34 @@ impl Collector {
         ))
     }
 
-    fn run_systemctl_output(
+    fn run_systemctl_with_fallback<T>(
         json_args: &[&str],
         text_args: &[&str],
         operation: &str,
-    ) -> Result<(Vec<u8>, bool)> {
+        parse_json: fn(&[u8]) -> Result<T>,
+        parse_text: fn(&[u8]) -> Result<T>,
+    ) -> Result<T> {
         let systemctl = Self::trusted_command_path("systemctl")
             .ok_or_else(|| anyhow!("No trusted systemctl utility found"))?;
-        let output = Self::run_bounded_command(
+        let json_output = Self::run_bounded_command(
             systemctl.clone(),
             json_args,
             INVENTORY_PROBE_TIMEOUT,
             SOCKET_PROBE_OUTPUT_LIMIT,
         )
         .with_context(|| format!("Failed to run systemctl {operation}"))?;
-        if output.status.success()
-            && serde_json::from_slice::<serde_json::Value>(&output.stdout).is_ok()
-        {
-            return Ok((output.stdout, true));
-        }
+        let json_result = if json_output.status.success() {
+            parse_json(&json_output.stdout).context("JSON schema was unsupported")
+        } else {
+            Err(anyhow!(
+                "JSON mode exited with status {}",
+                json_output.status
+            ))
+        };
+        let json_error = match json_result {
+            Ok(parsed) => return Ok(parsed),
+            Err(error) => error,
+        };
 
         let output = Self::run_bounded_command(
             systemctl,
@@ -1308,9 +1305,18 @@ impl Collector {
         )
         .with_context(|| format!("Failed to run systemctl {operation} text fallback"))?;
         if !output.status.success() {
-            return Err(anyhow!("systemctl {operation} exited unsuccessfully"));
+            return Err(anyhow!(
+                "systemctl {operation} failed in JSON mode ({}) and text mode (exit {})",
+                json_error,
+                output.status
+            ));
         }
-        Ok((output.stdout, false))
+        parse_text(&output.stdout).with_context(|| {
+            format!(
+                "Failed to parse systemctl {operation} text fallback after JSON failure: {}",
+                json_error
+            )
+        })
     }
 
     fn parse_systemd_timers_text(bytes: &[u8]) -> Result<Vec<SystemdTimer>> {
