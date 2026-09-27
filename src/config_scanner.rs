@@ -14,7 +14,7 @@ const MAX_CONFIG_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_CONFIG_TREE_ENTRIES: usize = 20_000;
 const MAX_CONFIG_TREE_DEPTH: usize = 32;
 const MAX_AUDIT_ERRORS: usize = 100;
-const SCANNER_VERSION: &str = "config-scanner/5";
+const SCANNER_VERSION: &str = "config-scanner/6";
 const DB_HOST_REGEX: &str = r#"(?mi)(DB_HOST|DATABASE_HOST|database\.host|mysql\.host|postgres\.host|POSTGRES_HOST|DATABASES.*host)\s*[=:]\s*["']?([^\s;,"'\n}]+)"#;
 const REDIS_HOST_REGEX: &str =
     r#"(?mi)(?:REDIS_HOST|CACHE_URL|redis\.host|cache\.redis)\s*[=:]\s*["']?([^\s;,"'\n}]+)"#;
@@ -806,7 +806,7 @@ impl ConfigScanner {
             "mysql" | "mariadb" => Some(3306),
             "postgres" | "postgresql" => Some(5432),
             "redis" | "rediss" => Some(6379),
-            "mongodb" | "mongodb+srv" => Some(27017),
+            "mongodb" => Some(27017),
             "amqp" => Some(5672),
             _ => None,
         }
@@ -1461,7 +1461,7 @@ mod tests {
 
     #[test]
     fn scanner_version_identifies_current_database_discovery_rules() {
-        assert_eq!(SCANNER_VERSION, "config-scanner/5");
+        assert_eq!(SCANNER_VERSION, "config-scanner/6");
     }
 
     #[test]
@@ -1911,6 +1911,10 @@ mod tests {
         assert_eq!(
             ConfigScanner::parse_endpoint("http://example.internal/path", None),
             Some(("example.internal".to_string(), Some(80)))
+        );
+        assert_eq!(
+            ConfigScanner::parse_endpoint("mongodb+srv://cluster.example.internal", None),
+            Some(("cluster.example.internal".to_string(), None))
         );
         assert_eq!(
             ConfigScanner::parse_endpoint("http://example.internal:invalid", None),
