@@ -1818,6 +1818,14 @@ mod tests {
             }),
             "active loopback connection on port {port} was missing from socket observation"
         );
+        assert!(
+            connections.iter().any(|connection| {
+                connection.pid == pid
+                    && connection.process_name == "screamless-test"
+                    && (connection.local_port == port || connection.remote_port == port)
+            }),
+            "socket collector did not attribute the loopback connection to PID {pid}"
+        );
 
         drop(client);
         drop(server);
