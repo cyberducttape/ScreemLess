@@ -302,6 +302,20 @@ pub struct ObservationCoverage {
     pub privileges: String,
     pub evidence_quality: String,
     pub remaining_unknowns: Vec<String>,
+    /// Number of distinct hosts represented in the shared database window.
+    #[serde(default)]
+    pub fleet_hosts_observed: usize,
+    /// Number of hosts in the operator-supplied expected fleet inventory.
+    #[serde(default)]
+    pub fleet_hosts_expected: usize,
+    /// True only when every host in the operator-supplied roster has sufficient
+    /// evidence; it does not independently verify that the roster is exhaustive.
+    #[serde(default)]
+    pub fleet_scope_complete: bool,
+    /// Internal set used to reject rosters that omit hosts already present in
+    /// this observation window. It is not serialized in reports.
+    #[serde(skip)]
+    pub(crate) observed_hostnames: Vec<String>,
 }
 
 /// A server-side inventory derived from the same snapshots used for dependency analysis.

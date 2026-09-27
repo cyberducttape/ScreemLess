@@ -12,6 +12,7 @@ struct InboundDependencyGraph {
     ambiguous_endpoints: HashMap<String, BTreeSet<String>>,
     endpoint_hostnames: HashMap<String, String>,
     incomplete_socket_hosts: BTreeSet<String>,
+    observed_hostnames: Vec<String>,
 }
 
 #[derive(Default)]
@@ -27,6 +28,7 @@ struct SourceEvidence {
 
 #[derive(Default)]
 struct InboundGraphBuilder {
+    observed_hosts: HashSet<String>,
     endpoint_targets: HashMap<String, HashSet<String>>,
     aliases: HashMap<String, HashSet<String>>,
     dns_addresses: HashMap<String, HashSet<String>>,
@@ -38,6 +40,7 @@ struct InboundGraphBuilder {
 impl InboundGraphBuilder {
     fn add_endpoint_snapshot(&mut self, snapshot: &ObservationSnapshot) {
         let canonical = Analyzer::normalize_hostname(&snapshot.hostname);
+        self.observed_hosts.insert(canonical.clone());
         if !snapshot.probe_statuses.network_sockets.is_complete() {
             self.incomplete_socket_hosts.insert(canonical.clone());
         }
@@ -239,6 +242,12 @@ impl InboundGraphBuilder {
             ambiguous_endpoints: self.ambiguous_endpoints,
             endpoint_hostnames,
             incomplete_socket_hosts: self.incomplete_socket_hosts,
+            observed_hostnames: self
+                .observed_hosts
+                .into_iter()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect(),
         }
     }
 }
@@ -261,6 +270,35 @@ impl<'a> Analyzer<'a> {
                 let snapshots = window.snapshots_for_host(hostname)?;
                 self.analyze_from_snapshots(hostname, hours, snapshots, &inbound_evidence)
             })
+    }
+
+    pub fn analyze_with_fleet_inventory(
+        &self,
+        hostname: &str,
+        hours: u32,
+        fleet_hosts: Option<&[String]>,
+    ) -> Result<AnalysisResult> {
+        let Some(fleet_hosts) = fleet_hosts else {
+            return self.analyze(hostname, hours);
+        };
+        let target_key = Self::normalize_hostname(hostname);
+        if !fleet_hosts
+            .iter()
+            .any(|host| Self::normalize_hostname(host) == target_key)
+        {
+            anyhow::bail!(
+                "Fleet inventory must include the server being assessed ({})",
+                hostname
+            );
+        }
+
+        let analyses = self.analyze_many(fleet_hosts, hours)?;
+        let mut target = analyses
+            .get(&target_key)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Target host is missing from fleet analysis"))?;
+        Self::apply_fleet_scope_evidence(&mut target, fleet_hosts, &analyses);
+        Ok(target)
     }
 
     /// Analyzes several servers from one consistent database read window.
@@ -290,6 +328,64 @@ impl<'a> Analyzer<'a> {
             })
     }
 
+    /// Validates an operator-supplied fleet roster against observations in the
+    /// requested window and records the scope gate on the target result.
+    pub(crate) fn apply_fleet_scope_evidence(
+        target: &mut AnalysisResult,
+        fleet_hosts: &[String],
+        analyses: &HashMap<String, AnalysisResult>,
+    ) {
+        let mut insufficient_hosts = Vec::new();
+        for hostname in fleet_hosts {
+            let sufficient = analyses.get(hostname).is_some_and(|analysis| {
+                analysis.total_snapshots > 0
+                    && analysis.probe_statuses.all_complete()
+                    && analysis.coverage.evidence_quality == "HIGH"
+                    && analysis.coverage.coverage_percent >= 90.0
+            });
+            if !sufficient {
+                insufficient_hosts.push(hostname.clone());
+            }
+        }
+
+        let expected_hostnames = fleet_hosts
+            .iter()
+            .map(|hostname| Self::normalize_hostname(hostname))
+            .collect::<BTreeSet<_>>();
+        let unlisted_observed_hosts = target
+            .coverage
+            .observed_hostnames
+            .iter()
+            .filter(|hostname| !expected_hostnames.contains(*hostname))
+            .cloned()
+            .collect::<Vec<_>>();
+        insufficient_hosts.extend(unlisted_observed_hosts);
+
+        target.coverage.fleet_hosts_expected = fleet_hosts.len();
+        target.coverage.fleet_scope_complete =
+            !fleet_hosts.is_empty() && insufficient_hosts.is_empty();
+        target.coverage.remaining_unknowns.retain(|unknown| {
+            !unknown.starts_with("expected fleet inventory is not attested")
+                && !unknown.starts_with("expected fleet host(s) lack sufficient evidence")
+        });
+        if !target.coverage.fleet_scope_complete {
+            let detail = if fleet_hosts.is_empty() {
+                "expected fleet inventory is empty or unavailable".to_string()
+            } else {
+                format!(
+                    "expected fleet host(s) lack sufficient evidence: {}",
+                    insufficient_hosts.join(", ")
+                )
+            };
+            target.coverage.remaining_unknowns.push(detail);
+        } else {
+            target.coverage.remaining_unknowns.push(
+                "fleet roster was operator-supplied and could not be independently verified"
+                    .to_string(),
+            );
+        }
+    }
+
     fn analyze_from_snapshots(
         &self,
         hostname: &str,
@@ -304,6 +400,12 @@ impl<'a> Analyzer<'a> {
             .cloned()
             .unwrap_or_default();
         let mut coverage = Self::build_observation_coverage(&snapshots, now, hours);
+        coverage.observed_hostnames = inbound_evidence.observed_hostnames.clone();
+        coverage.fleet_hosts_observed = inbound_evidence.observed_hostnames.len();
+        coverage.remaining_unknowns.push(format!(
+            "expected fleet inventory is not attested; inbound analysis includes {} host(s) present in the shared database",
+            inbound_evidence.observed_hostnames.len()
+        ));
         Self::apply_unresolved_endpoint_evidence(&mut coverage, &unresolved_for_host);
         Self::apply_incomplete_inbound_probe_evidence(
             &mut coverage,
@@ -1687,6 +1789,10 @@ impl<'a> Analyzer<'a> {
             privileges,
             evidence_quality: evidence_quality.to_string(),
             remaining_unknowns,
+            fleet_hosts_observed: 0,
+            fleet_hosts_expected: 0,
+            fleet_scope_complete: false,
+            observed_hostnames: Vec::new(),
         }
     }
 
@@ -1768,9 +1874,9 @@ mod tests {
     use super::{Analyzer, InboundGraphBuilder};
     use crate::db::Database;
     use crate::models::{
-        ConfigReference, DnsName, Evidence, EvidenceLevel, HostIdentity, ImpactLevel,
-        InboundDependency, ListeningService, NetworkConnection, ObservationCoverage,
-        ObservationSnapshot, ProbeStatuses, Process, SoftwareInventory,
+        AnalysisResult, ConfigReference, DnsName, Evidence, EvidenceLevel, HostIdentity,
+        ImpactLevel, InboundDependency, ListeningService, NetworkConnection, ObservationCoverage,
+        ObservationSnapshot, ProbeStatuses, Process, SiteInventory, SoftwareInventory,
     };
     use chrono::Utc;
 
@@ -2026,6 +2132,77 @@ mod tests {
         assert_eq!(coverage.successful_samples, 2);
         assert!(coverage.coverage_percent < 4.0);
         assert_eq!(coverage.privileges, "full");
+    }
+
+    #[test]
+    fn fleet_scope_is_complete_only_when_every_expected_host_has_coverage() {
+        let now = Utc::now();
+        let make_analysis = |hostname: &str, coverage_percent: f64| AnalysisResult {
+            observation_window_hours: 168,
+            total_snapshots: 10_080,
+            observation_span: (now - chrono::Duration::days(7), now),
+            host_identity: HostIdentity {
+                hostname: hostname.to_string(),
+                ..HostIdentity::default()
+            },
+            coverage: ObservationCoverage {
+                coverage_percent,
+                evidence_quality: if coverage_percent >= 90.0 {
+                    "HIGH".to_string()
+                } else {
+                    "LOW".to_string()
+                },
+                ..ObservationCoverage::default()
+            },
+            dependencies: Vec::new(),
+            inbound_dependencies: Vec::new(),
+            observed_processes: std::collections::HashMap::new(),
+            risks: Vec::new(),
+            decommission_confidence: 100,
+            probe_statuses: ProbeStatuses::default(),
+            inventory: SiteInventory::default(),
+            config_scan_audit: None,
+        };
+        let hosts = vec!["db01".to_string(), "web01".to_string()];
+        let analyses = std::collections::HashMap::from([
+            ("db01".to_string(), make_analysis("db01", 99.0)),
+            ("web01".to_string(), make_analysis("web01", 99.0)),
+        ]);
+        let mut target = make_analysis("db01", 99.0);
+        target.coverage.observed_hostnames = hosts.clone();
+
+        Analyzer::apply_fleet_scope_evidence(&mut target, &hosts, &analyses);
+        assert!(target.coverage.fleet_scope_complete);
+        assert_eq!(target.coverage.fleet_hosts_expected, 2);
+        assert!(target
+            .coverage
+            .remaining_unknowns
+            .iter()
+            .any(|unknown| unknown.contains("could not be independently verified")));
+
+        let incomplete_analyses = std::collections::HashMap::from([
+            ("db01".to_string(), make_analysis("db01", 99.0)),
+            ("web01".to_string(), make_analysis("web01", 70.0)),
+        ]);
+        Analyzer::apply_fleet_scope_evidence(&mut target, &hosts, &incomplete_analyses);
+        assert!(!target.coverage.fleet_scope_complete);
+        assert!(target
+            .coverage
+            .remaining_unknowns
+            .iter()
+            .any(|unknown| unknown.contains("web01")));
+
+        target
+            .coverage
+            .observed_hostnames
+            .push("unlisted".to_string());
+        Analyzer::apply_fleet_scope_evidence(&mut target, &hosts, &analyses);
+        assert!(!target.coverage.fleet_scope_complete);
+        assert!(target
+            .coverage
+            .remaining_unknowns
+            .iter()
+            .any(|unknown| unknown.contains("unlisted")));
     }
 
     #[test]

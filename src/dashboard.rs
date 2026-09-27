@@ -40,6 +40,7 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
         analysis.probe_statuses.all_complete(),
         &analysis.coverage.evidence_quality,
         analysis.coverage.coverage_percent,
+        analysis.coverage.fleet_scope_complete,
         analysis.decommission_confidence,
         blocking_risks,
     );
@@ -124,11 +125,14 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
     .collect::<Vec<_>>()
     .join("");
     let coverage_summary = format!(
-        "Evidence quality: {} · Observation coverage: {:.2}% · {} successful / {} expected samples · Slow inventory: {:.1}% ({}/{} hourly intervals covered; {} refreshes), last refreshed {} ago · Privileges: {}",
+        "Evidence quality: {} · Observation coverage: {:.2}% · {} successful / {} expected samples · Fleet scope: {} observed / {} expected host(s), {} · Slow inventory: {:.1}% ({}/{} hourly intervals covered; {} refreshes), last refreshed {} ago · Privileges: {}",
         escape_html(&analysis.coverage.evidence_quality),
         analysis.coverage.coverage_percent,
         analysis.coverage.successful_samples,
         analysis.coverage.expected_samples,
+        analysis.coverage.fleet_hosts_observed,
+        analysis.coverage.fleet_hosts_expected,
+        if analysis.coverage.fleet_scope_complete { "roster complete (operator-supplied)" } else { "unverified" },
         analysis.coverage.slow_inventory_coverage_percent,
         analysis.coverage.slow_inventory_covered_intervals,
         analysis.coverage.expected_slow_inventory_refreshes,
@@ -853,6 +857,7 @@ mod tests {
                 successful_samples: 60,
                 expected_samples: 60,
                 evidence_quality: "HIGH".to_string(),
+                fleet_scope_complete: true,
                 actual_span_seconds: 3_600,
                 last_observation: Some(now),
                 ..ObservationCoverage::default()

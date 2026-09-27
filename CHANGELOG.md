@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Require an operator-supplied expected-host roster before maintenance or
+  decommission checks can claim sufficient fleet scope; validate evidence for
+  every listed host and disclose that roster exhaustiveness cannot be verified.
+- Add observed/expected fleet scope to coverage output and bump report,
+  infrastructure, and preflight JSON schemas for the new coverage fields.
 - Store large canonical snapshots as bounded gzip blobs to reduce database and
   write-ahead-log growth, while retaining backward reads of legacy JSON rows.
 - Scope estimated sampling cadence and privilege completeness to the requested

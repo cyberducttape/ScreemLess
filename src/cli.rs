@@ -71,6 +71,10 @@ pub enum Command {
         /// Hostname to check
         #[arg(long)]
         hostname: Option<String>,
+
+        /// Authoritative expected fleet roster (one hostname or IP per line)
+        #[arg(long)]
+        fleet_inventory: Option<PathBuf>,
     },
 
     /// Generate interactive HTML dashboard
@@ -82,6 +86,10 @@ pub enum Command {
         /// Output file path (default: ./screamless-dashboard.html)
         #[arg(short, long)]
         output: Option<std::path::PathBuf>,
+
+        /// Authoritative expected fleet roster (one hostname or IP per line)
+        #[arg(long)]
+        fleet_inventory: Option<PathBuf>,
     },
 
     /// Map infrastructure dependencies across multiple servers
@@ -112,6 +120,10 @@ pub enum Command {
         /// Explicitly acknowledge observed dependent-system impact
         #[arg(long)]
         acknowledge_impact: bool,
+
+        /// Authoritative expected fleet roster (one hostname or IP per line)
+        #[arg(long)]
+        fleet_inventory: Option<PathBuf>,
     },
 
     /// Take a single snapshot
@@ -122,15 +134,30 @@ pub async fn run(args: Args) -> Result<()> {
     match args.command {
         Command::Observe { duration, interval } => observe(&args.db, duration, interval).await,
         Command::Report { hostname, format } => report(&args.db, hostname, format),
-        Command::DecommissionCheck { hostname } => decommission_check(&args.db, hostname),
-        Command::Dashboard { hostname, output } => dashboard(&args.db, hostname, output),
+        Command::DecommissionCheck {
+            hostname,
+            fleet_inventory,
+        } => decommission_check(&args.db, hostname, fleet_inventory),
+        Command::Dashboard {
+            hostname,
+            output,
+            fleet_inventory,
+        } => dashboard(&args.db, hostname, output, fleet_inventory),
         Command::Infrastructure { servers, format } => infrastructure(&args.db, servers, format),
         Command::Preflight {
             server,
             operation,
             json,
             acknowledge_impact,
-        } => preflight(&args.db, server, operation, json, acknowledge_impact),
+            fleet_inventory,
+        } => preflight(
+            &args.db,
+            server,
+            operation,
+            json,
+            acknowledge_impact,
+            fleet_inventory,
+        ),
         Command::Snapshot => snapshot(&args.db).await,
     }
 }
@@ -269,10 +296,23 @@ fn report(db_path: &std::path::Path, hostname: Option<String>, format: OutputFor
     Ok(())
 }
 
-fn decommission_check(db_path: &std::path::Path, hostname: Option<String>) -> Result<()> {
+fn decommission_check(
+    db_path: &std::path::Path,
+    hostname: Option<String>,
+    fleet_inventory: Option<PathBuf>,
+) -> Result<()> {
     let db = Database::new(db_path)?;
     let reporter = Reporter::new(&db);
-    let exit_code = reporter.decommission_check(&hostname)?;
+    let fleet_hosts = fleet_inventory
+        .as_deref()
+        .map(read_fleet_inventory)
+        .transpose()?;
+    let resolved_hostname = reporter.resolve_hostname_for_cli(&hostname)?;
+    if let Some(hosts) = fleet_hosts.as_deref() {
+        ensure_fleet_contains(hosts, &resolved_hostname)?;
+    }
+    let exit_code =
+        reporter.decommission_check(&Some(resolved_hostname), fleet_hosts.as_deref())?;
 
     if exit_code == 0 {
         Ok(())
@@ -314,6 +354,88 @@ fn parse_duration(s: &str) -> Result<Duration> {
     Ok(Duration::from_secs(seconds))
 }
 
+fn read_fleet_inventory(path: &std::path::Path) -> Result<Vec<String>> {
+    use std::collections::BTreeSet;
+    use std::io::Read;
+
+    const MAX_INVENTORY_BYTES: u64 = 1024 * 1024;
+    const MAX_INVENTORY_HOSTS: usize = 10_000;
+
+    let file = std::fs::File::open(path)
+        .with_context(|| format!("Unable to open fleet inventory {}", path.display()))?;
+    let mut contents = String::new();
+    Read::take(file, MAX_INVENTORY_BYTES + 1)
+        .read_to_string(&mut contents)
+        .with_context(|| format!("Unable to read fleet inventory {}", path.display()))?;
+    if contents.len() as u64 > MAX_INVENTORY_BYTES {
+        anyhow::bail!("Fleet inventory exceeds the 1 MiB size limit");
+    }
+
+    let mut hosts = BTreeSet::new();
+    for (line_number, line) in contents.lines().enumerate() {
+        let host = line.trim();
+        if host.is_empty() || host.starts_with('#') {
+            continue;
+        }
+        let normalized = normalize_fleet_hostname(host);
+        let valid = if normalized.parse::<std::net::IpAddr>().is_ok() {
+            true
+        } else {
+            !normalized.is_empty()
+                && normalized.len() <= 253
+                && normalized.split('.').all(|label| {
+                    !label.is_empty()
+                        && label.len() <= 63
+                        && label
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                        && label.as_bytes()[0].is_ascii_alphanumeric()
+                        && label.as_bytes()[label.len() - 1].is_ascii_alphanumeric()
+                })
+        };
+        if !valid {
+            anyhow::bail!(
+                "Invalid fleet hostname or IP at {}:{}",
+                path.display(),
+                line_number + 1
+            );
+        }
+        hosts.insert(normalized);
+        if hosts.len() > MAX_INVENTORY_HOSTS {
+            anyhow::bail!(
+                "Fleet inventory exceeds the {} host limit",
+                MAX_INVENTORY_HOSTS
+            );
+        }
+    }
+
+    if hosts.is_empty() {
+        anyhow::bail!("Fleet inventory contains no hostnames or IP addresses");
+    }
+    Ok(hosts.into_iter().collect())
+}
+
+fn normalize_fleet_hostname(hostname: &str) -> String {
+    hostname.trim().trim_end_matches('.').to_ascii_lowercase()
+}
+
+fn ensure_fleet_contains(hosts: &[String], hostname: &str) -> Result<()> {
+    let normalized = normalize_fleet_hostname(hostname);
+    if !hosts
+        .iter()
+        .any(|host| normalize_fleet_hostname(host) == normalized)
+    {
+        return Err(anyhow::Error::new(CliExit {
+            code: 3,
+            message: format!(
+                "Fleet inventory must include the server being assessed ({})",
+                hostname
+            ),
+        }));
+    }
+    Ok(())
+}
+
 fn sampling_wait(
     interval: Duration,
     collection_duration: Duration,
@@ -353,6 +475,7 @@ fn dashboard(
     db_path: &std::path::Path,
     hostname: Option<String>,
     output: Option<std::path::PathBuf>,
+    fleet_inventory: Option<PathBuf>,
 ) -> Result<()> {
     use crate::analysis::Analyzer;
 
@@ -367,7 +490,14 @@ fn dashboard(
             .unwrap_or_else(|_| "localhost".to_string())
     };
 
-    let analysis = analyzer.analyze(&hostname, 168)?;
+    let fleet_hosts = fleet_inventory
+        .as_deref()
+        .map(read_fleet_inventory)
+        .transpose()?;
+    if let Some(hosts) = fleet_hosts.as_deref() {
+        ensure_fleet_contains(hosts, &hostname)?;
+    }
+    let analysis = analyzer.analyze_with_fleet_inventory(&hostname, 168, fleet_hosts.as_deref())?;
 
     let output_path =
         output.unwrap_or_else(|| std::path::PathBuf::from("screamless-dashboard.html"));
@@ -477,7 +607,7 @@ fn infrastructure(db_path: &std::path::Path, servers: String, format: OutputForm
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
-                "schema_version": "3.0",
+                "schema_version": "3.1",
                 "generated_at": Utc::now().to_rfc3339(),
                 "collector_version": env!("CARGO_PKG_VERSION"),
                 "observation_window": {
@@ -564,6 +694,7 @@ struct PreflightResult {
     inbound_dependency_evidence: Option<Vec<crate::models::InboundDependency>>,
     impact_acknowledged: bool,
     probe_statuses: Option<crate::models::ProbeStatuses>,
+    fleet_scope_complete: Option<bool>,
 }
 
 fn preflight(
@@ -572,6 +703,7 @@ fn preflight(
     operation: String,
     json: bool,
     acknowledge_impact: bool,
+    fleet_inventory: Option<PathBuf>,
 ) -> Result<()> {
     use crate::analysis::Analyzer;
 
@@ -583,7 +715,7 @@ fn preflight(
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
-                    "schema_version": "1.0",
+                    "schema_version": "1.1",
                     "server": server,
                     "operation": operation,
                     "status": "invalid_invocation",
@@ -597,7 +729,8 @@ fn preflight(
                     "inbound_dependencies": null,
                     "inbound_dependency_evidence": null,
                     "impact_acknowledged": false,
-                    "probe_statuses": null
+                    "probe_statuses": null,
+                    "fleet_scope_complete": null
                 }))?
             );
         }
@@ -610,9 +743,16 @@ fn preflight(
         }));
     }
 
+    let fleet_hosts = fleet_inventory
+        .as_deref()
+        .map(read_fleet_inventory)
+        .transpose()?;
+    if let Some(hosts) = fleet_hosts.as_deref() {
+        ensure_fleet_contains(hosts, &server)?;
+    }
     let db = Database::new(db_path)?;
     let analyzer = Analyzer::new(&db);
-    let analysis = analyzer.analyze(&server, 168)?;
+    let analysis = analyzer.analyze_with_fleet_inventory(&server, 168, fleet_hosts.as_deref())?;
 
     let mut safe = true;
     let mut warnings = Vec::new();
@@ -621,7 +761,13 @@ fn preflight(
         analysis.probe_statuses.all_complete(),
         &analysis.coverage.evidence_quality,
         analysis.coverage.coverage_percent,
+        analysis.coverage.fleet_scope_complete,
     );
+    if analysis.coverage.fleet_scope_complete {
+        warnings.push(
+            "Fleet roster was operator-supplied; Screamless cannot independently verify that it is exhaustive".to_string(),
+        );
+    }
 
     if analysis.total_snapshots == 0 {
         warnings.push("No observations are available for this server".to_string());
@@ -674,7 +820,7 @@ fn preflight(
         println!(
             "{}",
             serde_json::to_string_pretty(&PreflightResult {
-                schema_version: "1.0".to_string(),
+                schema_version: "1.1".to_string(),
                 server,
                 operation,
                 status: status.to_string(),
@@ -689,6 +835,7 @@ fn preflight(
                 inbound_dependency_evidence: Some(analysis.inbound_dependencies.clone()),
                 impact_acknowledged,
                 probe_statuses: Some(analysis.probe_statuses.clone()),
+                fleet_scope_complete: Some(analysis.coverage.fleet_scope_complete),
             })?
         );
     } else {
@@ -701,6 +848,9 @@ fn preflight(
         if safe {
             println!("✅ SAFE TO PROCEED\n");
             println!("No blocking issues detected for this operation.");
+            for warning in &warnings {
+                println!("Caveat: {}", warning);
+            }
         } else {
             println!("⚠️  PROCEED WITH CAUTION\n");
             println!("Issues identified:");
@@ -744,8 +894,8 @@ fn format_duration(d: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        impact_requires_acknowledgement, operation_impact_warnings, parse_duration, sampling_wait,
-        Args,
+        ensure_fleet_contains, impact_requires_acknowledgement, operation_impact_warnings,
+        parse_duration, read_fleet_inventory, sampling_wait, Args,
     };
     use clap::Parser;
     use std::time::Duration;
@@ -766,6 +916,29 @@ mod tests {
     fn report_format_is_a_validated_enum() {
         assert!(Args::try_parse_from(["screamless", "report", "--format", "json"]).is_ok());
         assert!(Args::try_parse_from(["screamless", "report", "--format", "yaml"]).is_err());
+    }
+
+    #[test]
+    fn fleet_inventory_normalizes_deduplicates_and_validates_host_entries() {
+        let path = std::env::temp_dir().join(format!(
+            "screamless-fleet-inventory-{}.txt",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            "# authoritative roster\nWEB01.example.\nweb01.example\n2001:db8::1\n",
+        )
+        .unwrap();
+        let hosts = read_fleet_inventory(&path).unwrap();
+        assert_eq!(hosts.len(), 2);
+        assert!(hosts.contains(&"web01.example".to_string()));
+        assert!(hosts.contains(&"2001:db8::1".to_string()));
+        ensure_fleet_contains(&hosts, "WEB01.EXAMPLE.").unwrap();
+        assert!(ensure_fleet_contains(&hosts, "missing.example").is_err());
+
+        std::fs::write(&path, "invalid/name\n").unwrap();
+        assert!(read_fleet_inventory(&path).is_err());
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

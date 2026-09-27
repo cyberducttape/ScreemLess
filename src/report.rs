@@ -84,7 +84,7 @@ impl<'a> Reporter<'a> {
         let analysis = analyzer.analyze(&hostname, 168)?;
 
         let json = json!({
-            "schema_version": "2.1",
+            "schema_version": "2.2",
             "generated_at": Utc::now().to_rfc3339(),
             "collector_version": env!("CARGO_PKG_VERSION"),
             "server": hostname,
@@ -115,17 +115,31 @@ impl<'a> Reporter<'a> {
         Ok(())
     }
 
-    pub fn decommission_check(&self, hostname: &Option<String>) -> Result<u8> {
+    pub fn decommission_check(
+        &self,
+        hostname: &Option<String>,
+        fleet_hosts: Option<&[String]>,
+    ) -> Result<u8> {
         let hostname = self.resolve_hostname(hostname)?;
         let analyzer = Analyzer::new(self.db);
 
-        let analysis = analyzer.analyze(&hostname, 168)?;
+        let analysis = analyzer.analyze_with_fleet_inventory(&hostname, 168, fleet_hosts)?;
 
         println!("\n╭──────────────────────────────────────────────────╮");
         println!("│   DECOMMISSION EVIDENCE REPORT                   │");
         println!("╰──────────────────────────────────────────────────╯\n");
 
         println!("Server: {}", hostname);
+        println!(
+            "Fleet scope: {} observed / {} expected host(s){}",
+            analysis.coverage.fleet_hosts_observed,
+            analysis.coverage.fleet_hosts_expected,
+            if analysis.coverage.fleet_scope_complete {
+                " · roster coverage complete (operator-supplied scope)"
+            } else {
+                " · incomplete or unattested"
+            }
+        );
         println!(
             "Observation: {} snapshots across {:.1} observed hours (requested window: {} hours)\n",
             analysis.total_snapshots,
@@ -154,6 +168,7 @@ impl<'a> Reporter<'a> {
             analysis.probe_statuses.all_complete(),
             &analysis.coverage.evidence_quality,
             analysis.coverage.coverage_percent,
+            analysis.coverage.fleet_scope_complete,
             analysis.decommission_confidence,
             has_blocking_risks,
         );
@@ -178,9 +193,11 @@ impl<'a> Reporter<'a> {
         probes_complete: bool,
         evidence_quality: &str,
         coverage_percent: f64,
+        fleet_scope_complete: bool,
     ) -> bool {
         total_snapshots > 0
             && probes_complete
+            && fleet_scope_complete
             && evidence_quality == "HIGH"
             && coverage_percent.is_finite()
             && coverage_percent >= 90.0
@@ -192,6 +209,7 @@ impl<'a> Reporter<'a> {
             analysis.probe_statuses.all_complete(),
             &analysis.coverage.evidence_quality,
             analysis.coverage.coverage_percent,
+            analysis.coverage.fleet_scope_complete,
         )
     }
 
@@ -214,6 +232,7 @@ impl<'a> Reporter<'a> {
         probes_complete: bool,
         evidence_quality: &str,
         coverage_percent: f64,
+        fleet_scope_complete: bool,
         confidence: u8,
         has_blocking_risks: bool,
     ) -> u8 {
@@ -222,6 +241,7 @@ impl<'a> Reporter<'a> {
             probes_complete,
             evidence_quality,
             coverage_percent,
+            fleet_scope_complete,
         ) {
             return 4;
         }
@@ -247,6 +267,16 @@ impl<'a> Reporter<'a> {
         println!(
             "  Expected samples: {} | Successful samples: {} | Coverage: {:.2}%",
             coverage.expected_samples, coverage.successful_samples, coverage.coverage_percent
+        );
+        println!(
+            "  Fleet scope: {} observed / {} expected host(s) ({})",
+            coverage.fleet_hosts_observed,
+            coverage.fleet_hosts_expected,
+            if coverage.fleet_scope_complete {
+                "complete (operator-supplied roster)"
+            } else {
+                "unverified"
+            }
         );
         println!(
             "  Slow inventory: {} / {} hourly intervals covered ({:.1}%; {} refreshes observed)",
@@ -725,26 +755,41 @@ impl<'a> Reporter<'a> {
 mod tests {
     use super::Reporter;
 
-    fn exit_code(quality: &str, coverage: f64, confidence: u8, risks: bool) -> u8 {
-        Reporter::decommission_exit_code(10, true, quality, coverage, confidence, risks)
+    fn exit_code(
+        quality: &str,
+        coverage: f64,
+        fleet_scope_complete: bool,
+        confidence: u8,
+        risks: bool,
+    ) -> u8 {
+        Reporter::decommission_exit_code(
+            10,
+            true,
+            quality,
+            coverage,
+            fleet_scope_complete,
+            confidence,
+            risks,
+        )
     }
 
     #[test]
     fn decommission_policy_requires_high_complete_coverage() {
-        assert_eq!(exit_code("MEDIUM", 99.0, 100, false), 4);
-        assert_eq!(exit_code("HIGH", 89.9, 100, false), 4);
+        assert_eq!(exit_code("MEDIUM", 99.0, true, 100, false), 4);
+        assert_eq!(exit_code("HIGH", 89.9, true, 100, false), 4);
         assert_eq!(
-            Reporter::decommission_exit_code(0, true, "HIGH", 100.0, 100, false),
+            Reporter::decommission_exit_code(0, true, "HIGH", 100.0, true, 100, false),
             4
         );
-        assert_eq!(exit_code("HIGH", 100.0, 100, false), 0);
+        assert_eq!(exit_code("HIGH", 100.0, false, 100, false), 4);
+        assert_eq!(exit_code("HIGH", 100.0, true, 100, false), 0);
     }
 
     #[test]
     fn decommission_policy_blocks_detected_risks() {
-        assert_eq!(exit_code("HIGH", 100.0, 79, false), 2);
-        assert_eq!(exit_code("HIGH", 100.0, 100, true), 2);
-        assert_eq!(exit_code("HIGH", f64::NAN, 100, false), 4);
+        assert_eq!(exit_code("HIGH", 100.0, true, 79, false), 2);
+        assert_eq!(exit_code("HIGH", 100.0, true, 100, true), 2);
+        assert_eq!(exit_code("HIGH", f64::NAN, true, 100, false), 4);
     }
 
     #[test]

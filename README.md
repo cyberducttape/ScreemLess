@@ -139,11 +139,11 @@ individual virtual hosts. It is not HTTP request or visitor analytics, and an
 observation is not a count of unique connection events.
 
 The `infrastructure --format json` integration output declares schema version
-`3.0`. Consumers should branch on `schema_version`; version 3.0 represents
+`3.1`. Consumers should branch on `schema_version`; version 3.0 represents
 hosts as an ordered array and reports site listener evidence without claiming
-virtual-host health.
+virtual-host health. Version 3.1 adds fleet-scope coverage to each analysis.
 
-The `report --format json` output declares schema version `2.1` and includes
+The `report --format json` output declares schema version `2.2` and includes
 `generated_at`, `collector_version`, and `host_identity` (hostname aliases,
 machine identifiers, and observed interface addresses) metadata.
 
@@ -158,25 +158,37 @@ screamless observe --duration 7d        # 7-day observation (default)
 screamless report                       # Text report
 screamless report --format json         # Machine-readable output
 screamless decommission-check           # Evidence and coverage assessment
-screamless dashboard --output rep.html  # Interactive HTML
+screamless dashboard --output rep.html \
+  --fleet-inventory expected-hosts.txt                 # Interactive HTML with scope
 
 # Safety & Planning
-screamless preflight --server db01 --operation restart    # Is restart safe?
+screamless preflight --server db01 --operation restart \
+  --fleet-inventory expected-hosts.txt                    # Is restart safe?
 screamless infrastructure --servers db01,web01,cache01    # Map all dependencies
 ```
+
+Decommission and maintenance checks require `--fleet-inventory` to return a
+positive result. The file is a newline-separated roster of every dependency-capable
+host; blank lines and full-line `#` comments are ignored. Listed hostnames must
+match the hostnames used by the observations, and the roster must also account for
+every host already present in the shared database window. Every listed host must
+have complete, high-quality evidence in the requested window. This is an operator attestation:
+Screamless cannot independently verify that the roster itself is exhaustive. Without
+the file, fleet scope remains unknown and the check returns exit code `4`.
 
 ## Use Cases
 
 ### 1. **Safe Decommissioning**
 ```bash
 screamless observe --duration 7d
-screamless decommission-check
+screamless decommission-check --fleet-inventory expected-hosts.txt
 # Output: an evidence assessment; incomplete collection is reported as UNKNOWN
 ```
 
 ### 2. **Before a Deployment**
 ```bash
-screamless preflight --server nginx01 --operation update
+screamless preflight --server nginx01 --operation update \
+  --fleet-inventory expected-hosts.txt
 # Output: a safety result; incomplete evidence is non-zero and must be reviewed
 ```
 
@@ -194,7 +206,7 @@ When systems are observed depending on a host, preflight reports the expected
 impact and blocks automation until the caller passes `--acknowledge-impact`.
 That flag acknowledges impact only; it does not override incomplete observations
 or verify that a maintenance window has been approved. Preflight JSON declares
-schema version `1.0` and includes the observed coverage, probe states, inbound
+schema version `1.1` and includes the observed coverage, fleet-scope result, probe states, inbound
 dependency evidence, and `impact_acknowledged`; unavailable data is `null`.
 
 ### 3. **Incident Response**
