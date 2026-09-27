@@ -539,7 +539,9 @@ impl<'a> Analyzer<'a> {
                         if !site.ports.contains(&service.0) {
                             site.ports.push(service.0);
                         }
-                        if !site.tech_stack.contains(&service.1) {
+                        if !service.1.eq_ignore_ascii_case("unknown")
+                            && !site.tech_stack.contains(&service.1)
+                        {
                             site.tech_stack.push(service.1.clone());
                         }
                     }
@@ -634,7 +636,10 @@ impl<'a> Analyzer<'a> {
                 stack.insert(observed.name.clone());
             }
             for service in &snapshot.listening_services {
-                users.insert(service.user.clone());
+                if !service.user.trim().is_empty() && !service.user.eq_ignore_ascii_case("unknown")
+                {
+                    users.insert(service.user.clone());
+                }
                 if is_web_process(&service.process_name) {
                     stack.insert(service.process_name.clone());
                 }
@@ -2703,5 +2708,33 @@ mod tests {
         assert!(!proxy_inventory
             .load_balancers
             .contains(&"python".to_string()));
+    }
+
+    #[test]
+    fn inventory_does_not_present_missing_process_attribution_as_a_user_or_stack() {
+        let mut snapshot = test_snapshot(Utc::now());
+        snapshot.listening_services.push(ListeningService {
+            port: 443,
+            protocol: "tcp".to_string(),
+            process_name: "unknown".to_string(),
+            pid: 0,
+            user: "unknown".to_string(),
+        });
+        snapshot.config_references.push(ConfigReference {
+            file_path: "/etc/nginx/sites-enabled/example".to_string(),
+            hostname: "example.com".to_string(),
+            port: Some(443),
+            context: "nginx site; root=/srv/example/public; ports=443".to_string(),
+            config_line: None,
+        });
+        snapshot.probe_statuses.process_attribution =
+            crate::models::ProbeStatus::partial("socket owners unavailable", 1);
+
+        let inventory = Analyzer::build_inventory(&[snapshot], &[]);
+
+        assert!(inventory.users.is_empty());
+        assert_eq!(inventory.web_listener_observations, 1);
+        assert_eq!(inventory.websites[0].status, "listener_observed");
+        assert!(inventory.websites[0].tech_stack.is_empty());
     }
 }

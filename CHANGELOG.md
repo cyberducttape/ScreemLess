@@ -11,6 +11,8 @@
   not infer remote dependencies from loopback or wildcard binds.
 - Treat absent optional configuration roots/files as not applicable rather than
   scan failures, while preserving permission and traversal errors as unknowns.
+- Keep missing process attribution from appearing as an identified runtime user
+  or website technology in inventory views.
 - Track interface-address collection as an explicit host-identity probe, include
   host identity in report JSON schema 2.1, and treat missing identity status in
   legacy records as unknown rather than complete.
