@@ -39,19 +39,19 @@ curl -fsSL https://raw.githubusercontent.com/cyberducttape/ScreemLess/v1.1.0/ins
 # screamless-1.1.0-linux-amd64.tar.gz
 
 # Observe for 7 days (the default)
-./target/release/screamless observe
+screamless observe
 
 # Generate report
-./target/release/screamless report
+screamless report
 
 # Check if safe to decommission
-./target/release/screamless decommission-check
+screamless decommission-check
 
 # Check before deployment/restart
-./target/release/screamless preflight --server db01 --operation restart
+screamless preflight --server db01 --operation restart
 
 # Interactive dashboard
-./target/release/screamless dashboard --output analysis.html
+screamless dashboard --output analysis.html
 ```
 
 When installing the systemd agent, a custom `INSTALL_DIR` must be under a

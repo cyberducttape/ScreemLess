@@ -19,4 +19,10 @@ if (cd "$ROOT_DIR" && bash "$CHECKER" release-1.1.0) >/dev/null 2>&1; then
     exit 1
 fi
 
+published_quick_start="$(awk '/# Install the published release/{reading=1} reading{print} reading && /^```$/{exit}' "$ROOT_DIR/README.md")"
+if [[ "$published_quick_start" == *"./target/release/screamless"* ]] || [[ "$published_quick_start" != *$'\nscreamless observe'* ]]; then
+    echo "Published-release quick start contains source-build-only commands" >&2
+    exit 1
+fi
+
 echo "Release metadata tests passed"
