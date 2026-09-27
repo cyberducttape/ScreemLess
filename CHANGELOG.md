@@ -15,6 +15,8 @@
   or website technology in inventory views.
 - Parse IPv6 and wildcard Nginx listen directives so virtual-host ports and
   listener status remain accurate.
+- Parse complete reverse-proxy backend endpoints so bracketed IPv6 targets
+  retain their host and port across Nginx, Apache, HAProxy, and Traefik.
 - Track interface-address collection as an explicit host-identity probe, include
   host identity in report JSON schema 2.1, and treat missing identity status in
   legacy records as unknown rather than complete.

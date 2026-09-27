@@ -14,7 +14,7 @@ const MAX_CONFIG_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_CONFIG_TREE_ENTRIES: usize = 20_000;
 const MAX_CONFIG_TREE_DEPTH: usize = 32;
 const MAX_AUDIT_ERRORS: usize = 100;
-const SCANNER_VERSION: &str = "config-scanner/9";
+const SCANNER_VERSION: &str = "config-scanner/10";
 const DB_HOST_REGEX: &str = r#"(?mi)(DB_HOST|DATABASE_HOST|database\.host|mysql\.host|postgres\.host|POSTGRES_HOST|DATABASES.*host)\s*[=:]\s*["']?([^\s;,"'\n}]+)"#;
 const REDIS_HOST_REGEX: &str =
     r#"(?mi)(?:REDIS_HOST|CACHE_URL|redis\.host|cache\.redis)\s*[=:]\s*["']?([^\s;,"'\n}]+)"#;
@@ -28,8 +28,8 @@ const DATABASE_PORT_REGEX: &str = r"(?mi)^\s*port\s*=\s*(\d+)\s*$";
 const DATABASE_BIND_REGEX: &str = r"(?mi)^\s*bind-address\s*=\s*([^\s\n]+)";
 const CONFIG_REGEX_PATTERNS: &[&str] = &[
     r"(?m)upstream\s+\w+\s*\{([^}]+)\}",
-    r"(?m)server\s+([^\s;]+)(?::(\d+))?",
-    r"proxy_pass\s+(?:https?://)?([^/:]+)(?::(\d+))?",
+    r"(?m)server\s+([^\s;]+)",
+    r"proxy_pass\s+([^\s;]+)",
     r"\bserver_name\s+([^;]+);",
     r"\broot\s+([^;]+);",
     r"\blisten\s+([^;]+);",
@@ -38,9 +38,9 @@ const CONFIG_REGEX_PATTERNS: &[&str] = &[
     r"(?mi)^\s*ServerName\s+(\S+)",
     r"(?mi)^\s*ServerAlias\s+(.+)",
     r"(?mi)^\s*DocumentRoot\s+([^\s#]+)",
-    r"(?mi)^\s*ProxyPass\s+\S+\s+(?:https?://)?([^/:\s]+)(?::(\d+))?",
-    r"(?mi)^\s*server\s+\S+\s+(?:[a-z0-9_-]+@)?([^\s:]+)(?::(\d+))?",
-    r##"(?mi)\burl\s*[:=]\s*["']?(?:https?://)?([^/:\s"']+)(?::(\d+))?"##,
+    r"(?mi)^\s*ProxyPass\s+\S+\s+([^\s]+)",
+    r"(?mi)^\s*server\s+\S+\s+(?:[a-z0-9_-]+@)?([^\s]+)",
+    r##"(?mi)\burl\s*[:=]\s*["']?([^;,\s"']+)"##,
     r"(?m)^\s*([^{}]+)\{([^}]*)\}",
     r"(?m)^\s*root\s+\S+\s+([^\s#]+)",
     r"(?m)^\s*reverse_proxy(?:\s+\S+)?\s+([^\s{,]+)",
@@ -277,8 +277,8 @@ impl ConfigScanner {
         let mut refs = Vec::new();
 
         let upstream_re = Self::compiled_regex(r"(?m)upstream\s+\w+\s*\{([^}]+)\}");
-        let server_re = Self::compiled_regex(r"(?m)server\s+([^\s;]+)(?::(\d+))?");
-        let proxy_re = Self::compiled_regex(r"proxy_pass\s+(?:https?://)?([^/:]+)(?::(\d+))?");
+        let server_re = Self::compiled_regex(r"(?m)server\s+([^\s;]+)");
+        let proxy_re = Self::compiled_regex(r"proxy_pass\s+([^\s;]+)");
         let name_re = Self::compiled_regex(r"\bserver_name\s+([^;]+);");
         let root_re = Self::compiled_regex(r"\broot\s+([^;]+);");
         let listen_re = Self::compiled_regex(r"\blisten\s+([^;]+);");
@@ -339,10 +339,7 @@ impl ConfigScanner {
             if let Some(upstream_block) = caps.get(1) {
                 for server_cap in server_re.captures_iter(upstream_block.as_str()) {
                     if let Some(host) = server_cap.get(1) {
-                        let hostname = host.as_str().to_string();
-                        let port = server_cap.get(2).and_then(|p| Self::parse_port(p.as_str()));
-
-                        if Self::is_valid_hostname(&hostname) {
+                        if let Some((hostname, port)) = Self::parse_target(host.as_str()) {
                             refs.push(ConfigReference {
                                 file_path: path.display().to_string(),
                                 hostname,
@@ -358,10 +355,7 @@ impl ConfigScanner {
 
         for caps in proxy_re.captures_iter(&content) {
             if let Some(host) = caps.get(1) {
-                let hostname = host.as_str().to_string();
-                let port = caps.get(2).and_then(|p| Self::parse_port(p.as_str()));
-
-                if Self::is_valid_hostname(&hostname) {
+                if let Some((hostname, port)) = Self::parse_target(host.as_str()) {
                     refs.push(ConfigReference {
                         file_path: path.display().to_string(),
                         hostname,
@@ -511,8 +505,7 @@ impl ConfigScanner {
         let name_re = Self::compiled_regex(r"(?mi)^\s*ServerName\s+(\S+)");
         let alias_re = Self::compiled_regex(r"(?mi)^\s*ServerAlias\s+(.+)");
         let root_re = Self::compiled_regex(r"(?mi)^\s*DocumentRoot\s+([^\s#]+)");
-        let proxy_re =
-            Self::compiled_regex(r"(?mi)^\s*ProxyPass\s+\S+\s+(?:https?://)?([^/:\s]+)(?::(\d+))?");
+        let proxy_re = Self::compiled_regex(r"(?mi)^\s*ProxyPass\s+\S+\s+([^\s]+)");
 
         for capture in vhost_re.captures_iter(&content) {
             let specification = capture
@@ -563,16 +556,14 @@ impl ConfigScanner {
                 });
             }
             for proxy in proxy_re.captures_iter(block) {
-                let Some(hostname) = proxy.get(1).map(|value| value.as_str()) else {
+                let Some(target) = proxy.get(1).map(|value| value.as_str()) else {
                     continue;
                 };
-                if Self::is_valid_hostname(hostname) {
+                if let Some((hostname, port)) = Self::parse_target(target) {
                     refs.push(ConfigReference {
                         file_path: path.display().to_string(),
-                        hostname: hostname.to_string(),
-                        port: proxy
-                            .get(2)
-                            .and_then(|value| Self::parse_port(value.as_str())),
+                        hostname,
+                        port,
                         context: "apache proxy_pass".to_string(),
                         config_line: None,
                     });
@@ -595,20 +586,17 @@ impl ConfigScanner {
 
     fn parse_haproxy_config(path: &Path, content: &str) -> Result<Vec<ConfigReference>> {
         let content = Self::strip_comments(content, '#');
-        let server_re =
-            Self::compiled_regex(r"(?mi)^\s*server\s+\S+\s+(?:[a-z0-9_-]+@)?([^\s:]+)(?::(\d+))?");
+        let server_re = Self::compiled_regex(r"(?mi)^\s*server\s+\S+\s+(?:[a-z0-9_-]+@)?([^\s]+)");
         let mut refs = Vec::new();
         for capture in server_re.captures_iter(&content) {
-            let Some(hostname) = capture.get(1).map(|value| value.as_str()) else {
+            let Some(target) = capture.get(1).map(|value| value.as_str()) else {
                 continue;
             };
-            if Self::is_valid_hostname(hostname) {
+            if let Some((hostname, port)) = Self::parse_target(target) {
                 refs.push(ConfigReference {
                     file_path: path.display().to_string(),
-                    hostname: hostname.to_string(),
-                    port: capture
-                        .get(2)
-                        .and_then(|value| Self::parse_port(value.as_str())),
+                    hostname,
+                    port,
                     context: "haproxy backend".to_string(),
                     config_line: None,
                 });
@@ -630,21 +618,17 @@ impl ConfigScanner {
 
     fn parse_traefik_config(path: &Path, content: &str) -> Result<Vec<ConfigReference>> {
         let content = Self::strip_comments(content, '#');
-        let url_re = Self::compiled_regex(
-            r##"(?mi)\burl\s*[:=]\s*["']?(?:https?://)?([^/:\s"']+)(?::(\d+))?"##,
-        );
+        let url_re = Self::compiled_regex(r##"(?mi)\burl\s*[:=]\s*["']?([^;,\s"']+)"##);
         let mut refs = Vec::new();
         for capture in url_re.captures_iter(&content) {
-            let Some(hostname) = capture.get(1).map(|value| value.as_str()) else {
+            let Some(target) = capture.get(1).map(|value| value.as_str()) else {
                 continue;
             };
-            if Self::is_valid_hostname(hostname) {
+            if let Some((hostname, port)) = Self::parse_target(target) {
                 refs.push(ConfigReference {
                     file_path: path.display().to_string(),
-                    hostname: hostname.to_string(),
-                    port: capture
-                        .get(2)
-                        .and_then(|value| Self::parse_port(value.as_str())),
+                    hostname,
+                    port,
                     context: "traefik service".to_string(),
                     config_line: None,
                 });
@@ -1501,7 +1485,7 @@ mod tests {
 
     #[test]
     fn scanner_version_identifies_current_database_discovery_rules() {
-        assert_eq!(SCANNER_VERSION, "config-scanner/9");
+        assert_eq!(SCANNER_VERSION, "config-scanner/10");
     }
 
     #[test]
@@ -1720,6 +1704,29 @@ mod tests {
     }
 
     #[test]
+    fn reverse_proxy_parsers_preserve_ipv6_backend_endpoints() {
+        let nginx = ConfigScanner::parse_nginx_config(
+            Path::new("/etc/nginx/conf.d/upstream.conf"),
+            concat!(
+                "upstream app { server [2001:db8::10]:9000; }\n",
+                "server { server_name app.example.com; location / { ",
+                "proxy_pass https://[2001:db8::11]:9443/api; } }\n",
+            ),
+        )
+        .unwrap();
+        assert!(nginx.iter().any(|reference| {
+            reference.hostname == "2001:db8::10"
+                && reference.port == Some(9000)
+                && reference.context == "nginx upstream"
+        }));
+        assert!(nginx.iter().any(|reference| {
+            reference.hostname == "2001:db8::11"
+                && reference.port == Some(9443)
+                && reference.context == "proxy_pass"
+        }));
+    }
+
+    #[test]
     fn nginx_unix_socket_listener_is_not_misreported_as_default_port_80() {
         let refs = ConfigScanner::parse_nginx_config(
             Path::new("/etc/nginx/conf.d/unix-socket.conf"),
@@ -1803,6 +1810,15 @@ mod tests {
                 && reference.port == Some(8080)
                 && reference.context == "apache proxy_pass"
         }));
+
+        let ipv6_refs = ConfigScanner::parse_apache_config(
+            Path::new("/etc/apache2/sites-enabled/ipv6.conf"),
+            "<VirtualHost *:443>\nServerName v6.example.com\nProxyPass /api http://[2001:db8::3]:8081/api\n</VirtualHost>",
+        )
+        .unwrap();
+        assert!(ipv6_refs.iter().any(|reference| {
+            reference.hostname == "2001:db8::3" && reference.port == Some(8081)
+        }));
     }
 
     #[test]
@@ -1817,6 +1833,15 @@ mod tests {
         assert_eq!(refs[0].hostname, "app.internal");
         assert_eq!(refs[0].port, Some(8080));
         assert_eq!(refs[0].context, "haproxy backend");
+
+        let ipv6_refs = ConfigScanner::parse_haproxy_config(
+            Path::new("/etc/haproxy/haproxy.cfg"),
+            "backend app\n  server app01 [2001:db8::4]:8443 check",
+        )
+        .unwrap();
+        assert!(ipv6_refs
+            .iter()
+            .any(|reference| reference.hostname == "2001:db8::4" && reference.port == Some(8443)));
     }
 
     #[test]
@@ -1830,6 +1855,15 @@ mod tests {
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].hostname, "app.internal");
         assert_eq!(refs[0].port, Some(8080));
+
+        let ipv6_refs = ConfigScanner::parse_traefik_config(
+            Path::new("/etc/traefik/dynamic.yml"),
+            "http:\n  services:\n    app:\n      loadBalancer:\n        servers:\n          - url: https://[2001:db8::5]:9443/api",
+        )
+        .unwrap();
+        assert!(ipv6_refs
+            .iter()
+            .any(|reference| reference.hostname == "2001:db8::5" && reference.port == Some(9443)));
     }
 
     #[test]
