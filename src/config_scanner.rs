@@ -729,21 +729,16 @@ impl ConfigScanner {
             let suffix = &value[closing + 1..];
             let port = if suffix.is_empty() {
                 default_port
-            } else if let Some(port) = suffix.strip_prefix(':') {
-                Some(Self::parse_port(port)?)
             } else {
-                return None;
+                let port = suffix.strip_prefix(':')?;
+                Some(Self::parse_port(port)?)
             };
             (hostname, port)
         } else if value.parse::<std::net::IpAddr>().is_ok() {
             (value, default_port)
         } else if let Some((hostname, port)) = value.rsplit_once(':') {
             if !hostname.contains(':') {
-                if let Some(port) = Self::parse_port(port) {
-                    (hostname, Some(port))
-                } else {
-                    return None;
-                }
+                (hostname, Some(Self::parse_port(port)?))
             } else {
                 (value, default_port)
             }
