@@ -102,6 +102,7 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
         ("DNS", "dns"),
         ("Cron jobs", "cron"),
         ("Systemd timers", "systemd"),
+        ("Host identity", "host_identity"),
     ]
     .into_iter()
     .map(|(label, key)| {
@@ -111,6 +112,7 @@ pub fn render_dashboard(hostname: &str, analysis: &AnalysisResult) -> Result<Str
             "process_attribution" => &analysis.probe_statuses.process_attribution.state,
             "config_scan" => &analysis.probe_statuses.config_scan.state,
             "dns" => &analysis.probe_statuses.dns.state,
+            "host_identity" => &analysis.probe_statuses.host_identity.state,
             "cron" => &analysis.probe_statuses.cron.state,
             _ => &analysis.probe_statuses.systemd.state,
         };

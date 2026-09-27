@@ -731,6 +731,7 @@ impl<'a> Analyzer<'a> {
             ("systemd", &statuses.systemd),
             ("config_scan", &statuses.config_scan),
             ("dns", &statuses.dns),
+            ("host_identity", &statuses.host_identity),
         ] {
             if !status.is_complete() {
                 incomplete.push(format!("{}: {:?}", name, status.state));
@@ -1547,11 +1548,15 @@ impl<'a> Analyzer<'a> {
             "config_scan",
             "cron",
             "systemd",
+            "host_identity",
         ];
         let mut probe_coverage = HashMap::new();
         let mut remaining_unknowns = Vec::new();
         for name in probe_names {
-            let slow_probe = matches!(name, "dns" | "config_scan" | "cron" | "systemd");
+            let slow_probe = matches!(
+                name,
+                "dns" | "config_scan" | "cron" | "systemd" | "host_identity"
+            );
             let probe_samples = if slow_probe {
                 &slow_inventory_samples
             } else {
@@ -1725,6 +1730,7 @@ impl<'a> Analyzer<'a> {
             "config_scan" => &snapshot.probe_statuses.config_scan,
             "cron" => &snapshot.probe_statuses.cron,
             "systemd" => &snapshot.probe_statuses.systemd,
+            "host_identity" => &snapshot.probe_statuses.host_identity,
             _ => unreachable!("unknown probe name"),
         }
     }
@@ -1734,6 +1740,7 @@ impl<'a> Analyzer<'a> {
             && snapshot.probe_statuses.config_scan.is_complete()
             && snapshot.probe_statuses.cron.is_complete()
             && snapshot.probe_statuses.systemd.is_complete()
+            && snapshot.probe_statuses.host_identity.is_complete()
     }
 
     fn estimated_interval_seconds(snapshots: &[ObservationSnapshot]) -> i64 {

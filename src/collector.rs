@@ -181,12 +181,11 @@ impl Collector {
                     probe_statuses.dns = ProbeStatus::failed(error.to_string());
                 }
             }
+            let (host_identity, host_identity_status) = Self::collect_host_identity(&hostname);
+            state.host_identity = host_identity;
+            probe_statuses.host_identity = host_identity_status;
             state.slow_probe_statuses = probe_statuses.clone();
             state.last_slow_refresh = Some(Instant::now());
-        }
-
-        if refresh_slow {
-            state.host_identity = Self::collect_host_identity(&hostname);
         }
         Ok(ObservationSnapshot {
             timestamp,
@@ -276,6 +275,7 @@ impl Collector {
             && statuses.systemd.is_complete()
             && statuses.config_scan.is_complete()
             && statuses.dns.is_complete()
+            && statuses.host_identity.is_complete()
         {
             SLOW_REFRESH_INTERVAL
         } else {
@@ -308,12 +308,12 @@ impl Collector {
         Some(ProbeStatus::partial(details, unavailable))
     }
 
-    fn collect_host_identity(hostname: &str) -> HostIdentity {
+    fn collect_host_identity(hostname: &str) -> (HostIdentity, ProbeStatus) {
         let short_hostname = hostname.split('.').next().unwrap_or(hostname).to_string();
         let fqdn = Self::command_text("hostname", &["--fqdn"])
             .filter(|value| value.contains('.'))
             .or_else(|| hostname.contains('.').then(|| hostname.to_string()));
-        let interface_addresses = Self::interface_addresses();
+        let (interface_addresses, status) = Self::interface_addresses();
         let ipv4_addresses = interface_addresses
             .iter()
             .filter(|address| address.parse::<std::net::Ipv4Addr>().is_ok())
@@ -326,28 +326,31 @@ impl Collector {
             .collect();
         let dns_aliases = Self::hosts_aliases(hostname, &interface_addresses);
 
-        HostIdentity {
-            hostname: hostname.to_string(),
-            fqdn,
-            short_hostname,
-            host_uuid: Self::read_identity_file("/sys/class/dmi/id/product_uuid"),
-            machine_id: Self::read_identity_file("/etc/machine-id")
-                .or_else(|| Self::read_identity_file("/var/lib/dbus/machine-id")),
-            cloud_instance_id: [
-                "/var/lib/cloud/instance/instance-id",
-                "/var/lib/cloud/data/instance-id",
-            ]
-            .into_iter()
-            .find_map(Self::read_identity_file),
-            ipv4_addresses,
-            ipv6_addresses,
-            vip_addresses: Vec::new(),
-            interface_addresses,
-            dns_aliases,
-            // Container addresses require a container-runtime API or namespace
-            // inspection and are intentionally left empty when unavailable.
-            container_addresses: Vec::new(),
-        }
+        (
+            HostIdentity {
+                hostname: hostname.to_string(),
+                fqdn,
+                short_hostname,
+                host_uuid: Self::read_identity_file("/sys/class/dmi/id/product_uuid"),
+                machine_id: Self::read_identity_file("/etc/machine-id")
+                    .or_else(|| Self::read_identity_file("/var/lib/dbus/machine-id")),
+                cloud_instance_id: [
+                    "/var/lib/cloud/instance/instance-id",
+                    "/var/lib/cloud/data/instance-id",
+                ]
+                .into_iter()
+                .find_map(Self::read_identity_file),
+                ipv4_addresses,
+                ipv6_addresses,
+                vip_addresses: Vec::new(),
+                interface_addresses,
+                dns_aliases,
+                // Container addresses require a container-runtime API or namespace
+                // inspection and are intentionally left empty when unavailable.
+                container_addresses: Vec::new(),
+            },
+            status,
+        )
     }
 
     fn read_identity_file(path: &str) -> Option<String> {
@@ -542,7 +545,7 @@ impl Collector {
             })
     }
 
-    fn interface_addresses() -> Vec<String> {
+    fn interface_addresses() -> (Vec<String>, ProbeStatus) {
         if let Some(output) = Self::command_text("ip", &["-j", "-o", "address", "show"]) {
             if let Ok(interfaces) = serde_json::from_str::<serde_json::Value>(&output) {
                 let addresses = interfaces
@@ -556,14 +559,32 @@ impl Collector {
                     .map(str::to_string)
                     .collect::<Vec<_>>();
                 if !addresses.is_empty() {
-                    return addresses;
+                    return (addresses, ProbeStatus::complete());
                 }
             }
         }
 
-        Self::command_text("hostname", &["-I"])
-            .map(|value| value.split_whitespace().map(str::to_string).collect())
-            .unwrap_or_default()
+        match Self::command_text("hostname", &["-I"]) {
+            Some(value) => {
+                let addresses = value
+                    .split_whitespace()
+                    .filter(|address| address.parse::<std::net::IpAddr>().is_ok())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>();
+                if addresses.is_empty() {
+                    (
+                        addresses,
+                        ProbeStatus::partial("no interface addresses were reported", 1),
+                    )
+                } else {
+                    (addresses, ProbeStatus::complete())
+                }
+            }
+            None => (
+                Vec::new(),
+                ProbeStatus::failed("unable to collect interface addresses using ip or hostname"),
+            ),
+        }
     }
 
     fn hosts_aliases(hostname: &str, interface_addresses: &[String]) -> Vec<String> {
@@ -1863,6 +1884,15 @@ mod tests {
         );
 
         let statuses = ProbeStatuses {
+            host_identity: crate::models::ProbeStatus::failed("address tools unavailable"),
+            ..ProbeStatuses::default()
+        };
+        assert_eq!(
+            Collector::slow_refresh_interval(&statuses),
+            Duration::from_secs(5 * 60)
+        );
+
+        let statuses = ProbeStatuses {
             process_attribution: crate::models::ProbeStatus::partial("limited", 1),
             ..ProbeStatuses::default()
         };
@@ -1870,6 +1900,20 @@ mod tests {
             Collector::slow_refresh_interval(&statuses),
             Duration::from_secs(60 * 60)
         );
+    }
+
+    #[test]
+    fn older_probe_status_records_treat_host_identity_as_unknown() {
+        let mut value = serde_json::to_value(ProbeStatuses::default()).unwrap();
+        value.as_object_mut().unwrap().remove("host_identity");
+        let decoded: ProbeStatuses = serde_json::from_value(value).unwrap();
+        assert!(!decoded.host_identity.is_complete());
+        assert!(decoded
+            .host_identity
+            .details
+            .as_deref()
+            .unwrap()
+            .contains("unavailable"));
     }
 
     #[test]

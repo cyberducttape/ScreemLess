@@ -65,6 +65,8 @@ pub struct ProbeStatuses {
     pub systemd: ProbeStatus,
     pub config_scan: ProbeStatus,
     pub dns: ProbeStatus,
+    #[serde(default = "unknown_host_identity_status")]
+    pub host_identity: ProbeStatus,
 }
 
 impl ProbeStatuses {
@@ -75,6 +77,7 @@ impl ProbeStatuses {
             && self.systemd.is_complete()
             && self.config_scan.is_complete()
             && self.dns.is_complete()
+            && self.host_identity.is_complete()
     }
 
     pub fn merge(&mut self, other: &Self) {
@@ -84,6 +87,7 @@ impl ProbeStatuses {
         Self::merge_status(&mut self.systemd, &other.systemd);
         Self::merge_status(&mut self.config_scan, &other.config_scan);
         Self::merge_status(&mut self.dns, &other.dns);
+        Self::merge_status(&mut self.host_identity, &other.host_identity);
     }
 
     fn merge_status(current: &mut ProbeStatus, other: &ProbeStatus) {
@@ -113,8 +117,13 @@ impl ProbeStatuses {
             systemd: unknown(),
             config_scan: unknown(),
             dns: unknown(),
+            host_identity: unknown(),
         }
     }
+}
+
+fn unknown_host_identity_status() -> ProbeStatus {
+    ProbeStatus::failed("host identity probe status unavailable for this snapshot")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
