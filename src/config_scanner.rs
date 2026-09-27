@@ -286,14 +286,7 @@ impl ConfigScanner {
                 .captures_iter(&directives)
                 .filter_map(|capture| capture.get(1))
                 .filter_map(|value| value.as_str().split_whitespace().next())
-                .filter_map(|value| {
-                    value
-                        .rsplit(':')
-                        .next()
-                        .unwrap_or(value)
-                        .parse::<u16>()
-                        .ok()
-                })
+                .filter_map(|value| Self::parse_port(value.rsplit(':').next().unwrap_or(value)))
                 .collect::<Vec<_>>();
             // Nginx HTTP server blocks default to port 80 when no listen
             // directive is present. Preserve that port so virtual hosts using
@@ -340,7 +333,7 @@ impl ConfigScanner {
                 for server_cap in server_re.captures_iter(upstream_block.as_str()) {
                     if let Some(host) = server_cap.get(1) {
                         let hostname = host.as_str().to_string();
-                        let port = server_cap.get(2).and_then(|p| p.as_str().parse().ok());
+                        let port = server_cap.get(2).and_then(|p| Self::parse_port(p.as_str()));
 
                         if Self::is_valid_hostname(&hostname) {
                             refs.push(ConfigReference {
@@ -359,7 +352,7 @@ impl ConfigScanner {
         for caps in proxy_re.captures_iter(&content) {
             if let Some(host) = caps.get(1) {
                 let hostname = host.as_str().to_string();
-                let port = caps.get(2).and_then(|p| p.as_str().parse().ok());
+                let port = caps.get(2).and_then(|p| Self::parse_port(p.as_str()));
 
                 if Self::is_valid_hostname(&hostname) {
                     refs.push(ConfigReference {
@@ -513,7 +506,7 @@ impl ConfigScanner {
             let ports = specification
                 .split_whitespace()
                 .filter_map(|value| value.rsplit(':').next())
-                .filter_map(|value| value.parse::<u16>().ok())
+                .filter_map(Self::parse_port)
                 .collect::<Vec<_>>();
             let root = root_re
                 .captures(block)
@@ -557,7 +550,9 @@ impl ConfigScanner {
                     refs.push(ConfigReference {
                         file_path: path.display().to_string(),
                         hostname: hostname.to_string(),
-                        port: proxy.get(2).and_then(|value| value.as_str().parse().ok()),
+                        port: proxy
+                            .get(2)
+                            .and_then(|value| Self::parse_port(value.as_str())),
                         context: "apache proxy_pass".to_string(),
                         config_line: None,
                     });
@@ -591,7 +586,9 @@ impl ConfigScanner {
                 refs.push(ConfigReference {
                     file_path: path.display().to_string(),
                     hostname: hostname.to_string(),
-                    port: capture.get(2).and_then(|value| value.as_str().parse().ok()),
+                    port: capture
+                        .get(2)
+                        .and_then(|value| Self::parse_port(value.as_str())),
                     context: "haproxy backend".to_string(),
                     config_line: None,
                 });
@@ -625,7 +622,9 @@ impl ConfigScanner {
                 refs.push(ConfigReference {
                     file_path: path.display().to_string(),
                     hostname: hostname.to_string(),
-                    port: capture.get(2).and_then(|value| value.as_str().parse().ok()),
+                    port: capture
+                        .get(2)
+                        .and_then(|value| Self::parse_port(value.as_str())),
                     context: "traefik service".to_string(),
                     config_line: None,
                 });
@@ -704,6 +703,11 @@ impl ConfigScanner {
         Self::parse_endpoint(target, None)
     }
 
+    fn parse_port(value: &str) -> Option<u16> {
+        let port = value.parse::<u16>().ok()?;
+        (port > 0).then_some(port)
+    }
+
     fn parse_endpoint(value: &str, default_port: Option<u16>) -> Option<(String, Option<u16>)> {
         let value = value.trim().trim_matches('"').trim_matches('\'');
         if value.is_empty() || value.starts_with('/') || value.starts_with("unix://") {
@@ -722,16 +726,24 @@ impl ConfigScanner {
         let (hostname, port) = if value.starts_with('[') {
             let closing = value.find(']')?;
             let hostname = &value[1..closing];
-            let port = match value[closing + 1..].strip_prefix(':') {
-                Some(port) => Some(port.parse::<u16>().ok()?),
-                None => default_port,
+            let suffix = &value[closing + 1..];
+            let port = if suffix.is_empty() {
+                default_port
+            } else if let Some(port) = suffix.strip_prefix(':') {
+                Some(Self::parse_port(port)?)
+            } else {
+                return None;
             };
             (hostname, port)
         } else if value.parse::<std::net::IpAddr>().is_ok() {
             (value, default_port)
         } else if let Some((hostname, port)) = value.rsplit_once(':') {
-            if !hostname.contains(':') && port.parse::<u16>().is_ok() {
-                (hostname, port.parse::<u16>().ok())
+            if !hostname.contains(':') {
+                if let Some(port) = Self::parse_port(port) {
+                    (hostname, Some(port))
+                } else {
+                    return None;
+                }
             } else {
                 (value, default_port)
             }
@@ -764,14 +776,14 @@ impl ConfigScanner {
             let port = if suffix.is_empty() {
                 None
             } else {
-                Some(suffix.strip_prefix(':')?.parse::<u16>().ok()?)
+                Some(Self::parse_port(suffix.strip_prefix(':')?)?)
             };
             (hostname, port)
         } else if let Some((hostname, port)) = host_port.rsplit_once(':') {
             if hostname.contains(':') {
                 return None;
             }
-            (hostname, Some(port.parse::<u16>().ok()?))
+            (hostname, Some(Self::parse_port(port)?))
         } else {
             (host_port, None)
         };
@@ -834,7 +846,7 @@ impl ConfigScanner {
                 if addr_str.contains(':') && !addr_str.starts_with('/') {
                     if let Some(colon_pos) = addr_str.rfind(':') {
                         let hostname = addr_str[..colon_pos].to_string();
-                        let port = addr_str[colon_pos + 1..].parse().ok();
+                        let port = Self::parse_port(&addr_str[colon_pos + 1..]);
 
                         if Self::is_valid_hostname(&hostname) && hostname != "127.0.0.1" {
                             refs.push(ConfigReference {
@@ -1192,8 +1204,7 @@ impl ConfigScanner {
         let port_re = Self::compiled_regex(DATABASE_PORT_REGEX);
         let port = port_re
             .captures_iter(&server_content)
-            .filter_map(|capture| capture.get(1)?.as_str().parse::<u16>().ok())
-            .filter(|port| *port != 0)
+            .filter_map(|capture| Self::parse_port(capture.get(1)?.as_str()))
             .last()
             .unwrap_or(default_port);
 
@@ -1910,6 +1921,23 @@ mod tests {
             ConfigScanner::parse_endpoint("http://example.internal:invalid", None),
             None
         );
+    }
+
+    #[test]
+    fn endpoint_parser_rejects_zero_ports_and_malformed_ipv6_suffixes() {
+        for endpoint in [
+            "db01.internal:0",
+            "[2001:db8::1]:0",
+            "postgres://db01.internal:0",
+            "https://[2001:db8::1]:0/path",
+            "[2001:db8::1]unexpected",
+        ] {
+            assert_eq!(
+                ConfigScanner::parse_endpoint(endpoint, None),
+                None,
+                "endpoint {endpoint} should be rejected"
+            );
+        }
     }
 
     #[test]

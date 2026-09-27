@@ -12,6 +12,8 @@
   Memcached, and SQL Server processes in package-metadata software inventory.
 - Discover common and nested/versioned MySQL, MariaDB, and PostgreSQL server
   configs and use each database's protocol default or configured listener port.
+- Reject port zero in parsed config endpoints and reject malformed suffixes on
+  bracketed IPv6 literals.
 - Read MySQL/MariaDB bind and port settings only from server option groups, not
   client-only groups.
 - Keep database server listener settings from falsely corroborating outbound
