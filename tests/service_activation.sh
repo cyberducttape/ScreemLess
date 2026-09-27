@@ -9,6 +9,8 @@ for directive in \
     'NoNewPrivileges=yes' \
     'PrivateTmp=true' \
     'PrivateDevices=true' \
+    'StateDirectory=screamless' \
+    'StateDirectoryMode=0750' \
     'ProtectHome=read-only' \
     'ProtectSystem=strict' \
     'ReadWritePaths=/var/lib/screamless' \
