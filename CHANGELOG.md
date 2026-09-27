@@ -22,6 +22,8 @@
   privileged collector cannot be redirected to an unintended database target.
 - Run an end-to-end dashboard drag regression test in Chromium and Firefox in CI.
 - Build and inspect Debian/RPM package artifacts in regular CI, not only release jobs.
+- Parse complete sanitized `ss` and `netstat` output fixtures, covering IPv4,
+  IPv6, process attribution, listeners, UDP, and normal tool headers.
 - Preserve recognized software processes in inventory when `/proc/PID/exe`
   cannot be read, marking the version unavailable instead of omitting evidence.
 - Apply Nginx's default HTTP port to server blocks without `listen` directives

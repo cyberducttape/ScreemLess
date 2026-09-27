@@ -1,0 +1,5 @@
+Netid State  Recv-Q Send-Q Local Address:Port Peer Address:Port Process
+tcp   ESTAB  0      0      192.0.2.10:52000 192.0.2.20:443 users:(("worker",pid=1234,fd=8))
+tcp   ESTAB  0      0      [2001:db8::10]:52001 [2001:db8::20]:443 users:(("worker",pid=1234,fd=9))
+tcp   LISTEN 0      128    0.0.0.0:8080     0.0.0.0:*
+udp   UNCONN 0      0      0.0.0.0:5353     0.0.0.0:*

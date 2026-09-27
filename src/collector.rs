@@ -637,13 +637,21 @@ impl Collector {
     fn collect_network_connections(
         pid_to_process: &HashMap<u32, (String, u32, String)>,
     ) -> Result<(Vec<NetworkConnection>, usize, usize)> {
+        let output = Self::run_socket_probe(&["-tunp"])?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Ok(Self::parse_network_connections_output(
+            &stdout,
+            pid_to_process,
+        ))
+    }
+
+    fn parse_network_connections_output(
+        stdout: &str,
+        pid_to_process: &HashMap<u32, (String, u32, String)>,
+    ) -> (Vec<NetworkConnection>, usize, usize) {
         let mut connections = Vec::new();
         let mut unavailable = 0;
         let mut malformed = 0;
-
-        let output = Self::run_socket_probe(&["-tunp"])?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
 
         for line in stdout.lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
@@ -681,7 +689,7 @@ impl Collector {
             }
         }
 
-        Ok((connections, unavailable, malformed))
+        (connections, unavailable, malformed)
     }
 
     fn run_socket_probe(args: &[&str]) -> Result<Output> {
@@ -1388,6 +1396,7 @@ impl Collector {
 mod tests {
     use super::Collector;
     use crate::models::{ConfigScanAudit, ProbeStatuses};
+    use std::collections::HashMap;
     use std::time::Duration;
 
     #[test]
@@ -1651,6 +1660,44 @@ mod tests {
         assert!(parts.contains(&"ESTAB"));
         assert!(Collector::is_socket_record(&parts));
         assert_eq!(Collector::find_endpoints(&parts).len(), 2);
+    }
+
+    #[test]
+    fn parses_complete_iproute2_ss_fixture() {
+        let pid_map = HashMap::from([(1234, ("worker".to_string(), 1000, "worker".to_string()))]);
+        let (connections, unavailable, malformed) = Collector::parse_network_connections_output(
+            include_str!("../tests/fixtures/network/ss-iproute2.txt"),
+            &pid_map,
+        );
+
+        assert_eq!(connections.len(), 2);
+        assert_eq!(unavailable, 0);
+        assert_eq!(malformed, 0);
+        assert_eq!(connections[0].local_addr, "192.0.2.10");
+        assert_eq!(connections[0].remote_addr, "192.0.2.20");
+        assert_eq!(connections[0].remote_port, 443);
+        assert_eq!(connections[0].process_name, "worker");
+        assert_eq!(connections[1].local_addr, "2001:db8::10");
+        assert_eq!(connections[1].remote_addr, "2001:db8::20");
+        assert_eq!(connections[1].protocol, "tcp");
+    }
+
+    #[test]
+    fn parses_complete_netstat_fixture() {
+        let pid_map = HashMap::from([(1234, ("worker".to_string(), 1000, "worker".to_string()))]);
+        let (connections, unavailable, malformed) = Collector::parse_network_connections_output(
+            include_str!("../tests/fixtures/network/netstat-ubuntu.txt"),
+            &pid_map,
+        );
+
+        assert_eq!(connections.len(), 2);
+        assert_eq!(unavailable, 0);
+        assert_eq!(malformed, 0);
+        assert_eq!(connections[0].remote_addr, "127.0.0.1");
+        assert_eq!(connections[0].remote_port, 40689);
+        assert_eq!(connections[0].process_name, "worker");
+        assert_eq!(connections[1].local_addr, "2001:db8::10");
+        assert_eq!(connections[1].remote_addr, "2001:db8::20");
     }
 
     #[test]

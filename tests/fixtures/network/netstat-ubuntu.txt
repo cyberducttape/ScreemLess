@@ -1,0 +1,5 @@
+Active Internet connections (w/o servers)
+Proto Recv-Q Send-Q Local Address           Foreign Address         State       PID/Program name
+tcp        0      0 127.0.0.1:58182         127.0.0.1:40689         ESTABLISHED 1234/worker
+tcp6       0      0 2001:db8::10:52000       2001:db8::20:443        ESTABLISHED 1234/worker
+tcp        0      0 127.0.0.1:8080          0.0.0.0:*               LISTEN      1234/worker
