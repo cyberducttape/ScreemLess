@@ -4,6 +4,29 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT_DIR/packaging/service-activation.sh"
 
+SERVICE_UNIT="$ROOT_DIR/packaging/screamless-agent.service"
+for directive in \
+    'NoNewPrivileges=yes' \
+    'PrivateTmp=true' \
+    'PrivateDevices=true' \
+    'ProtectHome=read-only' \
+    'ProtectSystem=strict' \
+    'ReadWritePaths=/var/lib/screamless' \
+    'ProtectClock=yes' \
+    'ProtectHostname=yes' \
+    'ProtectKernelLogs=yes' \
+    'LockPersonality=yes' \
+    'MemoryDenyWriteExecute=yes' \
+    'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK' \
+    'RestrictNamespaces=yes' \
+    'RestrictRealtime=yes' \
+    'RestrictSUIDSGID=yes'; do
+    grep -Fxq "$directive" "$SERVICE_UNIT" || {
+        echo "Missing systemd hardening directive: $directive" >&2
+        exit 1
+    }
+done
+
 CALLS=()
 ACTIVE_STATUS=0
 systemctl() {

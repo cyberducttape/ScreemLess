@@ -13,12 +13,21 @@ Group=root
 UMask=0077
 NoNewPrivileges=yes
 PrivateTmp=true
+PrivateDevices=true
 ProtectHome=read-only
 ProtectSystem=strict
 ReadWritePaths=/var/lib/screamless
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
 RestrictSUIDSGID=yes
 
 [Install]
