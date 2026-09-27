@@ -14,7 +14,7 @@ const MAX_CONFIG_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_CONFIG_TREE_ENTRIES: usize = 20_000;
 const MAX_CONFIG_TREE_DEPTH: usize = 32;
 const MAX_AUDIT_ERRORS: usize = 100;
-const SCANNER_VERSION: &str = "config-scanner/7";
+const SCANNER_VERSION: &str = "config-scanner/8";
 const DB_HOST_REGEX: &str = r#"(?mi)(DB_HOST|DATABASE_HOST|database\.host|mysql\.host|postgres\.host|POSTGRES_HOST|DATABASES.*host)\s*[=:]\s*["']?([^\s;,"'\n}]+)"#;
 const REDIS_HOST_REGEX: &str =
     r#"(?mi)(?:REDIS_HOST|CACHE_URL|redis\.host|cache\.redis)\s*[=:]\s*["']?([^\s;,"'\n}]+)"#;
@@ -91,6 +91,14 @@ struct ScanContext {
 }
 
 impl ScanContext {
+    fn is_not_found(error: &anyhow::Error) -> bool {
+        error.chain().any(|cause| {
+            cause
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|io_error| io_error.kind() == std::io::ErrorKind::NotFound)
+        })
+    }
+
     fn record_file_error(&mut self, path: &Path, error: &anyhow::Error) {
         let identity = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         self.discovered.insert(identity.clone());
@@ -964,8 +972,15 @@ impl ConfigScanner {
         max_entries: usize,
         max_depth: usize,
     ) -> Result<Vec<PathBuf>> {
-        if !root.exists() {
-            return Ok(Vec::new());
+        match fs::metadata(root) {
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => anyhow::bail!("Config root is not a directory: {}", root.display()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("Unable to inspect config directory {}", root.display())
+                })
+            }
         }
 
         let mut files = Vec::new();
@@ -1318,6 +1333,9 @@ impl ConfigScanner {
         context.audit.files_discovered = context.discovered.len();
 
         let result = (|| {
+            fs::symlink_metadata(path).with_context(|| {
+                format!("Unable to inspect config candidate {}", path.display())
+            })?;
             if !Self::path_is_within_search_root(path, &identity, roots) {
                 anyhow::bail!("Config path resolves outside configured scan roots");
             }
@@ -1389,7 +1407,12 @@ impl ConfigScanner {
                 Some(content)
             }
             Err(error) => {
-                context.record_file_error(path, &error);
+                if ScanContext::is_not_found(&error) {
+                    context.discovered.remove(&identity);
+                    context.audit.files_discovered = context.discovered.len();
+                } else {
+                    context.record_file_error(path, &error);
+                }
                 context.contents.insert(identity, None);
                 None
             }
@@ -1466,7 +1489,7 @@ mod tests {
 
     #[test]
     fn scanner_version_identifies_current_database_discovery_rules() {
-        assert_eq!(SCANNER_VERSION, "config-scanner/7");
+        assert_eq!(SCANNER_VERSION, "config-scanner/8");
     }
 
     #[test]
@@ -1535,11 +1558,11 @@ mod tests {
         assert!(ConfigScanner::read_config_file_with_roots(&fifo, &mut context, &roots).is_none());
 
         #[cfg(target_os = "linux")]
-        let expected_discovered = 5;
-        #[cfg(all(unix, not(target_os = "linux")))]
         let expected_discovered = 4;
-        #[cfg(not(unix))]
+        #[cfg(all(unix, not(target_os = "linux")))]
         let expected_discovered = 3;
+        #[cfg(not(unix))]
+        let expected_discovered = 2;
         assert_eq!(context.audit.files_discovered, expected_discovered);
         assert_eq!(context.audit.files_parsed, 1);
         assert_eq!(context.audit.files_skipped, expected_discovered - 1);
@@ -1579,6 +1602,28 @@ mod tests {
         assert!(depth_limit.contains("directory depth limit"));
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn absent_optional_config_roots_and_files_are_not_scan_failures() {
+        let root = std::env::temp_dir().join(format!(
+            "screamless-absent-config-root-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        assert!(ConfigScanner::config_files_under(&root).unwrap().is_empty());
+
+        let mut context = super::ScanContext::default();
+        let missing_file = root.join("optional.env");
+        assert!(ConfigScanner::read_config_file_with_roots(
+            &missing_file,
+            &mut context,
+            &[root.to_str().unwrap()]
+        )
+        .is_none());
+        assert_eq!(context.audit.files_discovered, 0);
+        assert_eq!(context.audit.files_skipped, 0);
+        assert!(context.audit.errors.is_empty());
     }
 
     #[test]
