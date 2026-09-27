@@ -84,10 +84,11 @@ impl<'a> Reporter<'a> {
         let analysis = analyzer.analyze(&hostname, 168)?;
 
         let json = json!({
-            "schema_version": "2.0",
+            "schema_version": "2.1",
             "generated_at": Utc::now().to_rfc3339(),
             "collector_version": env!("CARGO_PKG_VERSION"),
             "server": hostname,
+            "host_identity": analysis.host_identity,
             "observation_period": {
                 "start": analysis.observation_span.0.to_rfc3339(),
                 "end": analysis.observation_span.1.to_rfc3339(),

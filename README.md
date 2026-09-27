@@ -142,8 +142,9 @@ The `infrastructure --format json` integration output declares schema version
 hosts as an ordered array and reports site listener evidence without claiming
 virtual-host health.
 
-The `report --format json` output declares schema version `2.0` and includes
-`generated_at` and `collector_version` metadata.
+The `report --format json` output declares schema version `2.1` and includes
+`generated_at`, `collector_version`, and `host_identity` (hostname aliases,
+machine identifiers, and observed interface addresses) metadata.
 
 ## Commands
 

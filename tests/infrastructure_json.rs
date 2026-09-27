@@ -94,7 +94,9 @@ fn report_json_is_versioned_and_stdout_only() {
     );
     assert!(output.stderr.is_empty(), "unexpected stderr");
     let json: Value = serde_json::from_slice(&output.stdout).expect("stdout must be JSON only");
-    assert_eq!(json["schema_version"], "2.0");
+    assert_eq!(json["schema_version"], "2.1");
+    assert!(json["host_identity"].is_object());
+    assert!(json["host_identity"].get("interface_addresses").is_some());
     assert_eq!(json["collector_version"], env!("CARGO_PKG_VERSION"));
     assert!(json["generated_at"].as_str().is_some());
     assert!(json["observation_period"].is_object());
