@@ -1,0 +1,7 @@
+[
+  {"unit_file": "hourly.timer", "state": "enabled", "preset": "enabled"},
+  {"unit_file": "delayed.timer", "state": "enabled", "preset": "enabled"},
+  {"unit_file": "disabled.timer", "state": "disabled", "preset": "enabled"},
+  {"unit_file": "masked.timer", "state": "masked", "preset": "enabled"},
+  {"unit_file": "static.timer", "state": "static", "preset": "-"}
+]

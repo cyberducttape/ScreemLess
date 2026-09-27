@@ -26,6 +26,8 @@
   IPv6, process attribution, listeners, UDP, and normal tool headers.
 - Exercise config parsers against a deterministic adversarial text corpus to
   catch panics and brittle assumptions without nondeterministic fuzz tests.
+- Inventory installed systemd timer units as well as scheduled timers and
+  merge enabled/active state only when systemd reports it.
 - Preserve recognized software processes in inventory when `/proc/PID/exe`
   cannot be read, marking the version unavailable instead of omitting evidence.
 - Apply Nginx's default HTTP port to server blocks without `listen` directives

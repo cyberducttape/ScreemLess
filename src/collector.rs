@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::{self, Read};
 use std::path::Path;
@@ -1208,22 +1208,57 @@ impl Collector {
     }
 
     fn collect_systemd_timers() -> Result<Vec<SystemdTimer>> {
+        let scheduled = Self::run_systemctl_json(
+            &["list-timers", "--all", "--no-pager", "--output=json"],
+            "list-timers",
+        )?;
+        let unit_files = Self::run_systemctl_json(
+            &[
+                "list-unit-files",
+                "--type=timer",
+                "--no-pager",
+                "--output=json",
+            ],
+            "list-unit-files",
+        )?;
+        let loaded_units = Self::run_systemctl_json(
+            &[
+                "list-units",
+                "--all",
+                "--type=timer",
+                "--no-pager",
+                "--output=json",
+            ],
+            "list-units",
+        )?;
+
+        let scheduled = Self::parse_systemd_timers_json(&scheduled)
+            .context("Failed to parse systemd timer schedule inventory")?;
+        let unit_files = Self::parse_systemd_timer_unit_files_json(&unit_files)
+            .context("Failed to parse systemd timer unit-file states")?;
+        let loaded_units = Self::parse_systemd_loaded_timer_states_json(&loaded_units)
+            .context("Failed to parse systemd loaded timer states")?;
+        Ok(Self::merge_systemd_timer_inventory(
+            scheduled,
+            unit_files,
+            loaded_units,
+        ))
+    }
+
+    fn run_systemctl_json(args: &[&str], operation: &str) -> Result<Vec<u8>> {
         let systemctl = Self::trusted_command_path("systemctl")
             .ok_or_else(|| anyhow!("No trusted systemctl utility found"))?;
         let output = Self::run_bounded_command(
             systemctl,
-            &["list-timers", "--all", "--output=json"],
+            args,
             INVENTORY_PROBE_TIMEOUT,
             SOCKET_PROBE_OUTPUT_LIMIT,
         )
-        .context("Failed to run systemctl list-timers")?;
-
+        .with_context(|| format!("Failed to run systemctl {operation}"))?;
         if !output.status.success() {
-            return Err(anyhow!("systemctl list-timers exited unsuccessfully"));
+            return Err(anyhow!("systemctl {operation} exited unsuccessfully"));
         }
-
-        Self::parse_systemd_timers_json(&output.stdout)
-            .context("Failed to parse systemd timer inventory")
+        Ok(output.stdout)
     }
 
     fn parse_systemd_timers_json(bytes: &[u8]) -> Result<Vec<SystemdTimer>> {
@@ -1264,6 +1299,96 @@ impl Collector {
                 })
             })
             .collect()
+    }
+
+    fn parse_systemd_timer_unit_files_json(bytes: &[u8]) -> Result<BTreeMap<String, Option<bool>>> {
+        let json = serde_json::from_slice::<serde_json::Value>(bytes)
+            .context("systemd returned invalid unit-file JSON")?;
+        let records = json
+            .as_array()
+            .or_else(|| json.get("unit_files").and_then(|value| value.as_array()))
+            .ok_or_else(|| anyhow!("systemd JSON did not contain a unit-file list"))?;
+        let mut unit_files = BTreeMap::new();
+        for (index, record) in records.iter().enumerate() {
+            if !record.is_object() {
+                return Err(anyhow!("unit-file entry {index} was not an object"));
+            }
+            let unit = record
+                .get("unit_file")
+                .and_then(serde_json::Value::as_str)
+                .filter(|unit| Self::systemd_timer_name(unit).is_some())
+                .ok_or_else(|| anyhow!("unit-file entry {index} had no valid timer unit"))?;
+            let enabled = match record.get("state").and_then(serde_json::Value::as_str) {
+                Some("enabled" | "enabled-runtime") => Some(true),
+                Some("disabled" | "masked" | "masked-runtime") => Some(false),
+                _ => None,
+            };
+            unit_files.insert(unit.to_string(), enabled);
+        }
+        Ok(unit_files)
+    }
+
+    fn parse_systemd_loaded_timer_states_json(
+        bytes: &[u8],
+    ) -> Result<BTreeMap<String, Option<bool>>> {
+        let json = serde_json::from_slice::<serde_json::Value>(bytes)
+            .context("systemd returned invalid loaded-unit JSON")?;
+        let records = json
+            .as_array()
+            .or_else(|| json.get("units").and_then(|value| value.as_array()))
+            .ok_or_else(|| anyhow!("systemd JSON did not contain a loaded-unit list"))?;
+        let mut loaded = BTreeMap::new();
+        for (index, record) in records.iter().enumerate() {
+            if !record.is_object() {
+                return Err(anyhow!("loaded-unit entry {index} was not an object"));
+            }
+            let unit = record
+                .get("unit")
+                .and_then(serde_json::Value::as_str)
+                .filter(|unit| Self::systemd_timer_name(unit).is_some())
+                .ok_or_else(|| anyhow!("loaded-unit entry {index} had no valid timer unit"))?;
+            let active = match record.get("active").and_then(serde_json::Value::as_str) {
+                Some("active") => Some(true),
+                Some("inactive") => Some(false),
+                _ => None,
+            };
+            loaded.insert(unit.to_string(), active);
+        }
+        Ok(loaded)
+    }
+
+    fn systemd_timer_name(unit: &str) -> Option<&str> {
+        unit.strip_suffix(".timer").filter(|name| !name.is_empty())
+    }
+
+    fn merge_systemd_timer_inventory(
+        scheduled: Vec<SystemdTimer>,
+        unit_files: BTreeMap<String, Option<bool>>,
+        loaded_units: BTreeMap<String, Option<bool>>,
+    ) -> Vec<SystemdTimer> {
+        let mut timers = scheduled
+            .into_iter()
+            .map(|timer| (timer.unit.clone(), timer))
+            .collect::<BTreeMap<_, _>>();
+        for (unit, enabled) in unit_files {
+            let entry = timers.entry(unit.clone()).or_insert_with(|| SystemdTimer {
+                name: Self::systemd_timer_name(&unit).unwrap_or(&unit).to_string(),
+                unit,
+                enabled: None,
+                active: None,
+            });
+            entry.enabled = enabled;
+        }
+        for (unit, active) in loaded_units {
+            let entry = timers.entry(unit.clone()).or_insert_with(|| SystemdTimer {
+                name: Self::systemd_timer_name(&unit).unwrap_or(&unit).to_string(),
+                unit,
+                enabled: None,
+                active: None,
+            });
+            entry.active = active;
+        }
+        timers.into_values().collect()
     }
 
     async fn collect_dns_names(
@@ -1416,6 +1541,50 @@ mod tests {
         assert!(Collector::parse_systemd_timers_json(br#"[{"unit":5}]"#).is_err());
         assert!(Collector::parse_systemd_timers_json(br#"[{"unit":"backup.service"}]"#).is_err());
         assert!(Collector::parse_systemd_timers_json(b"not json").is_err());
+    }
+
+    #[test]
+    fn systemd_v259_timer_schedule_install_state_and_runtime_state_are_merged() {
+        let scheduled = Collector::parse_systemd_timers_json(include_bytes!(
+            "../tests/fixtures/systemd/list-timers-v259.json"
+        ))
+        .unwrap();
+        let unit_files = Collector::parse_systemd_timer_unit_files_json(include_bytes!(
+            "../tests/fixtures/systemd/list-unit-files-v259.json"
+        ))
+        .unwrap();
+        let loaded_units = Collector::parse_systemd_loaded_timer_states_json(include_bytes!(
+            "../tests/fixtures/systemd/list-units-v259.json"
+        ))
+        .unwrap();
+        let timers = Collector::merge_systemd_timer_inventory(scheduled, unit_files, loaded_units);
+
+        assert_eq!(timers.len(), 7);
+        let timer = |name: &str| timers.iter().find(|timer| timer.name == name).unwrap();
+        assert_eq!(timer("hourly").enabled, Some(true));
+        assert_eq!(timer("hourly").active, Some(true));
+        assert_eq!(timer("disabled").enabled, Some(false));
+        assert_eq!(timer("disabled").active, Some(false));
+        assert_eq!(timer("masked").enabled, Some(false));
+        assert_eq!(timer("masked").active, None);
+        assert_eq!(timer("static").enabled, None);
+        assert_eq!(timer("failed").active, None);
+        assert_eq!(timer("transient").enabled, None);
+        assert_eq!(timer("transient").active, Some(false));
+    }
+
+    #[test]
+    fn systemd_state_parsers_reject_wrong_unit_types_and_bad_json() {
+        assert!(Collector::parse_systemd_timer_unit_files_json(
+            br#"[{"unit_file":"backup.service","state":"enabled"}]"#
+        )
+        .is_err());
+        assert!(Collector::parse_systemd_loaded_timer_states_json(
+            br#"[{"unit":"backup.service","active":"active"}]"#
+        )
+        .is_err());
+        assert!(Collector::parse_systemd_timer_unit_files_json(b"not json").is_err());
+        assert!(Collector::parse_systemd_loaded_timer_states_json(b"not json").is_err());
     }
 
     #[test]

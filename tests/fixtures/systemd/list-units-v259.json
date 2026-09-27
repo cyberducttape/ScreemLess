@@ -1,0 +1,7 @@
+[
+  {"unit": "hourly.timer", "load": "loaded", "active": "active", "sub": "waiting", "description": "Hourly activity"},
+  {"unit": "delayed.timer", "load": "loaded", "active": "active", "sub": "waiting", "description": "Delayed activity"},
+  {"unit": "disabled.timer", "load": "loaded", "active": "inactive", "sub": "dead", "description": "Disabled activity"},
+  {"unit": "failed.timer", "load": "loaded", "active": "failed", "sub": "failed", "description": "Failed activity"},
+  {"unit": "transient.timer", "load": "loaded", "active": "inactive", "sub": "dead", "description": "Transient activity"}
+]

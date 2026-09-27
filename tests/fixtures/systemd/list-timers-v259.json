@@ -1,0 +1,4 @@
+[
+  {"next": 1800000000000000, "left": 60000000, "last": 1799999940000000, "passed": 0, "unit": "hourly.timer", "activates": "hourly.service"},
+  {"next": 1800003600000000, "left": 3600000000, "last": 1799996400000000, "passed": 3600000000, "unit": "delayed.timer", "activates": "delayed.service"}
+]
