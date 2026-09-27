@@ -104,10 +104,37 @@ jobs:
 
       - name: Verify release binary and systemd unit
         run: |
+          set -euo pipefail
           test -x target/release/screamless
           target/release/screamless --help >/dev/null
           sudo install -m 0755 target/release/screamless /usr/local/bin/screamless
           systemd-analyze verify packaging/screamless-agent.service
+          sudo install -m 0644 packaging/screamless-agent.service /etc/systemd/system/screamless-agent.service
+          sudo install -d -o root -g root -m 0750 /var/lib/screamless
+          sudo systemctl daemon-reload
+          cleanup() {
+            status=$?
+            sudo systemctl stop screamless-agent.service >/dev/null 2>&1 || true
+            if ((status != 0)); then
+              sudo journalctl -u screamless-agent.service --no-pager -n 100 || true
+            fi
+          }
+          trap cleanup EXIT
+          sudo systemctl start screamless-agent.service
+          for attempt in {1..30}; do
+            if sudo systemctl is-active --quiet screamless-agent.service; then
+              if sudo test -s /var/lib/screamless/screamless.db; then
+                break
+              fi
+            else
+              sudo systemctl status --no-pager --full screamless-agent.service || true
+              exit 1
+            fi
+            sleep 1
+          done
+          sudo systemctl is-active --quiet screamless-agent.service
+          sudo test -s /var/lib/screamless/screamless.db
+          sudo systemctl stop screamless-agent.service
 
   dashboard-browser:
     name: Dashboard drag interaction (Chromium and Firefox)
