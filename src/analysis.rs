@@ -1489,7 +1489,7 @@ impl<'a> Analyzer<'a> {
             .zip(last_observation)
             .map(|(first, last)| (last - first).num_seconds().max(0))
             .unwrap_or(0);
-        let interval_seconds = Self::estimated_interval_seconds(snapshots);
+        let interval_seconds = Self::estimated_interval_seconds(&window_snapshots);
         let expected_samples =
             ((requested_seconds as f64 / interval_seconds as f64).ceil() as usize).max(1);
         let mut occupied_buckets = HashSet::new();
@@ -1634,13 +1634,13 @@ impl<'a> Analyzer<'a> {
             ));
         }
 
-        let privileges = if !snapshots.is_empty()
-            && snapshots
+        let privileges = if !window_snapshots.is_empty()
+            && window_snapshots
                 .iter()
                 .all(|snapshot| snapshot.privileges == "full")
         {
             "full".to_string()
-        } else if snapshots
+        } else if window_snapshots
             .iter()
             .any(|snapshot| snapshot.privileges == "restricted")
         {
@@ -1748,7 +1748,7 @@ impl<'a> Analyzer<'a> {
             && snapshot.probe_statuses.host_identity.is_complete()
     }
 
-    fn estimated_interval_seconds(snapshots: &[ObservationSnapshot]) -> i64 {
+    fn estimated_interval_seconds(snapshots: &[&ObservationSnapshot]) -> i64 {
         let mut intervals = snapshots
             .iter()
             .filter_map(|snapshot| snapshot.sampling_interval_seconds)
@@ -1999,6 +1999,33 @@ mod tests {
         assert_eq!(coverage.successful_samples, 60);
         assert_eq!(coverage.coverage_percent, 100.0);
         assert_eq!(coverage.evidence_quality, "HIGH");
+    }
+
+    #[test]
+    fn coverage_cadence_and_privileges_ignore_snapshots_outside_requested_window() {
+        let now = Utc::now();
+        let mut snapshots = (0..100)
+            .map(|index| {
+                let mut snapshot = test_snapshot(
+                    now - chrono::Duration::hours(2) - chrono::Duration::hours(index),
+                );
+                snapshot.sampling_interval_seconds = Some(3600);
+                snapshot.privileges = "restricted".to_string();
+                snapshot
+            })
+            .collect::<Vec<_>>();
+        for minutes_ago in [60, 0] {
+            let mut snapshot = test_snapshot(now - chrono::Duration::minutes(minutes_ago));
+            snapshot.sampling_interval_seconds = Some(60);
+            snapshot.privileges = "full".to_string();
+            snapshots.push(snapshot);
+        }
+
+        let coverage = Analyzer::build_observation_coverage(&snapshots, now, 1);
+        assert_eq!(coverage.expected_samples, 60);
+        assert_eq!(coverage.successful_samples, 2);
+        assert!(coverage.coverage_percent < 4.0);
+        assert_eq!(coverage.privileges, "full");
     }
 
     #[test]
