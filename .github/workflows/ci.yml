@@ -61,6 +61,24 @@ jobs:
             "$test_binary" --exact \
             collector::tests::software_inventory_never_executes_the_observed_executable
 
+      - name: Verify collector under its bounded service capabilities
+        run: |
+          set -euo pipefail
+          test_binary=
+          for candidate in target/debug/deps/screamless-*; do
+            if [[ -x "$candidate" && ! -d "$candidate" ]]; then
+              test_binary="$candidate"
+              break
+            fi
+          done
+          test -n "$test_binary"
+          sudo -n setpriv --bounding-set=-all,+dac_read_search,+net_admin,+sys_ptrace \
+            env SCREAMLESS_REQUIRE_ROOT_TEST=1 "$test_binary" --exact \
+            collector::tests::software_inventory_never_executes_the_observed_executable
+          sudo -n setpriv --bounding-set=-all,+dac_read_search,+net_admin,+sys_ptrace \
+            "$test_binary" --exact \
+            collector::tests::live_loopback_tcp_connection_is_visible_to_socket_collector
+
       - name: Audit dependencies
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:

@@ -20,7 +20,8 @@ for directive in \
     'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK' \
     'RestrictNamespaces=yes' \
     'RestrictRealtime=yes' \
-    'RestrictSUIDSGID=yes'; do
+    'RestrictSUIDSGID=yes' \
+    'CapabilityBoundingSet=CAP_DAC_READ_SEARCH CAP_NET_ADMIN CAP_SYS_PTRACE'; do
     grep -Fxq "$directive" "$SERVICE_UNIT" || {
         echo "Missing systemd hardening directive: $directive" >&2
         exit 1
