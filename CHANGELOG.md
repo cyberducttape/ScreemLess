@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Track interface-address collection as an explicit host-identity probe, include
+  host identity in report JSON schema 2.1, and treat missing identity status in
+  legacy records as unknown rather than complete.
+- Harden the privileged systemd agent with device/filesystem isolation, restricted
+  address families, and a capability bounding set; CI starts the unit and verifies
+  it stores a snapshot under those restrictions.
+- Document root access, bounded capabilities, and stable host identifiers as
+  sensitive data in generated reports.
 - Render configured website evidence per site in the dashboard, distinguishing
   observed listeners from unknown/unmatched state and labeling socket activity
   as observations rather than request counts.
