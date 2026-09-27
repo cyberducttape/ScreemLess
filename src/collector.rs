@@ -1799,19 +1799,16 @@ mod tests {
         assert!(fallback_called);
         assert_eq!(from_text.get("backup.timer"), Some(&Some(true)));
 
-        let mut fallback_called = false;
         let from_json = Collector::parse_systemctl_output_with_fallback(
             include_bytes!("../tests/fixtures/systemd/list-unit-files-v259.json"),
             true,
             "list-unit-files",
             Collector::parse_systemd_timer_unit_files_json,
             || {
-                fallback_called = true;
                 unreachable!("valid JSON must not run the text fallback")
             },
         )
         .unwrap();
-        assert!(!fallback_called);
         assert_eq!(from_json.get("hourly.timer"), Some(&Some(true)));
     }
 
