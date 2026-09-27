@@ -1,8 +1,14 @@
 use crate::models::ObservationSnapshot;
+use flate2::read::GzDecoder;
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use rusqlite::{types::Type, Connection, OpenFlags, Result as SqlResult};
+use std::io::{Read, Write};
 use std::path::Path;
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
+const COMPRESSED_SNAPSHOT_PREFIX: &[u8] = b"SCLZ1";
+const MAX_DECOMPRESSED_SNAPSHOT_BYTES: usize = 64 * 1024 * 1024;
 
 pub struct Database {
     conn: Connection,
@@ -25,12 +31,7 @@ impl SnapshotWindow<'_> {
         let snapshots = stmt
             .query_map(
                 rusqlite::params![hostname, self.since_timestamp, self.until_timestamp],
-                |row| {
-                    let json = row.get::<_, String>(0)?;
-                    serde_json::from_str(&json).map_err(|error| {
-                        rusqlite::Error::FromSqlConversionFailure(0, Type::Text, Box::new(error))
-                    })
-                },
+                |row| Database::decode_snapshot(row.get_ref(0)?.as_bytes()?),
             )?
             .collect();
         snapshots
@@ -48,10 +49,7 @@ impl SnapshotWindow<'_> {
             self.until_timestamp
         ])?;
         while let Some(row) = rows.next()? {
-            let json = row.get::<_, String>(0)?;
-            let snapshot = serde_json::from_str(&json).map_err(|error| {
-                rusqlite::Error::FromSqlConversionFailure(0, Type::Text, Box::new(error))
-            })?;
+            let snapshot = Database::decode_snapshot(row.get_ref(0)?.as_bytes()?)?;
             visit(snapshot)?;
         }
         Ok(())
@@ -59,6 +57,61 @@ impl SnapshotWindow<'_> {
 }
 
 impl Database {
+    fn encode_snapshot(snapshot: &ObservationSnapshot) -> SqlResult<Vec<u8>> {
+        let json = serde_json::to_vec(snapshot)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        if json.len() < 1024 || json.len() > MAX_DECOMPRESSED_SNAPSHOT_BYTES {
+            return Ok(json);
+        }
+
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+        encoder
+            .write_all(&json)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        let compressed = encoder
+            .finish()
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        if compressed.len() + COMPRESSED_SNAPSHOT_PREFIX.len() >= json.len() {
+            return Ok(json);
+        }
+
+        let mut encoded = Vec::with_capacity(COMPRESSED_SNAPSHOT_PREFIX.len() + compressed.len());
+        encoded.extend_from_slice(COMPRESSED_SNAPSHOT_PREFIX);
+        encoded.extend_from_slice(&compressed);
+        Ok(encoded)
+    }
+
+    fn decode_snapshot(data: &[u8]) -> SqlResult<ObservationSnapshot> {
+        let decoded;
+        let json = if let Some(compressed) = data.strip_prefix(COMPRESSED_SNAPSHOT_PREFIX) {
+            let decoder = GzDecoder::new(compressed);
+            let mut bounded = decoder.take(MAX_DECOMPRESSED_SNAPSHOT_BYTES as u64 + 1);
+            decoded = {
+                let mut bytes = Vec::new();
+                bounded.read_to_end(&mut bytes).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(0, Type::Blob, Box::new(error))
+                })?;
+                bytes
+            };
+            if decoded.len() > MAX_DECOMPRESSED_SNAPSHOT_BYTES {
+                return Err(rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    Type::Blob,
+                    Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "decompressed snapshot exceeds the 64 MiB safety limit",
+                    )),
+                ));
+            }
+            decoded.as_slice()
+        } else {
+            data
+        };
+        serde_json::from_slice(json).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(0, Type::Blob, Box::new(error))
+        })
+    }
+
     pub fn new<P: AsRef<Path>>(path: P) -> SqlResult<Self> {
         let path = path.as_ref();
         let conn = Connection::open_with_flags(
@@ -110,7 +163,7 @@ impl Database {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 hostname TEXT NOT NULL,
                 timestamp INTEGER NOT NULL,
-                data TEXT NOT NULL,
+                data BLOB NOT NULL,
                 UNIQUE(hostname, timestamp)
             );
 
@@ -209,13 +262,17 @@ impl Database {
                     PRAGMA user_version = 3;",
                 )?;
             }
+            if version < 4 {
+                // New snapshots may be stored as bounded gzip blobs. Readers
+                // also accept legacy uncompressed JSON TEXT rows.
+                tx.execute_batch("PRAGMA user_version = 4;")?;
+            }
         }
         tx.commit()
     }
 
     pub fn store_snapshot(&mut self, snapshot: &ObservationSnapshot) -> SqlResult<()> {
-        let snapshot_json = serde_json::to_string(&snapshot)
-            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        let snapshot_data = Self::encode_snapshot(snapshot)?;
 
         let timestamp = snapshot.timestamp.timestamp_millis();
         let tx = self.conn.transaction()?;
@@ -224,7 +281,7 @@ impl Database {
             "INSERT INTO snapshots (hostname, timestamp, data)
              VALUES (?1, ?2, ?3)
              ON CONFLICT(hostname, timestamp) DO UPDATE SET data = excluded.data",
-            rusqlite::params![&snapshot.hostname, timestamp, snapshot_json],
+            rusqlite::params![&snapshot.hostname, timestamp, snapshot_data],
         )?;
 
         tx.commit()?;
@@ -239,15 +296,12 @@ impl Database {
              ORDER BY timestamp DESC LIMIT 1",
         )?;
 
-        let result = stmt.query_row(rusqlite::params![hostname], |row| row.get::<_, String>(0));
+        let result = stmt.query_row(rusqlite::params![hostname], |row| {
+            Self::decode_snapshot(row.get_ref(0)?.as_bytes()?)
+        });
 
         match result {
-            Ok(json) => {
-                let snapshot = serde_json::from_str(&json).map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(0, Type::Text, Box::new(error))
-                })?;
-                Ok(Some(snapshot))
-            }
+            Ok(snapshot) => Ok(Some(snapshot)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e),
         }
@@ -308,7 +362,7 @@ impl Database {
 
 #[cfg(test)]
 mod tests {
-    use super::Database;
+    use super::{Database, COMPRESSED_SNAPSHOT_PREFIX, SCHEMA_VERSION};
     use crate::models::*;
     use chrono::Utc;
     use rusqlite::Connection;
@@ -404,6 +458,105 @@ mod tests {
             );
         }
 
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn large_snapshots_are_compressed_and_round_trip_with_legacy_json() {
+        let mut db = Database::new(":memory:").unwrap();
+        let mut snapshot = test_snapshot("compressed-host", Utc::now());
+        snapshot.processes = (0..1000)
+            .map(|pid| Process {
+                pid,
+                name: "worker-process".to_string(),
+                user: "application".to_string(),
+                cmdline: String::new(),
+            })
+            .collect();
+        let uncompressed = serde_json::to_vec(&snapshot).unwrap();
+        db.store_snapshot(&snapshot).unwrap();
+
+        let (storage_type, stored_data): (String, Vec<u8>) = db
+            .conn
+            .query_row(
+                "SELECT typeof(data), data FROM snapshots WHERE hostname = ?1",
+                [&snapshot.hostname],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(storage_type, "blob");
+        assert!(stored_data.starts_with(COMPRESSED_SNAPSHOT_PREFIX));
+        assert!(stored_data.len() < uncompressed.len() / 2);
+
+        let loaded = db
+            .with_snapshot_window(0, i64::MAX, |window| {
+                window.snapshots_for_host("compressed-host")
+            })
+            .unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].processes.len(), 1000);
+        assert_eq!(loaded[0].hostname, snapshot.hostname);
+
+        let legacy = test_snapshot("legacy-json-host", Utc::now());
+        let legacy_json = serde_json::to_string(&legacy).unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO snapshots (hostname, timestamp, data) VALUES (?1, ?2, ?3)",
+                rusqlite::params![
+                    legacy.hostname,
+                    legacy.timestamp.timestamp_millis(),
+                    legacy_json
+                ],
+            )
+            .unwrap();
+        let latest = db.get_latest_snapshot("legacy-json-host").unwrap().unwrap();
+        assert_eq!(latest.hostname, "legacy-json-host");
+    }
+
+    #[test]
+    fn schema_upgrade_preserves_legacy_json_snapshot_rows() {
+        let path = std::env::temp_dir().join(format!(
+            "screamless-db-compressed-migration-{}.db",
+            std::process::id()
+        ));
+        let legacy = test_snapshot("legacy-v3-host", Utc::now());
+        let raw = Connection::open(&path).unwrap();
+        raw.execute_batch(
+            "CREATE TABLE snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                hostname TEXT NOT NULL,
+                timestamp INTEGER NOT NULL,
+                data TEXT NOT NULL,
+                UNIQUE(hostname, timestamp)
+             );
+             PRAGMA user_version = 3;",
+        )
+        .unwrap();
+        raw.execute(
+            "INSERT INTO snapshots (hostname, timestamp, data) VALUES (?1, ?2, ?3)",
+            rusqlite::params![
+                legacy.hostname,
+                legacy.timestamp.timestamp_millis(),
+                serde_json::to_string(&legacy).unwrap()
+            ],
+        )
+        .unwrap();
+        drop(raw);
+
+        let db = Database::new(&path).unwrap();
+        let version: i64 = db
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        assert_eq!(
+            db.get_latest_snapshot("legacy-v3-host")
+                .unwrap()
+                .unwrap()
+                .hostname,
+            "legacy-v3-host"
+        );
         drop(db);
         let _ = std::fs::remove_file(path);
     }

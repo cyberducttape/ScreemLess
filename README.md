@@ -92,11 +92,12 @@ Long-running `observe` sessions retain the most recent 30 days of snapshots auto
 
 ### Storage architecture
 
-The JSON snapshot in `snapshots.data` is the canonical audit/provenance record and
-is the source used by analysis. Legacy normalized relationship tables are retained
-for compatibility with older databases, but new snapshots are not duplicated into
-those tables. This keeps collection to one serialization and one database write
-while preserving the complete evidence needed for future analysis.
+The snapshot in `snapshots.data` is the canonical audit/provenance record and is the
+source used by analysis. Large snapshots are gzip-compressed; older uncompressed JSON
+rows remain readable after the schema upgrade. Legacy normalized relationship tables
+are retained for compatibility with older databases, but new snapshots are not
+duplicated into those tables. This preserves the complete evidence while reducing
+database and write-ahead-log growth.
 
 ### Shutdown Impact
 ```

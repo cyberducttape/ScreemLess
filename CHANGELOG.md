@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Store large canonical snapshots as bounded gzip blobs to reduce database and
+  write-ahead-log growth, while retaining backward reads of legacy JSON rows.
+- Scope estimated sampling cadence and privilege completeness to the requested
+  observation window so older history cannot distort current evidence quality.
 - Do not infer MySQL's default port for protocol-ambiguous `DB_HOST` or
   `DATABASE_HOST` values; retain the endpoint with an unknown port unless its
   protocol is explicit, and version the scanner accordingly.

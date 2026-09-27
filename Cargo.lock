@@ -623,6 +623,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "flate2",
  "glob",
  "libc",
  "procfs",
