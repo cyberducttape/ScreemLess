@@ -121,12 +121,13 @@ jobs:
           }
           trap cleanup EXIT
           sudo systemctl start screamless-agent.service
+          snapshot_filter='.snapshots > 0 and .probe_statuses.host_identity.state == "COMPLETE" and (.host_identity.interface_addresses | length > 0)'
           for attempt in {1..60}; do
             if sudo systemctl is-active --quiet screamless-agent.service; then
               if sudo /usr/local/bin/screamless \
                 --db /var/lib/screamless/screamless.db report \
                 --hostname "$(cat /etc/hostname)" --format json \
-                | jq -e '.snapshots > 0' >/dev/null 2>&1; then
+                | jq -e "$snapshot_filter" >/dev/null 2>&1; then
                 break
               fi
             else
@@ -139,7 +140,7 @@ jobs:
           sudo /usr/local/bin/screamless \
             --db /var/lib/screamless/screamless.db report \
             --hostname "$(cat /etc/hostname)" --format json \
-            | jq -e '.snapshots > 0' >/dev/null
+            | jq -e "$snapshot_filter" >/dev/null
           sudo systemctl stop screamless-agent.service
 
   dashboard-browser:
