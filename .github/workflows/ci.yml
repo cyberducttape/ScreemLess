@@ -32,6 +32,7 @@ jobs:
           bash -n packaging/render-service-unit.sh
           bash -n packaging/validate-service-install-dir.sh
           bash -n packaging/verify-release-version.sh tests/release_metadata.sh
+          bash -n tests/package_artifacts.sh
           sh -n packaging/postinstall.sh packaging/service-activation.sh
           sh -n packaging/preremove.sh packaging/postremove.sh
           bash tests/service_activation.sh
@@ -79,6 +80,9 @@ jobs:
 
       - name: Build release binary
         run: cargo build --locked --release
+
+      - name: Smoke-test Debian and RPM packages
+        run: bash tests/package_artifacts.sh
 
       - name: Verify release binary and systemd unit
         run: |

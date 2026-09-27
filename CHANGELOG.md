@@ -21,6 +21,7 @@
 - Refuse SQLite database paths whose final component is a symbolic link, so a
   privileged collector cannot be redirected to an unintended database target.
 - Run an end-to-end dashboard drag regression test in Chromium and Firefox in CI.
+- Build and inspect Debian/RPM package artifacts in regular CI, not only release jobs.
 - Preserve recognized software processes in inventory when `/proc/PID/exe`
   cannot be read, marking the version unavailable instead of omitting evidence.
 - Apply Nginx's default HTTP port to server blocks without `listen` directives
